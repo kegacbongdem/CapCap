@@ -606,7 +606,7 @@ class LauncherWindow(QDialog):
 
         try:
             service = self._resource_service()
-            is_ok, missing = service.validate_device(self.selected_device)
+            is_ok, missing, _advisory = self._launch_resource_state(service)
             if not is_ok:
                 from PySide6.QtWidgets import QMessageBox
                 labels = [label for _rid, label in missing]
@@ -726,6 +726,25 @@ class LauncherWindow(QDialog):
         from services import ResourceDownloadService
         return ResourceDownloadService(workspace_root())
 
+    def _launch_resource_state(self, service):
+        """Return launch-blocking and advisory resource requirements.
+
+        SenseVoice has a recovery download for installations where the
+        bundled model cannot be detected, but its absence must not prevent a
+        user from opening the Main UI.  The Generate/prepare workflow still
+        performs the exact runtime validation before transcription starts.
+        GPU requirements such as the CUDA pack remain launch-blocking.
+        """
+        _validated, missing = service.validate_device(self.selected_device)
+        blocking = []
+        advisory = []
+        for resource_id, label in missing:
+            if str(resource_id or "").strip().lower().startswith("sensevoice:"):
+                advisory.append((resource_id, label))
+            else:
+                blocking.append((resource_id, label))
+        return (not blocking), blocking, advisory
+
     def _validate_resources_for_device(self):
         try:
             service = self._resource_service()
@@ -734,7 +753,7 @@ class LauncherWindow(QDialog):
             self.new_btn.setEnabled(True)
             return
         device = self.selected_device
-        is_ok, missing = service.validate_device(device)
+        is_ok, missing, advisory = self._launch_resource_state(service)
         self.new_btn.setEnabled(is_ok)
         if device == "cuda":
             has_gpu = True
@@ -762,13 +781,24 @@ class LauncherWindow(QDialog):
                 self.gpu_btn.setEnabled(True)
                 self.gpu_btn.setText("GPU (Recommended)")
                 self._update_gpu_label(has_gpu, _gpu_name, cuda_ready)
-        if is_ok:
+        if is_ok and not advisory:
             self._missing_label.hide()
             self._missing_label.setText("")
             if hasattr(self, "new_btn") and self.new_btn.toolTip():
                 self.new_btn.setToolTip("")
+        elif is_ok:
+            labels = [label for _rid, label in advisory]
+            text = (
+                "SenseVoice is not detected yet. You can continue to the Main UI; "
+                "download SenseVoice from Manage Resources before using it for transcription."
+            )
+            self._missing_label.setText(text)
+            self._missing_label.show()
+            self.new_btn.setToolTip(text)
         else:
             labels = [label for _rid, label in missing]
+            if advisory:
+                labels.extend(label for _rid, label in advisory)
             if device == "cpu":
                 prefix = "CPU mode needs:"
             else:

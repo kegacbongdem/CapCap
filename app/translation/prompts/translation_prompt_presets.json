@@ -1,0 +1,107 @@
+[
+  {
+    "id": "general_default",
+    "name": "General / Standard Subtitles",
+    "description": "Balanced standard subtitle translation prompt for general videos.",
+    "languages": [
+      "all"
+    ],
+    "file": "general_default.md"
+  },
+  {
+    "id": "zh_urban",
+    "name": "Chinese → Vietnamese: Urban / Modern / Workplace",
+    "description": "Workplace hierarchy (sếp, tổng tài, quản lý), family, modern romance. Avoids wuxia diction.",
+    "languages": [
+      "zh",
+      "zh-Hans",
+      "zh-Hant"
+    ],
+    "file": "zh_urban.md"
+  },
+  {
+    "id": "zh_wuxia_xianxia",
+    "name": "Chinese → Vietnamese: Wuxia / Xianxia / Historical",
+    "description": "Martial arts & cultivation terminology (giang hồ, sư phụ, chưởng môn, tại hạ, đan điền, linh khí).",
+    "languages": [
+      "zh",
+      "zh-Hans",
+      "zh-Hant"
+    ],
+    "file": "zh_wuxia_xianxia.md"
+  },
+  {
+    "id": "zh_short_drama",
+    "name": "Chinese → Vietnamese: Short Drama / Douyin / Comedy",
+    "description": "Fast-paced punchy dialogue, dramatic turns, high-impact reactions, concise subtitle cues.",
+    "languages": [
+      "zh",
+      "zh-Hans",
+      "zh-Hant"
+    ],
+    "file": "zh_short_drama.md"
+  },
+  {
+    "id": "ja_anime_school",
+    "name": "Japanese → Vietnamese: Anime / School / Slice of Life",
+    "description": "Romaji names (Tanaka Taro, NO Hán-Việt), honorifics (~san, ~kun, ~chan, ~senpai, ~sensei), polite keigo.",
+    "languages": [
+      "ja"
+    ],
+    "file": "ja_anime_school.md"
+  },
+  {
+    "id": "ja_isekai_fantasy",
+    "name": "Japanese → Vietnamese: Isekai / Fantasy / Action",
+    "description": "Romaji names, fantasy adventure terms (dũng giả, ma vương, guild mạo hiểm giả, chiêu thức kỹ năng).",
+    "languages": [
+      "ja"
+    ],
+    "file": "ja_isekai_fantasy.md"
+  },
+  {
+    "id": "ko_drama_modern",
+    "name": "Korean → Vietnamese: K-Drama / Modern / Romance",
+    "description": "Latin/Romaji names (Kim Soo-hyun, NO Hán-Việt), formal 존댓말 (kính ngữ + ạ) vs casual 반말, sunbae/oppa/unnie.",
+    "languages": [
+      "ko"
+    ],
+    "file": "ko_drama_modern.md"
+  },
+  {
+    "id": "ko_hunter_manhwa",
+    "name": "Korean → Vietnamese: Hunter / Dungeon / Manhwa",
+    "description": "Action RPG terms (thợ săn, hầm ngục, cổng gate, người thức tỉnh, bang hội guild, chỉ số status).",
+    "languages": [
+      "ko"
+    ],
+    "file": "ko_hunter_manhwa.md"
+  },
+  {
+    "id": "en_vlog_social",
+    "name": "English → Vietnamese: Vlog / Social Media / TikTok",
+    "description": "Engaging creator voice (mình - các bạn), conversational, punchy, concise phrasing for video.",
+    "languages": [
+      "en"
+    ],
+    "file": "en_vlog_social.md"
+  },
+  {
+    "id": "en_movie_casual",
+    "name": "English → Vietnamese: Movies / Casual Dialogue",
+    "description": "Dynamic natural address forms for I/You depending on character age, rank, and intimacy.",
+    "languages": [
+      "en"
+    ],
+    "file": "en_movie_casual.md"
+  },
+  {
+    "id": "en_documentary_business",
+    "name": "English → Vietnamese: Documentary / Tech / Business",
+    "description": "Formal, authoritative, precise terminology, neutral address (tôi - quý vị / các bạn), objective tone.",
+    "languages": [
+      "en"
+    ],
+    "file": "en_documentary_business.md"
+  }
+]

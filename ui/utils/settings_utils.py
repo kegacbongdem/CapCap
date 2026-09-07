@@ -44,6 +44,7 @@ def save_user_settings(gui):
         s.setValue("ai_dubbing_rewrite", gui.ai_dubbing_rewrite_cb.isChecked())
     if hasattr(gui, "toggle_advanced_btn"):
         s.setValue("advanced_section_open", gui.toggle_advanced_btn.isChecked())
+    s.setValue("translation_preset_id", os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default"))
 
 
 def load_user_settings(gui):
@@ -91,6 +92,7 @@ def load_user_settings(gui):
         ("CAPCUT_STT_WORKERS", "capcut_stt_workers", "5"),
         ("CAPCUT_TTS_BATCH_SIZE", "capcut_tts_batch_size", "60"),
         ("CAPCUT_TTS_WORKERS", "capcut_tts_workers", "30"),
+        ("CAPCAP_TRANSLATION_PRESET_ID", "translation_preset_id", "general_default"),
     ):
         v = str(s.value(s_k, os.getenv(env_k, def_v)) or def_v).strip()
         os.environ[env_k] = v

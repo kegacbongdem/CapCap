@@ -59,3 +59,70 @@ def render_prompt(template_name: str, **values) -> str:
         )
 
     return _PLACEHOLDER_RE.sub(lambda match: str(values[match.group(1)]), template).strip()
+
+
+def load_translation_presets() -> list[dict]:
+    """Load the registered translation prompt presets from JSON catalog."""
+    path = prompt_directory() / "translation_prompt_presets.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def get_preset_by_id(preset_id: str) -> dict | None:
+    presets = load_translation_presets()
+    for item in presets:
+        if item.get("id") == preset_id:
+            return item
+    return None
+
+
+def render_preset_prompt(preset_id: str, **values) -> str:
+    """Render a preset prompt template with source/target languages and style."""
+    preset = get_preset_by_id(preset_id)
+    preset_file = f"presets/{preset.get('file', 'general_default.md')}" if preset else "presets/general_default.md"
+    full_path = prompt_directory() / preset_file
+    if not full_path.exists():
+        full_path = prompt_directory() / "subtitle_translation.system.md"
+
+    template = full_path.read_text(encoding="utf-8").strip()
+    merged_values = {
+        "source_lang": "auto",
+        "target_lang": "vi",
+        "style_clause": "",
+    }
+    merged_values.update(values)
+    return _PLACEHOLDER_RE.sub(lambda match: str(merged_values.get(match.group(1), "")), template).strip()
+
+
+def extract_preset_rules(preset_id: str) -> str:
+    """Extract the specific naming, honorific, and address guidelines from a preset."""
+    if not preset_id or preset_id == "general_default":
+        return ""
+    preset = get_preset_by_id(preset_id)
+    if not preset:
+        return ""
+    preset_file = f"presets/{preset.get('file', '')}"
+    full_path = prompt_directory() / preset_file
+    if not full_path.exists():
+        return ""
+    try:
+        content = full_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    lines = content.splitlines()
+    rule_lines = []
+    in_rules = False
+    for line in lines:
+        if line.startswith("### "):
+            in_rules = True
+        if in_rules:
+            if line.strip().startswith("Never merge, omit"):
+                break
+            rule_lines.append(line)
+    return "\n".join(rule_lines).strip()
+

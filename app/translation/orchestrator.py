@@ -32,6 +32,8 @@ class TranslationOrchestrator:
         ms_batch_size: int = 50,
         polish_batch_size: int = 80,
         style_instruction: str = "",
+        custom_system_prompt: str = "",
+        override_provider: str = "",
         batch_callback=None,
     ) -> TranslationResult:
         if not segments:
@@ -42,19 +44,26 @@ class TranslationOrchestrator:
         warnings = []
         optimize_subtitles = False
 
+        if override_provider == "google":
+            enable_polish = False
+            ms_batch_size = polish_batch_size or ms_batch_size
+
         if enable_polish:
-            provider_type, polisher = self._resolve_ai_provider()
+            provider_type, polisher = self._resolve_ai_provider(override_provider=override_provider)
             if polisher.is_configured():
                 try:
                     mode_label = self._describe_ai_provider(provider_type)
                     merged_style = str(style_instruction or "")
                     env_batch_str = (os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS") or "").strip()
-                    if env_batch_str.isdigit() and int(env_batch_str) > 0:
+                    if polish_batch_size and polish_batch_size > 0:
+                        effective_batch_size = polish_batch_size
+                    elif env_batch_str.isdigit() and int(env_batch_str) > 0:
                         effective_batch_size = int(env_batch_str)
                     else:
                         effective_batch_size = min(40, polish_batch_size) if provider_type == "ollama" else polish_batch_size
+                    active_preset = (os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default") if not custom_system_prompt else "custom"
                     print(
-                        f"[AI Translation] Starting translation (provider: {mode_label}, batch_size={effective_batch_size})..."
+                        f"[AI Translation] Starting translation (provider: {mode_label}, preset: {active_preset}, batch_size={effective_batch_size})..."
                     )
                     translated_texts, providers_used, batch_warnings = self._run_ai_batches(
                         polisher=polisher,
@@ -64,6 +73,7 @@ class TranslationOrchestrator:
                         src_lang=normalized_src,
                         target_lang=target_lang,
                         style_instruction=merged_style,
+                        custom_system_prompt=custom_system_prompt,
                         polish_batch_size=effective_batch_size,
                     )
                     warnings.extend(batch_warnings)
@@ -229,11 +239,13 @@ class TranslationOrchestrator:
         key = (src_lang or "zh").strip().lower()
         return mapping.get(key, src_lang)
 
-    def _resolve_ai_provider(self):
+    def _resolve_ai_provider(self, override_provider: str = ""):
         # All selectable API providers use the same compatible client.  The
         # provider definition here is the only place needed to add another
         # OpenAI-compatible service in the future.
-        configured_provider = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
+        configured_provider = (
+            override_provider or os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "gemini"
+        ).strip().lower()
         provider_type = configured_provider
         if provider_type == "gemini":  # backward compatibility for saved settings
             provider_type = "google_ai_studio"
@@ -257,7 +269,7 @@ class TranslationOrchestrator:
 
     def _describe_ai_provider(self, provider_type: str) -> str:
         names = {"google_ai_studio": "Google AI Studio", "openai": "OpenAI", "ollama": "Ollama"}
-        return f"{names.get(provider_type, 'AI')} ({getattr(self._resolve_ai_provider()[1], 'model_name', '')})"
+        return f"{names.get(provider_type, 'AI')} ({getattr(self._resolve_ai_provider(provider_type)[1], 'model_name', '')})"
 
     def _run_ai_batches(
         self,
@@ -269,6 +281,7 @@ class TranslationOrchestrator:
         src_lang: str,
         target_lang: str,
         style_instruction: str,
+        custom_system_prompt: str = "",
         polish_batch_size: int,
     ) -> tuple[list[str], list[str], list[str]]:
         warnings = []
@@ -298,6 +311,7 @@ class TranslationOrchestrator:
                 src_lang=src_lang,
                 target_lang=target_lang,
                 style_instruction=style_instruction,
+                custom_system_prompt=custom_system_prompt,
                 max_workers=1 if full_context_request else min(len(batches), 4),
             )
         except TranslationValidationError as exc:
@@ -323,6 +337,7 @@ class TranslationOrchestrator:
                     src_lang=src_lang,
                     target_lang=target_lang,
                     style_instruction=style_instruction,
+                    custom_system_prompt=custom_system_prompt,
                     max_workers=min(len(fallback_batches), 4),
                 )
                 print("[AI Translation] Batch translation completed successfully.")
@@ -332,7 +347,7 @@ class TranslationOrchestrator:
                 raise AIBatchTranslationError(str(batch_exc)) from exc
 
     @staticmethod
-    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, max_workers):
+    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, custom_system_prompt="", max_workers):
         """Submit validated ordered batches and merge their results by index."""
         warnings = []
         providers_used = set()
@@ -347,6 +362,7 @@ class TranslationOrchestrator:
                     src_lang=src_lang,
                     target_lang=target_lang,
                     style_instruction=style_instruction,
+                    custom_system_prompt=custom_system_prompt,
                     max_tokens=max_tokens,
                 )
                 future_to_idx[future] = idx

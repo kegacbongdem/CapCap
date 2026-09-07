@@ -1,11 +1,297 @@
 import os
 import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QProgressDialog, QTextEdit, QVBoxLayout
+from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QProgressDialog,
+    QSpinBox,
+    QTextEdit,
+    QVBoxLayout,
+)
 
 from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
-from translation import TranslationOrchestrator, load_prompt_options
+from translation import TranslationOrchestrator, load_prompt_options, load_translation_presets, render_preset_prompt
+
+
+class TranslationPromptDialog(QDialog):
+    def __init__(self, parent, src_lang: str = "zh", target_lang: str = "vi"):
+        super().__init__(parent)
+        self.setWindowTitle("Translation Settings & Prompt Review")
+        self.setMinimumWidth(680)
+        self.setMinimumHeight(600)
+        self.src_lang = str(src_lang or "zh").strip().lower()
+        self.target_lang = str(target_lang or "vi").strip().lower()
+
+        self.selected_provider = "google_ai_studio"
+        self.selected_batch_size = 80
+        self.selected_prompt = ""
+        self.selected_preset_id = "general_default"
+
+        self._init_ui()
+        self._apply_styles()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("Review Translation & AI Prompt")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Configure AI provider, batch size, and prompt preset before running translation.")
+        subtitle.setObjectName("dialogSubtitle")
+        layout.addWidget(subtitle)
+
+        # Top row: Provider & Batch size
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+
+        # AI Provider column
+        provider_col = QVBoxLayout()
+        provider_col.setSpacing(6)
+        provider_label = QLabel("AI Provider:")
+        provider_label.setObjectName("fieldLabel")
+        provider_col.addWidget(provider_label)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("Google AI Studio (Gemini)", "google_ai_studio")
+        self.provider_combo.addItem("OpenAI", "openai")
+        self.provider_combo.addItem("Ollama (Local)", "ollama")
+        self.provider_combo.addItem("Google Translate (free, no key)", "google")
+
+        settings = QSettings("CapCap", "CapCap")
+        current_env = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "google_ai_studio").strip().lower()
+        if current_env == "gemini":
+            current_env = "google_ai_studio"
+        saved_provider = str(settings.value("translation_provider", current_env)).strip().lower()
+        idx_p = self.provider_combo.findData(saved_provider)
+        if idx_p >= 0:
+            self.provider_combo.setCurrentIndex(idx_p)
+        else:
+            self.provider_combo.setCurrentIndex(0)
+        provider_col.addWidget(self.provider_combo)
+        top_row.addLayout(provider_col, stretch=3)
+
+        # Batch size column
+        batch_col = QVBoxLayout()
+        batch_col.setSpacing(6)
+        batch_label = QLabel("Batch Size (Lines / Request):")
+        batch_label.setObjectName("fieldLabel")
+        batch_col.addWidget(batch_label)
+
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 300)
+        self.batch_spin.setSingleStep(10)
+        saved_batch = int(settings.value("translation_batch_size", 80) or 80)
+        self.batch_spin.setValue(saved_batch)
+        batch_col.addWidget(self.batch_spin)
+        top_row.addLayout(batch_col, stretch=2)
+
+        layout.addLayout(top_row)
+
+        # Provider note label
+        self.provider_hint = QLabel()
+        self.provider_hint.setObjectName("fieldHint")
+        layout.addWidget(self.provider_hint)
+
+        # Preset Selector
+        preset_label = QLabel("Content / Prompt Preset:")
+        preset_label.setObjectName("fieldLabel")
+        layout.addWidget(preset_label)
+
+        self.preset_combo = QComboBox()
+        presets = load_translation_presets()
+
+        # Sort presets: matching source language first, then 'all', then others
+        def preset_sort_key(item):
+            langs = item.get("languages", [])
+            if "all" in langs:
+                return 1
+            src_prefix = self.src_lang.split("-")[0]
+            if any(l.startswith(src_prefix) for l in langs):
+                return 0
+            return 2
+
+        sorted_presets = sorted(presets, key=preset_sort_key)
+        for p in sorted_presets:
+            p_id = p.get("id", "")
+            p_name = p.get("name", p_id)
+            self.preset_combo.addItem(p_name, p_id)
+
+        saved_preset = str(
+            settings.value("translation_preset_id", os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default"))
+            or os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default")
+        ).strip()
+        idx_preset = self.preset_combo.findData(saved_preset)
+        if idx_preset >= 0:
+            self.preset_combo.setCurrentIndex(idx_preset)
+        elif self.preset_combo.count() > 0:
+            self.preset_combo.setCurrentIndex(0)
+
+        layout.addWidget(self.preset_combo)
+
+        # Prompt editor
+        prompt_box_label = QLabel("System Prompt (Editable):")
+        prompt_box_label.setObjectName("fieldLabel")
+        layout.addWidget(prompt_box_label)
+
+        self.prompt_edit = QPlainTextEdit()
+        layout.addWidget(self.prompt_edit, stretch=1)
+
+        # Connect signals
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+
+        self._on_provider_changed()
+        self._on_preset_changed()
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        translate_btn = QPushButton("Translate")
+        translate_btn.setObjectName("primaryBtn")
+        translate_btn.setDefault(True)
+        translate_btn.clicked.connect(self._on_translate)
+        btn_row.addWidget(translate_btn)
+
+        layout.addLayout(btn_row)
+
+    def _on_provider_changed(self):
+        provider = self.provider_combo.currentData() or "google_ai_studio"
+        if provider == "google":
+            self.provider_hint.setText("💡 Google Translate translates directly via web API (free, no key). It does not use LLM system prompts.")
+            self.prompt_edit.setEnabled(False)
+            self.preset_combo.setEnabled(False)
+        else:
+            self.provider_hint.setText("")
+            self.prompt_edit.setEnabled(True)
+            self.preset_combo.setEnabled(True)
+
+    def _on_preset_changed(self):
+        preset_id = self.preset_combo.currentData() or "general_default"
+        rendered = render_preset_prompt(
+            preset_id,
+            source_lang=self.src_lang,
+            target_lang=self.target_lang,
+        )
+        self.prompt_edit.setPlainText(rendered)
+
+    def _on_translate(self):
+        self.selected_provider = self.provider_combo.currentData() or "google_ai_studio"
+        self.selected_batch_size = int(self.batch_spin.value())
+        self.selected_prompt = self.prompt_edit.toPlainText().strip()
+        self.selected_preset_id = self.preset_combo.currentData() or "general_default"
+
+        settings = QSettings("CapCap", "CapCap")
+        settings.setValue("translation_provider", self.selected_provider)
+        settings.setValue("translation_batch_size", self.selected_batch_size)
+        settings.setValue("translation_preset_id", self.selected_preset_id)
+        os.environ["CAPCAP_TRANSLATION_PRESET_ID"] = self.selected_preset_id
+
+        self.accept()
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog {
+                background: #0f1724;
+                color: #e8f0fa;
+            }
+            QLabel#dialogTitle {
+                color: #f1f5f9;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QLabel#dialogSubtitle {
+                color: #94a3b8;
+                font-size: 12px;
+                margin-bottom: 4px;
+            }
+            QLabel#fieldLabel {
+                color: #cbd5e1;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#fieldHint {
+                color: #38bdf8;
+                font-size: 12px;
+            }
+            QPlainTextEdit {
+                background: #1e293b;
+                color: #cbd5e1;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+            }
+            QSpinBox {
+                background: #1e293b;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 13px;
+            }
+            QSpinBox:focus {
+                border: 1px solid #38bdf8;
+            }
+            QComboBox {
+                background: #1e293b;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QComboBox:focus {
+                border: 1px solid #38bdf8;
+            }
+            QComboBox QAbstractItemView {
+                background: #1e293b;
+                color: #f8fafc;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+                border: 1px solid #334155;
+            }
+            QPushButton {
+                background: #334155;
+                color: #f8fafc;
+                border: 1px solid #475569;
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #475569;
+            }
+            QPushButton#primaryBtn {
+                background: #0284c7;
+                color: #ffffff;
+                border: none;
+                font-weight: 600;
+                padding: 8px 24px;
+            }
+            QPushButton#primaryBtn:hover {
+                background: #0369a1;
+            }
+        """)
 
 
 class SubtitleController:
@@ -14,10 +300,19 @@ class SubtitleController:
     def __init__(self, gui):
         self.gui = gui
 
-    def _show_translation_progress(self, *, is_retranslation: bool):
+    def _show_translation_progress(self, *, is_retranslation: bool, provider_name: str = ""):
         """Show elapsed time for both first-time and repeated translation."""
         self._close_translation_progress()
-        provider = self.gui._selected_ai_provider_label() if hasattr(self.gui, "_selected_ai_provider_label") else "selected provider"
+        if provider_name:
+            provider_map = {
+                "google_ai_studio": "Google AI Studio",
+                "openai": "OpenAI",
+                "ollama": "Ollama",
+                "google": "Google Translate",
+            }
+            provider = provider_map.get(provider_name, provider_name)
+        else:
+            provider = self.gui._selected_ai_provider_label() if hasattr(self.gui, "_selected_ai_provider_label") else "selected provider"
         action = "Re-translating" if is_retranslation else "Translating"
         dialog = QProgressDialog(
             f"{action} subtitles with {provider}...\nElapsed: 00:00",
@@ -135,7 +430,7 @@ class SubtitleController:
             self.gui.log("[OCR Region] Hidden after OCR transcription completed.")
         self.gui._pipeline_advance("transcription")
 
-    def run_translation(self):
+    def run_translation(self, show_prompt_dialog: bool = True):
         existing = getattr(self.gui, "translation_thread", None)
         if existing is not None and existing.isRunning():
             self.gui.log("[Translation] A translation request is already running.")
@@ -178,9 +473,24 @@ class SubtitleController:
                     self.gui.log("[Translation] Reused existing translation result.")
                     return
 
-        model_path = None
         src_lang = self.gui.get_source_language_code()
-        enable_polish = bool(self.gui.is_ai_polish_enabled())
+        target_lang = self.gui.get_target_language_code()
+
+        chosen_provider = ""
+        chosen_batch_size = None
+        chosen_prompt = ""
+
+        if show_prompt_dialog:
+            dialog = TranslationPromptDialog(self.gui, src_lang=src_lang, target_lang=target_lang)
+            if dialog.exec() != QDialog.Accepted:
+                self.gui.log("[Translation] Translation canceled by user.")
+                return
+            chosen_provider = dialog.selected_provider
+            chosen_batch_size = dialog.selected_batch_size
+            chosen_prompt = dialog.selected_prompt
+
+        model_path = None
+        enable_polish = False if chosen_provider == "google" else bool(self.gui.is_ai_polish_enabled())
         is_retranslation = bool(
             self.gui.current_translated_segments or self.gui.translated_text.toPlainText().strip()
         )
@@ -188,10 +498,17 @@ class SubtitleController:
         self.gui.translate_btn.setEnabled(False)
         self.gui.progress_bar.setValue(80)
         self.gui.update_project_step("translate_raw", "running")
-        self._show_translation_progress(is_retranslation=is_retranslation)
+        self._show_translation_progress(is_retranslation=is_retranslation, provider_name=chosen_provider)
 
         self.gui.translation_thread = TranslationWorker(
-            srt_source, model_path, src_lang, self.gui.get_target_language_code(), enable_polish
+            srt_source,
+            model_path,
+            src_lang,
+            target_lang,
+            enable_polish,
+            provider=chosen_provider,
+            batch_size=chosen_batch_size,
+            custom_prompt=chosen_prompt,
         )
         self.gui.translation_thread.finished.connect(self.gui.on_translation_finished)
         self.gui.translation_thread.start()
@@ -607,6 +924,14 @@ class SubtitleController:
         style_combo.addItem("Custom", "custom")
         style_row.addWidget(style_combo, 1)
         layout.addLayout(style_row)
+
+        active_preset_id = (os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default").strip()
+        preset_info = get_preset_by_id(active_preset_id)
+        preset_title = preset_info.get("name", active_preset_id) if preset_info else "General / Standard Subtitles"
+        inherited_hint = QLabel(f"🔗 Inheriting rules from: <b>{preset_title}</b>", dialog)
+        inherited_hint.setObjectName("helperLabel")
+        inherited_hint.setWordWrap(True)
+        layout.addWidget(inherited_hint)
 
         custom_style_cb = QCheckBox("Add extra custom instruction", dialog)
         layout.addWidget(custom_style_cb)

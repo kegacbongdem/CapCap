@@ -1,30 +1,34 @@
 [
   {
-    "label": "Natural short video",
-    "instruction": "Make the Vietnamese sound natural, concise, conversational, and easy to read quickly in short videos."
+    "label": "Rút gọn tối đa (Max Concise - Shorts/Reels)",
+    "instruction": "Make the Vietnamese extremely concise, tight, and fast to read in 1-2 seconds on mobile screens. Cut all unnecessary filler words while preserving key meaning and correct address forms."
   },
   {
-    "label": "TikTok natural",
-    "instruction": "Make the Vietnamese feel natural, modern, and casual like a strong TikTok creator voice, while keeping the meaning accurate and concise."
+    "label": "Kể chuyện / Review phim (Storytelling Recap)",
+    "instruction": "Make the Vietnamese sound like an engaging film recap / storyteller voice: smooth flow, emotionally vivid, natural narrative transitions, maintaining character tension."
   },
   {
-    "label": "Punchy viral",
-    "instruction": "Make the Vietnamese feel punchy and attention-grabbing for short videos, but keep the meaning accurate and avoid exaggeration."
+    "label": "Kịch tính / Giật gân (Dramatic & Punchy)",
+    "instruction": "Make the Vietnamese punchy, tense, and dramatic with sharp contrasts and high-impact phrasing, perfect for dramatic conflict scenes, cliffhangers, and short dramas."
   },
   {
-    "label": "Sales voiceover",
-    "instruction": "Make the Vietnamese sound persuasive, benefit-driven, and smooth for a sales voiceover, but keep claims grounded in the original meaning."
+    "label": "Khẩu ngữ đời thường (Casual & Trendy)",
+    "instruction": "Make the Vietnamese sound modern, conversational, natural, and trendy like a creator on TikTok or social media, avoiding textbook, stiff, or overly literary phrasing."
   },
   {
-    "label": "Short storytelling",
-    "instruction": "Make the Vietnamese flow like short-form storytelling: natural, engaging, emotionally clear, and easy to follow line by line."
+    "label": "Lồng tiếng nhịp nhàng (Smooth Dubbing Flow)",
+    "instruction": "Make the Vietnamese flow smoothly, rhythmic, and natural to pronounce for voice dubbing and TTS, avoiding tongue-twisters, awkward syllable clusters, or unnatural breath breaks."
   },
   {
-    "label": "Neutral dubbing",
-    "instruction": "Make the Vietnamese smooth, neutral, clear, and easy for voice dubbing."
+    "label": "Thuyết phục / Bán hàng (Sales & Commercial)",
+    "instruction": "Make the Vietnamese persuasive, benefit-driven, smooth, and compelling for product showcases, marketing videos, or sales pitches without exaggerating source facts."
   },
   {
-    "label": "Clean subtitle",
-    "instruction": "Make the Vietnamese compact, clean, and very easy to scan as on-screen subtitles."
+    "label": "Phụ đề chuẩn mực (Natural Subtitles)",
+    "instruction": "Make the Vietnamese natural, balanced, culturally adapted, and very pleasant to read as standard on-screen video subtitles."
+  },
+  {
+    "label": "Trang trọng / Chuyên nghiệp (Formal & Professional)",
+    "instruction": "Make the Vietnamese polished, formal, authoritative, and grammatically precise, suitable for business presentations, documentaries, and professional interviews."
   }
 ]

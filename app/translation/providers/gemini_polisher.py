@@ -66,6 +66,7 @@ class OpenAICompatiblePolisherProvider:
         src_lang: str,
         target_lang: str,
         style_instruction: str = "",
+        custom_system_prompt: str = "",
         timeout: int = 120,
         max_retries: int = 2,
         max_tokens: int = 4096,
@@ -79,6 +80,7 @@ class OpenAICompatiblePolisherProvider:
             src_lang=src_lang,
             target_lang=target_lang,
             style_instruction=style_instruction,
+            custom_system_prompt=custom_system_prompt,
         )
 
         client = self._get_client()
@@ -131,7 +133,7 @@ class OpenAICompatiblePolisherProvider:
         raise TranslationProviderError(f"{self.display_name} failed: {last_error}")
 
     def _build_messages(
-        self, source_texts, translated_texts, src_lang, target_lang, style_instruction
+        self, source_texts, translated_texts, src_lang, target_lang, style_instruction, custom_system_prompt: str = ""
     ) -> tuple[str, str]:
         return build_translation_messages(
             source_texts=source_texts,
@@ -139,4 +141,5 @@ class OpenAICompatiblePolisherProvider:
             src_lang=src_lang,
             target_lang=target_lang,
             style_instruction=style_instruction,
+            custom_system_prompt=custom_system_prompt,
         )

@@ -167,26 +167,49 @@ class AlternateRangeTranscriptionWorker(QThread):
 class TranslationWorker(QThread):
     finished = Signal(str, str, str)
 
-    def __init__(self, srt_text, model_path, src_lang, target_lang, enable_polish):
+    def __init__(
+        self,
+        srt_text,
+        model_path,
+        src_lang,
+        target_lang,
+        enable_polish,
+        provider: str = "",
+        batch_size: int = None,
+        custom_prompt: str = "",
+    ):
         super().__init__()
         self.srt_text = srt_text
         self.model_path = model_path
         self.src_lang = src_lang
         self.target_lang = target_lang
         self.enable_polish = enable_polish
+        self.provider = str(provider or "").strip()
+        self.batch_size = int(batch_size) if batch_size and int(batch_size) > 0 else None
+        self.custom_prompt = str(custom_prompt or "").strip()
 
     def run(self):
         try:
             try:
                 from translation import TranslationOrchestrator
                 orch = TranslationOrchestrator()
-                provider_type, polisher = orch._resolve_ai_provider()
-                print(f"[Translate] Using AI: {orch._describe_ai_provider(provider_type)}")
+                effective_provider = self.provider or orch._resolve_ai_provider()[0]
+                print(f"[Translate] Using AI: {orch._describe_ai_provider(effective_provider)}")
+                translate_kwargs = {
+                    "src_lang": self.src_lang,
+                    "target_lang": self.target_lang,
+                    "enable_polish": self.enable_polish,
+                }
+                if self.provider:
+                    translate_kwargs["override_provider"] = self.provider
+                if self.batch_size:
+                    translate_kwargs["polish_batch_size"] = self.batch_size
+                if self.custom_prompt:
+                    translate_kwargs["custom_system_prompt"] = self.custom_prompt
+
                 result = orch.translate_srt(
                     self.srt_text,
-                    src_lang=self.src_lang,
-                    target_lang=self.target_lang,
-                    enable_polish=self.enable_polish,
+                    **translate_kwargs,
                 )
                 if not result.success:
                     raise RuntimeError("; ".join(result.errors) or "Translation failed.")

@@ -13582,8 +13582,8 @@ class VideoTranslatorGUI(QMainWindow):
     def on_transcription_finished(self, segments, error=""):
         self.subtitle_controller.on_transcription_finished(segments, error)
 
-    def run_translation(self):
-        self.subtitle_controller.run_translation()
+    def run_translation(self, show_prompt_dialog: bool = True):
+        self.subtitle_controller.run_translation(show_prompt_dialog=show_prompt_dialog)
 
     def on_translation_finished(self, translated_srt, error, fallback_notice=""):
         self.subtitle_controller.on_translation_finished(translated_srt, error, fallback_notice)
@@ -14064,6 +14064,54 @@ class VideoTranslatorGUI(QMainWindow):
         batch_size_hint.setVisible(not remote_mode)
         layout.addWidget(batch_size_hint)
 
+        # Translation Prompt Preset Selector
+        preset_layout = QVBoxLayout()
+        preset_layout.setSpacing(4)
+        preset_label = QLabel("Default Prompt Preset:")
+        translation_preset_combo = QComboBox(dialog)
+
+        try:
+            from translation import load_translation_presets
+            available_presets = load_translation_presets()
+        except Exception:
+            available_presets = []
+
+        for p in available_presets:
+            p_id = p.get("id", "")
+            p_name = p.get("name", p_id)
+            translation_preset_combo.addItem(p_name, p_id)
+
+        initial_preset_id = str(
+            self.settings.value("translation_preset_id", os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default"))
+            or os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default")
+        ).strip()
+        idx_preset = translation_preset_combo.findData(initial_preset_id)
+        if idx_preset >= 0:
+            translation_preset_combo.setCurrentIndex(idx_preset)
+        elif translation_preset_combo.count() > 0:
+            translation_preset_combo.setCurrentIndex(0)
+
+        preset_desc_label = QLabel("")
+        preset_desc_label.setObjectName("helperLabel")
+        preset_desc_label.setWordWrap(True)
+
+        def _update_preset_desc():
+            curr_id = translation_preset_combo.currentData()
+            for p in available_presets:
+                if p.get("id") == curr_id:
+                    preset_desc_label.setText(p.get("description", ""))
+                    break
+            else:
+                preset_desc_label.setText("")
+
+        translation_preset_combo.currentIndexChanged.connect(_update_preset_desc)
+        _update_preset_desc()
+
+        preset_layout.addWidget(preset_label)
+        preset_layout.addWidget(translation_preset_combo)
+        preset_layout.addWidget(preset_desc_label)
+        layout.addLayout(preset_layout)
+
         provider_hint = QLabel("Get an API key at https://aistudio.google.com/apikey")
         provider_hint.setObjectName("helperLabel")
         provider_hint.setWordWrap(True)
@@ -14087,6 +14135,9 @@ class VideoTranslatorGUI(QMainWindow):
             _toggle_visible(batch_size_label, not remote_mode and is_ai)
             _toggle_visible(batch_size_spin, not remote_mode and is_ai)
             _toggle_visible(batch_size_hint, not remote_mode and is_ai)
+            _toggle_visible(preset_label, not remote_mode and is_ai)
+            _toggle_visible(translation_preset_combo, not remote_mode and is_ai)
+            _toggle_visible(preset_desc_label, not remote_mode and is_ai)
             _toggle_visible(test_btn, not remote_mode and is_ai)
             _toggle_visible(test_status, not remote_mode and is_ai)
             _toggle_visible(model_label, not remote_mode and is_ai)
@@ -14323,10 +14374,13 @@ class VideoTranslatorGUI(QMainWindow):
             }
         else:
             new_batch_size = str(batch_size_spin.value())
+            new_preset = str(translation_preset_combo.currentData() or "general_default").strip()
+            self.settings.setValue("translation_preset_id", new_preset)
             if new_provider == "google":
                 updates = {
                     "AI_POLISHER_PROVIDER": "google",
                     "OPENAI_PROVIDER": "google",
+                    "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
             elif new_provider == "google_ai_studio":
                 updates = {
@@ -14336,6 +14390,7 @@ class VideoTranslatorGUI(QMainWindow):
                     "GOOGLE_AI_STUDIO_MODEL": new_model or "gemini-3.7-flash",
                     "GOOGLE_AI_STUDIO_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
                     "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
+                    "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
             elif new_provider == "ollama":
                 updates = {
@@ -14345,6 +14400,7 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_MODEL": new_model,
                     "OPENAI_BASE_URL": new_base_url or "http://localhost:11434/v1",
                     "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
+                    "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
             else:
                 updates = {
@@ -14354,6 +14410,7 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_MODEL": new_model or "gpt-4o-mini",
                     "OPENAI_BASE_URL": new_base_url or "https://api.openai.com/v1/",
                     "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
+                    "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
         
         updates.update(_engine_updates)

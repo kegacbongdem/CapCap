@@ -719,6 +719,45 @@ def get_video_dimensions(video_path):
         return 1920, 1080
 
 
+def get_video_duration(video_path):
+    """Return duration in seconds of the video using ffprobe."""
+    ffprobe = _ffprobe_path()
+    if not os.path.exists(ffprobe):
+        return 0.0
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'error',
+             '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1',
+             video_path],
+            capture_output=True, check=True,
+            **_text_subprocess_run_kwargs(),
+        )
+        return float(result.stdout.strip() or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _has_audio_stream(video_path):
+    """Check if the video has at least one audio stream."""
+    ffprobe = _ffprobe_path()
+    if not os.path.exists(ffprobe):
+        return False
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'error',
+             '-select_streams', 'a:0',
+             '-show_entries', 'stream=index',
+             '-of', 'csv=p=0',
+             video_path],
+            capture_output=True, check=True,
+            **_text_subprocess_run_kwargs(),
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # SRT → ASS conversion
 # ---------------------------------------------------------------------------
@@ -1657,7 +1696,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium"):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}, video_quality={video_quality}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1714,11 +1753,30 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             source_width=source_w, source_height=source_h,
             audio_gain_db=audio_gain_db,
             video_quality=video_quality,
+            video_time_warps=video_time_warps,
         )
     else:
         # Simple filter chain (no logos)
         filter_parts = []
         current_label = "[0:v]"
+        warped_audio_pad = None
+
+        if video_time_warps:
+            from app.services.time_warp_service import TimeWarpService
+            media_dur = get_video_duration(video_path)
+            has_audio = _has_audio_stream(video_path)
+            audio_arg = "0:a" if has_audio else None
+            warp_res = TimeWarpService.build_ffmpeg_freeze_filtergraph(
+                "0:v", video_time_warps, media_dur, fps=output_fps or 30.0, audio_stream=audio_arg
+            )
+            if audio_arg:
+                warp_filter, warp_v_pad, warp_a_pad = warp_res
+                warped_audio_pad = warp_a_pad
+            else:
+                warp_filter, warp_v_pad = warp_res
+            if warp_filter:
+                filter_parts.append(warp_filter)
+                current_label = f"[{warp_v_pad.strip('[]')}]"
         
         filter_video_chain = _build_video_color_chain(video_filter_state)
         if filter_video_chain:
@@ -1759,6 +1817,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         
         video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast, video_quality=video_quality)
 
+        audio_map = f"[{warped_audio_pad}]" if warped_audio_pad else "0:a?"
         command = [
             ffmpeg,
             '-hide_banner',
@@ -1770,7 +1829,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             '-y',
             '-i', video_path,
             '-map', '[out]',
-            '-map', '0:a?',
+            '-map', audio_map,
             '-filter_complex', filter_complex,
             *video_encoder_args,
             '-c:a', 'aac', '-b:a', '192k',
@@ -1845,7 +1904,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
                                  scale_chain, blur_chain, mask_chain,
                                  output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
                                  source_width=None, source_height=None, audio_gain_db=0.0,
-                                 video_quality="medium"):
+                                 video_quality="medium", video_time_warps=None):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -1874,6 +1933,23 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     # matching MPV's subtitle render order. Logo/Text images are composited
     # after scaling because they are authored in output-canvas coordinates.
     main_label = "0:v"
+    warped_audio_pad = None
+    if video_time_warps:
+        from app.services.time_warp_service import TimeWarpService
+        media_dur = get_video_duration(video_path)
+        has_audio = _has_audio_stream(video_path)
+        audio_arg = "0:a" if has_audio else None
+        warp_res = TimeWarpService.build_ffmpeg_freeze_filtergraph(
+            main_label, video_time_warps, media_dur, fps=output_fps or 30.0, audio_stream=audio_arg
+        )
+        if audio_arg:
+            warp_filter, warp_v_pad, warp_a_pad = warp_res
+            warped_audio_pad = warp_a_pad
+        else:
+            warp_filter, warp_v_pad = warp_res
+        if warp_filter:
+            filter_parts.append(warp_filter)
+            main_label = warp_v_pad.strip("[]")
     
     # Apply video filter chain
     filter_video_chain = _build_video_color_chain(video_filter_state)
@@ -1970,10 +2046,11 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     
     # Complete the command
     video_encoder_args = _preferred_h264_encoder_args(ffmpeg, video_quality=video_quality)
+    audio_map = f"[{warped_audio_pad}]" if warped_audio_pad else "0:a?"
     command += [
         '-filter_complex', filter_complex,
         '-map', '[final]',
-        '-map', '0:a?',
+        '-map', audio_map,
         *video_encoder_args,
         '-c:a', 'aac', '-b:a', '192k',
         '-movflags', '+faststart',
@@ -2063,7 +2140,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                     video_filter_state=None,
                     audio_gain_db=0.0,
                     fast=False,
-                    video_quality="medium"):
+                    video_quality="medium",
+                    video_time_warps=None):
     """Burn subtitles into video using a properly-styled ASS file.
 
     Workflow:
@@ -2132,6 +2210,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         audio_gain_db=audio_gain_db,
         fast=fast,
         video_quality=video_quality,
+        video_time_warps=video_time_warps,
     )
 
     # Step 4: clean up temp ASS

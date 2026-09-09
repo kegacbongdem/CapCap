@@ -44,7 +44,12 @@ def save_user_settings(gui):
         s.setValue("ai_dubbing_rewrite", gui.ai_dubbing_rewrite_cb.isChecked())
     if hasattr(gui, "toggle_advanced_btn"):
         s.setValue("advanced_section_open", gui.toggle_advanced_btn.isChecked())
+    s.setValue("translation_provider", os.getenv("OPENAI_PROVIDER", "google"))
+    env_batch = str(os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS", "")).strip()
+    if env_batch.isdigit() and int(env_batch) > 0:
+        s.setValue("translation_batch_size", int(env_batch))
     s.setValue("translation_preset_id", os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default"))
+    s.setValue("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
 
 
 def load_user_settings(gui):
@@ -93,9 +98,17 @@ def load_user_settings(gui):
         ("CAPCUT_TTS_BATCH_SIZE", "capcut_tts_batch_size", "60"),
         ("CAPCUT_TTS_WORKERS", "capcut_tts_workers", "30"),
         ("CAPCAP_TRANSLATION_PRESET_ID", "translation_preset_id", "general_default"),
+        ("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS", "translation_batch_size", "80"),
+        ("CAPCAP_AUTO_TRANSLATION_CONTEXT", "auto_translation_context", "1"),
     ):
-        v = str(s.value(s_k, os.getenv(env_k, def_v)) or def_v).strip()
+        v = str(os.getenv(env_k) or s.value(s_k, def_v) or def_v).strip()
         os.environ[env_k] = v
+        s.setValue(s_k, v)
+    active_provider = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or s.value("translation_provider", "google")).strip().lower()
+    if active_provider == "gemini":
+        active_provider = "google_ai_studio"
+    os.environ["OPENAI_PROVIDER"] = active_provider
+    s.setValue("translation_provider", active_provider)
     # Voice selection, audio mode, subtitle style, and filters use the widget
     # defaults for a new session/project; they are not inherited globally.
     if hasattr(gui, "use_premium_voice_radio"):

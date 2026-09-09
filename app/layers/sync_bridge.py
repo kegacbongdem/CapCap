@@ -130,6 +130,14 @@ def sync_segments_to_dub_subtitle_layers(
                     existing.metadata.pop("_audio_end", None)
             else:
                 existing.metadata.pop("_audio_end", None)
+            raw_ext = d.get("extended_duration")
+            if raw_ext is not None:
+                try:
+                    existing.metadata["extended_duration"] = float(raw_ext)
+                except (TypeError, ValueError):
+                    existing.metadata.pop("extended_duration", None)
+            else:
+                existing.metadata.pop("extended_duration", None)
             layer = existing
         else:
             seg_speed = d.get("voice_speed", 1.0)
@@ -158,6 +166,14 @@ def sync_segments_to_dub_subtitle_layers(
                     layer.metadata.pop("_audio_end", None)
             else:
                 layer.metadata.pop("_audio_end", None)
+            raw_ext = d.get("extended_duration")
+            if raw_ext is not None:
+                try:
+                    layer.metadata["extended_duration"] = float(raw_ext)
+                except (TypeError, ValueError):
+                    layer.metadata.pop("extended_duration", None)
+            else:
+                layer.metadata.pop("extended_duration", None)
             target.layers.append(layer)
         new_layers.append(layer)
 

@@ -1048,12 +1048,18 @@ def build_preview_panel(gui):
     gui.timeline_alt_transcribe_btn.setToolTip("Retranscribe the Selection Range with custom Whisper or OCR settings")
     gui.timeline_alt_transcribe_btn.hide()
     gui.timeline_alt_transcribe_btn.clicked.connect(gui.transcribe_selected_range_alternate)
+    gui.timeline_extend_range_btn = QPushButton("Extend Video")
+    gui.timeline_extend_range_btn.setFixedWidth(118)
+    gui.timeline_extend_range_btn.setToolTip("Extend video (freeze frame) at selection end and ripple shift subsequent segments")
+    gui.timeline_extend_range_btn.hide()
+    gui.timeline_extend_range_btn.clicked.connect(lambda: gui.prompt_extend_range() if hasattr(gui, "prompt_extend_range") else None)
     def _on_range_changed(_start, _end):
         gui.timeline_clear_selection_btn.setEnabled(True)
         gui.timeline_clear_selection_btn.show()
         if hasattr(gui, "_update_alt_transcribe_button_label"):
             gui._update_alt_transcribe_button_label()
         gui.timeline_alt_transcribe_btn.show()
+        gui.timeline_extend_range_btn.show()
         # Range signals can arrive in the middle of the media-state update.
         # Refresh once on the next event-loop turn so the action is enabled
         # after the timeline has entered paused/edit mode.
@@ -1063,6 +1069,7 @@ def build_preview_panel(gui):
         gui.timeline_clear_selection_btn.setEnabled(False)
         gui.timeline_clear_selection_btn.hide()
         gui.timeline_alt_transcribe_btn.hide()
+        gui.timeline_extend_range_btn.hide()
     gui.timeline.selectionRangeChanged.connect(_on_range_changed)
     gui.timeline.selectionRangeCleared.connect(_on_range_cleared)
     def _on_selection_mode_changed(enabled):
@@ -1118,6 +1125,7 @@ def build_preview_panel(gui):
     edit_group.addWidget(gui.timeline_selection_mode_btn)
     edit_group.addWidget(gui.timeline_clear_selection_btn)
     edit_group.addWidget(gui.timeline_alt_transcribe_btn)
+    edit_group.addWidget(gui.timeline_extend_range_btn)
     edit_group.addWidget(_make_sep())
     edit_group.addWidget(gui.timeline_layers_btn)
 
@@ -1295,6 +1303,28 @@ def build_preview_panel(gui):
     inspector_voice_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_voice_actions_row)
     gui.inspector_voice_actions_row = inspector_voice_actions_row
+
+    inspector_warp_actions_row = QHBoxLayout()
+    inspector_warp_actions_row.setSpacing(8)
+    gui.batch_fit_voice_btn = QPushButton("⚡ Auto-Fit All Voice")
+    gui.batch_fit_voice_btn.setToolTip(
+        "Automatically freeze frame at all segments where voiceover exceeds video duration (+0.15s buffer)"
+    )
+    gui.batch_fit_voice_btn.setEnabled(False)
+    gui.revert_all_freezes_btn = QPushButton("↺ Revert All Freezes")
+    gui.revert_all_freezes_btn.setToolTip(
+        "Revert all freeze frames and restore video and subtitles to original media timing"
+    )
+    gui.revert_all_freezes_btn.setEnabled(False)
+    if hasattr(gui, "auto_fit_all_voice_overflows"):
+        gui.batch_fit_voice_btn.clicked.connect(gui.auto_fit_all_voice_overflows)
+    if hasattr(gui, "revert_all_segment_video_extensions"):
+        gui.revert_all_freezes_btn.clicked.connect(gui.revert_all_segment_video_extensions)
+    inspector_warp_actions_row.addWidget(gui.batch_fit_voice_btn)
+    inspector_warp_actions_row.addWidget(gui.revert_all_freezes_btn)
+    inspector_warp_actions_row.addStretch(1)
+    inspector_layout.addLayout(inspector_warp_actions_row)
+    gui.inspector_warp_actions_row = inspector_warp_actions_row
 
     # The original transcript is shown immediately above the editable
     # "Text shown on screen" field inside the selected subtitle card.  Do

@@ -55,7 +55,7 @@ _GPU_LOCK = threading.Lock()
 
 def _log(msg: str):
     if not _QUIET:
-        print(msg)
+        print(msg, flush=True)
 
 from remote_api import remote_api_token
 from services import WorkflowRuntime
@@ -200,7 +200,10 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"ok": False, "error": error_message})
 
     def log_message(self, format, *args):
-        _log(f"[Remote API] {self.address_string()} - {format % args}")
+        formatted = format % args
+        if any(h in formatted for h in ("/v1/status", "/health", "/v1/health")):
+            return
+        _log(f"[Remote API] {self.address_string()} - {formatted}")
 
     def _check_auth(self) -> None:
         expected = remote_api_token()
@@ -338,7 +341,9 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 "transcription": "Transcribing audio",
                 "translation": "Translating subtitles",
             }
-            _set_status(step_id, labels.get(str(step_id or ""), str(step_id or "Processing")))
+            lbl = labels.get(str(step_id or ""), str(step_id or "Processing"))
+            _set_status(step_id, lbl)
+            _log(f"[Prepare] Step: {lbl}")
 
         try:
             state = runtime.run_prepare(

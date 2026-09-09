@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 import re
 
@@ -163,6 +163,7 @@ class ExportWorkflow:
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
         effective_ass_path = ass_path if ass_path and os.path.exists(ass_path) else text_ass_path
         secondary_text_ass = text_ass_path if effective_ass_path != text_ass_path else ""
+        warps = (subtitle_style or {}).get("video_time_warps")
         if effective_ass_path and os.path.exists(effective_ass_path):
             ok = self.engine_runtime.embed_ass_subtitles(
                 video_path,
@@ -182,6 +183,7 @@ class ExportWorkflow:
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
                 video_quality=video_quality,
+                video_time_warps=warps,
             )
         else:
             ok = self.engine_runtime.embed_subtitles(
@@ -201,6 +203,7 @@ class ExportWorkflow:
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
                 video_quality=video_quality,
+                video_time_warps=warps,
             )
         if not ok:
             raise RuntimeError("Failed to burn subtitles into the output video.")

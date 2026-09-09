@@ -3,6 +3,12 @@ import math
 import os
 import re
 
+from .context_analyzer import (
+    RollingContextLedger,
+    build_rolling_context_guidance,
+    learn_dialogue_context,
+    update_ledger_from_batch,
+)
 from .errors import TranslationValidationError
 from .models import TranslationResult
 from .prompt_loader import render_prompt
@@ -39,7 +45,21 @@ class TranslationOrchestrator:
         if not segments:
             return TranslationResult(success=False, errors=["No segments to translate."], stage="input")
 
-        source_texts = [s.get("text") or "" for s in segments]
+        source_texts = [str(s.get("text") or s.get("original_text") or "").strip() for s in segments]
+        source_speakers = [
+            str(s.get("metadata", {}).get("speaker") or s.get("speaker") or "").strip()
+            for s in segments
+        ]
+        # Inspect if lines start with [SPEAKER_XX]:
+        for idx, s in enumerate(segments):
+            if not source_speakers[idx]:
+                txt = str(s.get("text") or "")
+                m = re.match(r"^\[(SPEAKER_\w+|Speaker \w+)\]\s*:?\s*(.*)$", txt, re.IGNORECASE)
+                if m:
+                    source_speakers[idx] = m.group(1).strip()
+        has_speakers = any(bool(spk) for spk in source_speakers)
+        unique_speakers = sorted(set(spk for spk in source_speakers if spk))
+        labeled_count = sum(1 for spk in source_speakers if spk)
         normalized_src = self._normalize_source_language(src_lang)
         warnings = []
         optimize_subtitles = False
@@ -54,27 +74,69 @@ class TranslationOrchestrator:
                 try:
                     mode_label = self._describe_ai_provider(provider_type)
                     merged_style = str(style_instruction or "")
-                    env_batch_str = (os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS") or "").strip()
-                    if polish_batch_size and polish_batch_size > 0:
-                        effective_batch_size = polish_batch_size
-                    elif env_batch_str.isdigit() and int(env_batch_str) > 0:
-                        effective_batch_size = int(env_batch_str)
+                    active_preset = os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default"
+
+                    preset_info = active_preset
+                    p_name = ""
+                    try:
+                        from .prompt_loader import load_translation_presets
+                        for p in load_translation_presets():
+                            if p.get("id") == active_preset:
+                                p_name = str(p.get("name", active_preset)).replace("→", "->")
+                                break
+                    except Exception:
+                        pass
+
+                    if not custom_system_prompt:
+                        preset_info = f"'{active_preset}' ({p_name})" if p_name else f"'{active_preset}'"
                     else:
-                        effective_batch_size = min(40, polish_batch_size) if provider_type == "ollama" else polish_batch_size
-                    active_preset = (os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default") if not custom_system_prompt else "custom"
-                    print(
-                        f"[AI Translation] Starting translation (provider: {mode_label}, preset: {active_preset}, batch_size={effective_batch_size})..."
-                    )
+                        label = f" ({p_name})" if p_name else ""
+                        preset_info = f"'{active_preset}'{label} (Customized - {len(custom_system_prompt)} chars)"
+
+                    auto_context_enabled = str(os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1")).strip().lower() not in ("0", "false", "no")
+
+                    print("=" * 60)
+                    print(f"[AI Translation] Starting translation...")
+                    print(f"[AI Translation] Provider: {mode_label}")
+                    print(f"[AI Translation] Prompt: {preset_info}")
+                    if has_speakers:
+                        print(
+                            f"[AI Translation] Speaker Diarization: ENABLED "
+                            f"({len(unique_speakers)} speakers: {', '.join(unique_speakers)} | {labeled_count}/{len(segments)} cues tagged)"
+                        )
+                    else:
+                        print("[AI Translation] Speaker Diarization: DISABLED (No speaker tags found in transcript cues)")
+                    print(f"[AI Translation] Auto Dialogue Context: {'ENABLED (Pass 1 active)' if auto_context_enabled else 'DISABLED'}")
+                    print("=" * 60)
+
+                    context_guidance = ""
+                    if auto_context_enabled:
+                        print("[AI Translation] Learning dialogue context & address rules from transcript...")
+                        context_guidance = learn_dialogue_context(
+                            source_segments=segments,
+                            polisher=polisher,
+                            src_lang=normalized_src,
+                            target_lang=target_lang,
+                            max_cues=300,
+                        )
+                        if context_guidance:
+                            print(f"[AI Translation] Learned dialogue context ({len(context_guidance.splitlines())} lines):")
+                            for line in context_guidance.splitlines():
+                                if line.strip():
+                                    print(f"  | {line}")
+
                     translated_texts, providers_used, batch_warnings = self._run_ai_batches(
                         polisher=polisher,
                         provider_type=provider_type,
                         source_texts=source_texts,
                         translated_texts=None,
+                        source_speakers=source_speakers if has_speakers else None,
                         src_lang=normalized_src,
                         target_lang=target_lang,
                         style_instruction=merged_style,
                         custom_system_prompt=custom_system_prompt,
-                        polish_batch_size=effective_batch_size,
+                        context_guidance=context_guidance,
+                        polish_batch_size=polish_batch_size or 0,
                     )
                     warnings.extend(batch_warnings)
 
@@ -107,7 +169,11 @@ class TranslationOrchestrator:
                 else:
                     print("[AI Translation] Google Translate selected.")
 
-        print(f"[Translation] Starting Google web translate fallback (batch_size={ms_batch_size})...")
+        print("=" * 60)
+        print(f"[Translation] Starting Google web translate (batch_size={ms_batch_size})...")
+        print("[Translation] Prompt: Google Web API (No custom prompt / No LLM)")
+        print("[Translation] Speaker Diarization: DISABLED (Not supported by Google Translate)")
+        print("=" * 60)
         try:
             translated_texts = []
             offset = 0
@@ -174,6 +240,11 @@ class TranslationOrchestrator:
 
         source_texts = [s.get("source_text") or s.get("text") or "" for s in source_segments]
         translated_texts = [s.get("text") or "" for s in translated_segments]
+        source_speakers = [
+            str(s.get("metadata", {}).get("speaker") or s.get("speaker") or "").strip()
+            for s in source_segments
+        ]
+        has_speakers = any(bool(spk) for spk in source_speakers)
         normalized_src = self._normalize_source_language(src_lang)
 
         try:
@@ -187,6 +258,7 @@ class TranslationOrchestrator:
                 provider_type=provider_type,
                 source_texts=source_texts,
                 translated_texts=translated_texts,
+                source_speakers=source_speakers if has_speakers else None,
                 src_lang=normalized_src,
                 target_lang=target_lang,
                 style_instruction=style_instruction,
@@ -278,10 +350,12 @@ class TranslationOrchestrator:
         provider_type: str,
         source_texts: list[str],
         translated_texts: list[str] | None,
+        source_speakers: list[str] | None = None,
         src_lang: str,
         target_lang: str,
         style_instruction: str,
         custom_system_prompt: str = "",
+        context_guidance: str = "",
         polish_batch_size: int,
     ) -> tuple[list[str], list[str], list[str]]:
         warnings = []
@@ -295,6 +369,7 @@ class TranslationOrchestrator:
         batches, full_context_request = self._build_ai_batches(
             source_texts=source_texts,
             translated_texts=translated_texts,
+            source_speakers=source_speakers,
             requested_max_segments=polish_batch_size,
             provider_type=provider_type,
         )
@@ -302,18 +377,32 @@ class TranslationOrchestrator:
             print(
                 "[AI Translation] Batching: "
                 f"segments={len(source_texts)}, requests={len(batches)}, "
-                f"max_segments={max((len(source) for source, _draft, _tokens in batches), default=0)}"
+                f"max_segments={max((len(source) for source, *_ in batches), default=0)}"
             )
+        use_parallel = os.getenv("CAPCAP_TRANSLATION_PARALLEL_BATCHES", "0").strip().lower() in ("1", "true", "yes")
+
         try:
-            return self._run_ai_batch_requests(
-                polisher=polisher,
-                batches=batches,
-                src_lang=src_lang,
-                target_lang=target_lang,
-                style_instruction=style_instruction,
-                custom_system_prompt=custom_system_prompt,
-                max_workers=1 if full_context_request else min(len(batches), 4),
-            )
+            if full_context_request or (len(batches) > 1 and use_parallel):
+                return self._run_ai_batch_requests(
+                    polisher=polisher,
+                    batches=batches,
+                    src_lang=src_lang,
+                    target_lang=target_lang,
+                    style_instruction=style_instruction,
+                    custom_system_prompt=custom_system_prompt,
+                    context_guidance=context_guidance,
+                    max_workers=1 if full_context_request else min(len(batches), 4),
+                )
+            else:
+                return self._run_ai_batches_sequential(
+                    polisher=polisher,
+                    batches=batches,
+                    src_lang=src_lang,
+                    target_lang=target_lang,
+                    style_instruction=style_instruction,
+                    custom_system_prompt=custom_system_prompt,
+                    context_guidance=context_guidance,
+                )
         except TranslationValidationError as exc:
             if not full_context_request:
                 raise
@@ -321,6 +410,7 @@ class TranslationOrchestrator:
             fallback_batches, _unused_full_context = self._build_ai_batches(
                 source_texts=source_texts,
                 translated_texts=translated_texts,
+                source_speakers=source_speakers,
                 requested_max_segments=polish_batch_size,
                 force_ordered=True,
                 provider_type=provider_type,
@@ -328,41 +418,112 @@ class TranslationOrchestrator:
             print(
                 "[AI Translation] Ordered batch retry: "
                 f"requests={len(fallback_batches)}, "
-                f"max_segments={max((len(source) for source, _draft, _tokens in fallback_batches), default=0)}"
+                f"max_segments={max((len(source) for source, *_ in fallback_batches), default=0)}"
             )
             try:
-                recovered = self._run_ai_batch_requests(
-                    polisher=polisher,
-                    batches=fallback_batches,
-                    src_lang=src_lang,
-                    target_lang=target_lang,
-                    style_instruction=style_instruction,
-                    custom_system_prompt=custom_system_prompt,
-                    max_workers=min(len(fallback_batches), 4),
-                )
+                if use_parallel:
+                    recovered = self._run_ai_batch_requests(
+                        polisher=polisher,
+                        batches=fallback_batches,
+                        src_lang=src_lang,
+                        target_lang=target_lang,
+                        style_instruction=style_instruction,
+                        custom_system_prompt=custom_system_prompt,
+                        context_guidance=context_guidance,
+                        max_workers=min(len(fallback_batches), 4),
+                    )
+                else:
+                    recovered = self._run_ai_batches_sequential(
+                        polisher=polisher,
+                        batches=fallback_batches,
+                        src_lang=src_lang,
+                        target_lang=target_lang,
+                        style_instruction=style_instruction,
+                        custom_system_prompt=custom_system_prompt,
+                        context_guidance=context_guidance,
+                    )
                 print("[AI Translation] Batch translation completed successfully.")
                 return recovered
             except Exception as batch_exc:
                 print(f"[AI Translation] AI batch translation failed. Falling back to Google Translate. ({batch_exc})")
                 raise AIBatchTranslationError(str(batch_exc)) from exc
 
+    def _run_ai_batches_sequential(
+        self,
+        *,
+        polisher,
+        batches: list[tuple[list[str], list[str] | None, int, list[str] | None]],
+        src_lang: str,
+        target_lang: str,
+        style_instruction: str,
+        custom_system_prompt: str = "",
+        context_guidance: str = "",
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Execute batches sequentially, carrying forward confirmed pronouns and dialogue boundary cues."""
+        warnings: list[str] = []
+        providers_used: set[str] = set()
+        translated_texts: list[str] = []
+
+        ledger = RollingContextLedger(base_context=context_guidance)
+
+        total_batches = len(batches)
+        for idx, batch_item in enumerate(batches):
+            source_batch = batch_item[0]
+            draft_batch = batch_item[1]
+            max_tokens = batch_item[2]
+            speaker_batch = batch_item[3] if len(batch_item) > 3 else None
+
+            current_guidance = build_rolling_context_guidance(ledger)
+
+            batch_result, batch_warnings, provider_name = polisher.polish_batch(
+                source_texts=source_batch,
+                translated_texts=draft_batch,
+                source_speakers=speaker_batch,
+                src_lang=src_lang,
+                target_lang=target_lang,
+                style_instruction=style_instruction,
+                custom_system_prompt=custom_system_prompt,
+                context_guidance=current_guidance,
+                max_tokens=max_tokens,
+            )
+            translated_texts.extend(batch_result)
+            warnings.extend(batch_warnings)
+            if provider_name:
+                providers_used.add(provider_name)
+
+            update_ledger_from_batch(ledger, source_batch, batch_result)
+
+            if total_batches > 1:
+                print(
+                    f"[AI Translation] Completed batch {idx + 1}/{total_batches} "
+                    f"({len(source_batch)} cues). Rolling memory: {len(ledger.confirmed_rules)} rules."
+                )
+
+        return translated_texts, sorted(providers_used), warnings
+
     @staticmethod
-    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, custom_system_prompt="", max_workers):
+    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, custom_system_prompt="", context_guidance="", max_workers):
         """Submit validated ordered batches and merge their results by index."""
         warnings = []
         providers_used = set()
         translated_texts_map = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
             future_to_idx = {}
-            for idx, (source_batch, translated_batch, max_tokens) in enumerate(batches):
+            for idx, batch_item in enumerate(batches):
+                source_batch = batch_item[0]
+                translated_batch = batch_item[1]
+                max_tokens = batch_item[2]
+                speaker_batch = batch_item[3] if len(batch_item) > 3 else None
                 future = executor.submit(
                     polisher.polish_batch,
                     source_texts=source_batch,
                     translated_texts=translated_batch,
+                    source_speakers=speaker_batch,
                     src_lang=src_lang,
                     target_lang=target_lang,
                     style_instruction=style_instruction,
                     custom_system_prompt=custom_system_prompt,
+                    context_guidance=context_guidance,
                     max_tokens=max_tokens,
                 )
                 future_to_idx[future] = idx
@@ -390,10 +551,11 @@ class TranslationOrchestrator:
         *,
         source_texts: list[str],
         translated_texts: list[str] | None,
+        source_speakers: list[str] | None = None,
         requested_max_segments: int,
         force_ordered: bool = False,
         provider_type: str = "",
-    ) -> tuple[list[tuple[list[str], list[str] | None, int]], bool]:
+    ) -> tuple[list[tuple[list[str], list[str] | None, int, list[str] | None]], bool]:
         """Create ordered AI batches with both cue and prompt-size limits.
 
         Prefer one request for the full video whenever its estimated input and
@@ -428,42 +590,50 @@ class TranslationOrchestrator:
             if translated_texts is not None else 0
         )
         input_tokens = source_token_estimate + draft_token_estimate + (12 * len(source_texts)) + 220
-        # Translation can expand compact CJK dialogue considerably.  This
-        # leaves response room without assuming a specific destination language.
-        response_tokens = max(512, math.ceil(max(source_token_estimate, draft_token_estimate) * 1.8) + (10 * len(source_texts)))
+        # Realistic response token estimate: 1.5x source tokens + 3 tokens per line prefix/newline + 64 padding.
+        # This provides a 25-30% conservative safety margin without artificially inflating token counts.
+        response_tokens = max(512, math.ceil(max(source_token_estimate, draft_token_estimate) * 1.5) + (3 * len(source_texts)) + 64)
 
         is_ollama = (provider_type or "").strip().lower() == "ollama"
-        default_context_limit = 3000 if is_ollama else 24000
-        default_output_limit = 2048 if is_ollama else 8192
-        context_limit = max(2048, _env_int("CAPCAP_AI_TRANSLATION_CONTEXT_TOKENS", default_context_limit))
-        output_limit = max(1024, _env_int("CAPCAP_AI_TRANSLATION_MAX_OUTPUT_TOKENS", default_output_limit))
-        default_segments = 40 if is_ollama else 80
-        try:
-            configured_max = int(os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS", str(default_segments)))
-        except ValueError:
-            configured_max = default_segments
-        max_segments = max(1, min(int(requested_max_segments or default_segments), max(1, configured_max)))
+        default_context_limit = 32000 if is_ollama else 64000
+        default_output_limit = 4096 if is_ollama else 8192
+        context_limit = max(4096, _env_int("CAPCAP_AI_TRANSLATION_CONTEXT_TOKENS", default_context_limit))
+        output_limit = max(2048, _env_int("CAPCAP_AI_TRANSLATION_MAX_OUTPUT_TOKENS", default_output_limit))
 
-        if (
+        # Smart full-context heuristic (for any language):
+        # If estimated response fits safely in single request (<= 3800 tokens and <= 250 cues)
+        # AND input tokens fit within context window (<= 24000 tokens),
+        # ALWAYS prefer full-context single request for 100% narrative and pronoun consistency!
+        safe_single_pass = (
             not force_ordered
-            and (not is_ollama or len(source_texts) <= max_segments)
-            and input_tokens + response_tokens <= context_limit
-            and response_tokens <= output_limit
-        ):
-            print(
-                "[AI Translation] Full-context request: "
-                f"input~{input_tokens} tokens, output~{response_tokens} tokens."
-            )
-            return ([(list(source_texts), list(translated_texts) if translated_texts is not None else None,
-                     min(output_limit, max(1024, response_tokens)))], True)
+            and input_tokens <= min(context_limit, 24000)
+            and response_tokens <= min(output_limit, 3800)
+            and len(source_texts) <= 250
+        )
 
-        max_chars = _env_int("CAPCAP_AI_TRANSLATION_MAX_CHARS", 18000)
-        # Draft rewriting sends both source and translated text in the prompt.
+        if safe_single_pass:
+            print(
+                "[AI Translation] Full-context single pass: "
+                f"segments={len(source_texts)}, input~{input_tokens} tokens, output~{response_tokens} tokens."
+            )
+            return ([(
+                list(source_texts),
+                list(translated_texts) if translated_texts is not None else None,
+                min(output_limit, max(1024, response_tokens)),
+                list(source_speakers) if source_speakers is not None else None,
+            )], True)
+
+        # For long videos exceeding single-pass limits (> 3600 response tokens or > 280 cues):
+        # Chunk dynamically by character and token budget (~1800 response tokens per batch,
+        # which translates to roughly 80-120 lines depending on language/character density).
+        max_batch_tokens = _env_int("CAPCAP_AI_TRANSLATION_BATCH_TOKENS", 1800)
+        max_chars = _env_int("CAPCAP_AI_TRANSLATION_MAX_CHARS", 12000)
         max_chars = max(2000, max_chars // (2 if translated_texts is not None else 1))
 
-        batches: list[tuple[list[str], list[str] | None, int]] = []
+        batches: list[tuple[list[str], list[str] | None, int, list[str] | None]] = []
         current_source: list[str] = []
         current_drafts: list[str] | None = [] if translated_texts is not None else None
+        current_speakers: list[str] | None = [] if source_speakers is not None else None
         current_chars = 0
         current_response_tokens = 0
         for index, source in enumerate(source_texts):
@@ -472,22 +642,34 @@ class TranslationOrchestrator:
             item_chars = len(source) + len(draft) + 16
             item_response_tokens = math.ceil(max(_estimate_tokens(source), _estimate_tokens(draft)) * 1.8) + 10
             if current_source and (
-                len(current_source) >= max_segments
-                or current_chars + item_chars > max_chars
-                or current_response_tokens + item_response_tokens > 3600
+                current_chars + item_chars > max_chars
+                or current_response_tokens + item_response_tokens > max_batch_tokens
             ):
-                batches.append((current_source, current_drafts, max(1024, min(4096, current_response_tokens + 128))))
+                batches.append((
+                    current_source,
+                    current_drafts,
+                    max(1024, min(4096, current_response_tokens + 128)),
+                    current_speakers,
+                ))
                 current_source = []
                 current_drafts = [] if translated_texts is not None else None
+                current_speakers = [] if source_speakers is not None else None
                 current_chars = 0
                 current_response_tokens = 0
             current_source.append(source)
             if current_drafts is not None:
                 current_drafts.append(draft)
+            if current_speakers is not None:
+                current_speakers.append(source_speakers[index] if index < len(source_speakers) else "")
             current_chars += item_chars
             current_response_tokens += item_response_tokens
         if current_source:
-            batches.append((current_source, current_drafts, max(1024, min(4096, current_response_tokens + 128))))
+            batches.append((
+                current_source,
+                current_drafts,
+                max(1024, min(4096, current_response_tokens + 128)),
+                current_speakers,
+            ))
         return batches, False
 
     def _emit_batch_callback(

@@ -177,6 +177,7 @@ class TranslationWorker(QThread):
         provider: str = "",
         batch_size: int = None,
         custom_prompt: str = "",
+        segments=None,
     ):
         super().__init__()
         self.srt_text = srt_text
@@ -187,6 +188,7 @@ class TranslationWorker(QThread):
         self.provider = str(provider or "").strip()
         self.batch_size = int(batch_size) if batch_size and int(batch_size) > 0 else None
         self.custom_prompt = str(custom_prompt or "").strip()
+        self.segments = segments
 
     def run(self):
         try:
@@ -207,10 +209,16 @@ class TranslationWorker(QThread):
                 if self.custom_prompt:
                     translate_kwargs["custom_system_prompt"] = self.custom_prompt
 
-                result = orch.translate_srt(
-                    self.srt_text,
-                    **translate_kwargs,
-                )
+                if self.segments:
+                    result = orch.translate_segments(
+                        segments=self.segments,
+                        **translate_kwargs,
+                    )
+                else:
+                    result = orch.translate_srt(
+                        self.srt_text,
+                        **translate_kwargs,
+                    )
                 if not result.success:
                     raise RuntimeError("; ".join(result.errors) or "Translation failed.")
                 translated_srt = orch.result_to_srt(result)

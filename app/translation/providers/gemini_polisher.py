@@ -58,15 +58,44 @@ class OpenAICompatiblePolisherProvider:
 
         return kwargs
 
+    def generate_text(
+        self,
+        *,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int = 1024,
+        timeout: int = 60,
+    ) -> str:
+        if not self.is_configured():
+            raise TranslationConfigError(f"{self.display_name} is not configured. Set its API key and model in Settings.")
+        client = self._get_client()
+        kwargs = self._build_completion_kwargs(
+            system_msg=system_msg,
+            user_msg=user_msg,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as api_err:
+            if "reasoning_effort" in kwargs and "reasoning_effort" in str(api_err):
+                kwargs.pop("reasoning_effort", None)
+                response = client.chat.completions.create(**kwargs)
+            else:
+                raise
+        return (response.choices[0].message.content or "").strip()
+
     def polish_batch(
         self,
         *,
         source_texts: list[str],
         translated_texts: list[str] = None,
+        source_speakers: list[str] = None,
         src_lang: str,
         target_lang: str,
         style_instruction: str = "",
         custom_system_prompt: str = "",
+        context_guidance: str = "",
         timeout: int = 120,
         max_retries: int = 2,
         max_tokens: int = 4096,
@@ -77,10 +106,12 @@ class OpenAICompatiblePolisherProvider:
         system_msg, user_msg = self._build_messages(
             source_texts=source_texts,
             translated_texts=translated_texts,
+            source_speakers=source_speakers,
             src_lang=src_lang,
             target_lang=target_lang,
             style_instruction=style_instruction,
             custom_system_prompt=custom_system_prompt,
+            context_guidance=context_guidance,
         )
 
         client = self._get_client()
@@ -133,13 +164,23 @@ class OpenAICompatiblePolisherProvider:
         raise TranslationProviderError(f"{self.display_name} failed: {last_error}")
 
     def _build_messages(
-        self, source_texts, translated_texts, src_lang, target_lang, style_instruction, custom_system_prompt: str = ""
+        self,
+        source_texts,
+        translated_texts,
+        src_lang,
+        target_lang,
+        style_instruction,
+        custom_system_prompt: str = "",
+        context_guidance: str = "",
+        source_speakers: list[str] = None,
     ) -> tuple[str, str]:
         return build_translation_messages(
             source_texts=source_texts,
             translated_texts=translated_texts,
+            source_speakers=source_speakers,
             src_lang=src_lang,
             target_lang=target_lang,
             style_instruction=style_instruction,
             custom_system_prompt=custom_system_prompt,
+            context_guidance=context_guidance,
         )

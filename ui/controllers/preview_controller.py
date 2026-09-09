@@ -1559,12 +1559,14 @@ class PreviewController:
         self.gui.log(f"[Preview] has_active_video_filters={has_active_video_filters}")
         mask_regions, logo_layers, _text_layers = self._extract_overlay_layers()
         has_overlays = bool(mask_regions or logo_layers)
+        has_warps = bool(getattr(self.gui, "video_time_warps", []))
         self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
 
-        # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed.
-        if mode == "subtitle" and not has_active_video_filters and not has_overlays:
-            self.gui.log("[Preview] Subtitle-only mode, no filters/overlays, using live preview")
+        # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed and no video time warps.
+        if mode == "subtitle" and not has_active_video_filters and not has_overlays and not has_warps:
+            self.gui.log("[Preview] Subtitle-only mode, no filters/overlays/warps, using live preview")
             try:
+                self.gui._preview_has_warps = False
                 self.gui._preview_video_has_burned_subtitles = False
                 if hasattr(self.gui.video_view, "set_preview_aspect_ratio"):
                     self.gui.video_view.set_preview_aspect_ratio(self.gui.get_output_ratio_key())
@@ -1590,6 +1592,8 @@ class PreviewController:
                 QMessageBox.warning(self.gui, "Error", "No active subtitle track is available for video preview.")
                 return
             subtitle_style = self.gui.get_subtitle_export_style(segments=preview_segments)
+        else:
+            subtitle_style = self.gui.get_subtitle_export_style()
             styled_signature = self._build_styled_preview_signature(
                 video_path=video_path,
                 audio_path=audio_path,
@@ -1707,6 +1711,7 @@ class PreviewController:
             if hasattr(self.gui, "hide_filter_thumbnail_preview"):
                 self.gui.hide_filter_thumbnail_preview()
             self.gui.last_preview_video_path = preview_path
+            self.gui._preview_has_warps = bool(getattr(self.gui, "video_time_warps", []))
             self.gui.processed_artifacts["preview_video"] = preview_path
             self.gui.last_styled_preview_path = preview_path
             self.gui.last_styled_preview_signature = styled_signature

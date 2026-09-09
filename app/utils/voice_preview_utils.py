@@ -49,6 +49,10 @@ def voice_provider(voice_name: str) -> str:
     raw = str(voice_name or "").strip()
     if raw.lower().startswith("f5:"):
         return "f5"
+    if raw.lower().startswith(("vieneu:", "vieneu_clone:")):
+        return "vieneu"
+    if raw.lower().startswith("capcut:"):
+        return "capcut"
     if ":" in raw:
         provider, _ = raw.split(":", 1)
         return provider.strip().lower() or "edge"

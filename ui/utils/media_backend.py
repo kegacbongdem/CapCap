@@ -250,13 +250,22 @@ class QtMediaPlayerBackend(QObject):
             self._player.setVideoOutput(video_view.video_item)
         self._player.positionChanged.connect(self.positionChanged.emit)
         self._player.durationChanged.connect(self.durationChanged.emit)
-        self._player.stateChanged.connect(lambda s: self.stateChanged.emit(int(s.value)))
+        def _on_qt_state_changed(s):
+            if getattr(self, "_video_frozen", False):
+                return
+            self.stateChanged.emit(int(s.value))
+        if hasattr(self._player, "playbackStateChanged"):
+            self._player.playbackStateChanged.connect(_on_qt_state_changed)
+        elif hasattr(self._player, "stateChanged"):
+            self._player.stateChanged.connect(_on_qt_state_changed)
         # When the clip reaches the end, the QMediaPlayer goes to
         # StoppedState — surface this so the timeline can stop too
         # (Bug 2: video not pausing at end, timeline keeps running).
         self._player.mediaStatusChanged.connect(self._on_media_status)
         self._mute_original = False
         self._mute_dubbed = False
+        self._video_frozen = False
+        self._video_time_warps = []
 
     def _on_media_status(self, status):
         try:
@@ -269,20 +278,38 @@ class QtMediaPlayerBackend(QObject):
         except Exception:
             pass
 
+    def set_time_warps(self, warps):
+        self._video_time_warps = list(warps or [])
+
+    def freeze_video_frame(self, anchor_ms):
+        self._video_frozen = True
+        self._player.pause()
+        self._player.setPosition(int(anchor_ms))
+
+    def unfreeze_video_frame(self, resume_pos_ms=None):
+        self._video_frozen = False
+        if resume_pos_ms is not None:
+            self._player.setPosition(int(resume_pos_ms))
+        self._player.play()
+
     def setSource(self, source):
         self._source_path = source.toLocalFile() if isinstance(source, QUrl) else str(source)
         self._player.setSource(source)
 
     def play(self):
+        self._video_frozen = False
         self._player.play()
 
     def pause(self):
+        self._video_frozen = False
         self._player.pause()
 
     def stop(self):
+        self._video_frozen = False
         self._player.stop()
 
-    def setPosition(self, position):
+    def setPosition(self, position, timeline_pos=None):
+        self._video_frozen = False
         self._player.setPosition(position)
 
     def position(self):
@@ -292,10 +319,12 @@ class QtMediaPlayerBackend(QObject):
         return self._player.duration()
 
     def playbackState(self):
+        if getattr(self, "_video_frozen", False):
+            return QMediaPlayer.PlayingState
         return self._player.playbackState()
 
     def is_playing(self):
-        return self.playbackState() == QMediaPlayer.PlayingState
+        return getattr(self, "_video_frozen", False) or (self.playbackState() == QMediaPlayer.PlayingState)
 
     def set_subtitle_file(self, subtitle_path, subtitle_style=None):
         return None
@@ -429,6 +458,8 @@ class MpvMediaPlayerBackend(QObject):
         self.supports_native_lut = False
         self._mute_original = False
         self._mute_dubbed = False
+        self._video_frozen = False
+        self._video_time_warps = []
 
         prepare_mpv_bundle()
         try:
@@ -601,6 +632,8 @@ class MpvMediaPlayerBackend(QObject):
         # properties every 200 ms while no media is loaded is needless work.
         if not self._source_path:
             return
+        if getattr(self, "_video_frozen", False):
+            return
         try:
             time_pos = self._read_property("time-pos", "time_pos", 0.0)
             duration = self._read_property("duration", default=0.0)
@@ -694,6 +727,7 @@ class MpvMediaPlayerBackend(QObject):
     def play(self):
         if not self._source_path:
             return
+        self._video_frozen = False
         self._player.pause = False
         if self._original_loaded_path:
             try:
@@ -712,6 +746,7 @@ class MpvMediaPlayerBackend(QObject):
             pass
 
     def pause(self):
+        self._video_frozen = False
         self._player.pause = True
         if self._original_loaded_path:
             try:
@@ -730,6 +765,7 @@ class MpvMediaPlayerBackend(QObject):
             pass
 
     def stop(self):
+        self._video_frozen = False
         self._player.pause = True
         if self._original_loaded_path:
             try:
@@ -755,7 +791,61 @@ class MpvMediaPlayerBackend(QObject):
         except Exception:
             pass
 
-    def setPosition(self, position):
+    def set_time_warps(self, warps):
+        self._video_time_warps = list(warps or [])
+
+    def freeze_video_frame(self, anchor_ms):
+        """Freezes the video frame at anchor_ms while keeping dubbed audio (TTS/music) playing."""
+        self._video_frozen = True
+        self._position_ms = int(anchor_ms)
+        try:
+            self._player.command("seek", anchor_ms / 1000.0, "absolute", "exact")
+            self._player.pause = True
+        except Exception:
+            pass
+        if self._original_loaded_path:
+            try:
+                self._original_player.pause()
+            except Exception:
+                pass
+        if self._dubbed_loaded_path:
+            try:
+                self._dubbed_player.play()
+            except Exception:
+                pass
+
+    def unfreeze_video_frame(self, resume_pos_ms=None):
+        """Unfreezes the video frame and resumes synchronized playback."""
+        self._video_frozen = False
+        if resume_pos_ms is not None:
+            self._position_ms = int(resume_pos_ms)
+            try:
+                self._player.command("seek", resume_pos_ms / 1000.0, "absolute", "exact")
+            except Exception:
+                pass
+            if self._original_loaded_path:
+                try:
+                    self._original_player.setPosition(int(resume_pos_ms))
+                except Exception:
+                    pass
+        try:
+            self._player.pause = False
+        except Exception:
+            pass
+        if self._original_loaded_path:
+            try:
+                self._original_player.play()
+            except Exception:
+                pass
+        if self._dubbed_loaded_path:
+            try:
+                self._dubbed_player.play()
+            except Exception:
+                pass
+        self._state = QMediaPlayer.PlayingState
+
+    def setPosition(self, position, timeline_pos=None):
+        self._video_frozen = False
         self._position_ms = int(position)
         if not self._source_path:
             self.positionChanged.emit(self._position_ms)
@@ -772,7 +862,15 @@ class MpvMediaPlayerBackend(QObject):
                 pass
         if self._dubbed_loaded_path:
             try:
-                self._dubbed_player.setPosition(int(position))
+                warps = getattr(self, "_video_time_warps", [])
+                if timeline_pos is not None:
+                    dubbed_pos = int(timeline_pos)
+                elif warps:
+                    from app.services.time_warp_service import TimeWarpService
+                    dubbed_pos = int(round(TimeWarpService.media_to_timeline_time(position / 1000.0, warps) * 1000))
+                else:
+                    dubbed_pos = int(position)
+                self._dubbed_player.setPosition(dubbed_pos)
             except Exception:
                 pass
         self.positionChanged.emit(self._position_ms)
@@ -784,10 +882,12 @@ class MpvMediaPlayerBackend(QObject):
         return self._duration_ms
 
     def playbackState(self):
+        if getattr(self, "_video_frozen", False):
+            return QMediaPlayer.PlayingState
         return self._state
 
     def is_playing(self):
-        return self._state == QMediaPlayer.PlayingState
+        return self._state == QMediaPlayer.PlayingState or getattr(self, "_video_frozen", False)
 
     def clear_subtitle(self):
         # Hiding a selected MPV subtitle track is not sufficient here: its
@@ -1251,6 +1351,8 @@ class MpvMediaPlayerBackend(QObject):
     def _sync_audio_to_video(self):
         if not self._source_path:
             return
+        if getattr(self, "_video_frozen", False):
+            return
         try:
             v_pos_ms = int(float(self._player.time_pos or 0) * 1000)
         except Exception:
@@ -1300,9 +1402,19 @@ class MpvMediaPlayerBackend(QObject):
                 a_pos_ms = int(self._dubbed_player.position() or 0)
             except Exception:
                 a_pos_ms = 0
-            if abs(v_pos_ms - a_pos_ms) > 300:
+
+            target_a_pos = v_pos_ms
+            warps = getattr(self, "_video_time_warps", [])
+            if warps:
                 try:
-                    self._dubbed_player.setPosition(int(v_pos_ms))
+                    from app.services.time_warp_service import TimeWarpService
+                    target_a_pos = int(round(TimeWarpService.media_to_timeline_time(v_pos_ms / 1000.0, warps) * 1000))
+                except Exception:
+                    target_a_pos = v_pos_ms
+
+            if abs(target_a_pos - a_pos_ms) > 300:
+                try:
+                    self._dubbed_player.setPosition(int(target_a_pos))
                 except Exception:
                     pass
 

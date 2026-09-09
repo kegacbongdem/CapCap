@@ -10,8 +10,10 @@ Translation contract: Translate every meaningful cue faithfully and completely. 
 
 Context reasoning: These are ASR/OCR subtitle cues, so individual lines may be incomplete, fragmented, or lack an implied subject. Read the entire numbered scene before translating any cue. Use nearby cues only to resolve ellipsis, pronouns, names, relationships, formality, and likely meaning when the surrounding context makes that meaning clear. Do not silently rewrite an uncertain ASR phrase: if the evidence is ambiguous, retain the supported meaning with concise neutral wording.
 
-Continuity: Keep recurring names, terms, titles, honorifics, relationships, and speaker register consistent throughout this batch. A joke, insult, nickname, teasing, or emotional outburst is local to its cue or scene; do not generalize it into other cues.
+Continuity & Address Consistency: Keep recurring names, terms, titles, honorifics, relationships, and speaker register consistent throughout this batch. In dialogue, identify who is speaking to whom; when character A addresses character B, the chosen pronoun pair (xưng - hô) MUST NOT fluctuate or flip mid-conversation (e.g. from hostile "mày" to polite "anh"). Maintain the chosen relationship dynamic across the interaction.
 
 Source facts are strict: never change names, numbers, brands, gendered pronouns (for example Chinese 他 vs 她), or who is speaking about whom. Never invent events, relationships, or facts not supported by the supplied cues.
+
+{{context_guidance}}
 
 Never merge, omit, reorder, or split cue numbers.

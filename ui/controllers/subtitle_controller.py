@@ -26,6 +26,7 @@ from translation import TranslationOrchestrator, load_prompt_options, load_trans
 class TranslationPromptDialog(QDialog):
     def __init__(self, parent, src_lang: str = "zh", target_lang: str = "vi"):
         super().__init__(parent)
+        self.settings = getattr(parent, "settings", None) or QSettings("CapCap", "VideoTranslatorGUI")
         self.setWindowTitle("Translation Settings & Prompt Review")
         self.setMinimumWidth(680)
         self.setMinimumHeight(600)
@@ -49,18 +50,14 @@ class TranslationPromptDialog(QDialog):
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
 
-        subtitle = QLabel("Configure AI provider, batch size, and prompt preset before running translation.")
+        subtitle = QLabel("Review AI provider and prompt preset before translating.")
         subtitle.setObjectName("dialogSubtitle")
         layout.addWidget(subtitle)
 
-        # Top row: Provider & Batch size
-        top_row = QHBoxLayout()
-        top_row.setSpacing(16)
-
-        # AI Provider column
+        # Provider field
         provider_col = QVBoxLayout()
         provider_col.setSpacing(6)
-        provider_label = QLabel("AI Provider:")
+        provider_label = QLabel("AI Provider (Configured in Settings):")
         provider_label.setObjectName("fieldLabel")
         provider_col.addWidget(provider_label)
 
@@ -70,35 +67,27 @@ class TranslationPromptDialog(QDialog):
         self.provider_combo.addItem("Ollama (Local)", "ollama")
         self.provider_combo.addItem("Google Translate (free, no key)", "google")
 
-        settings = QSettings("CapCap", "CapCap")
-        current_env = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "google_ai_studio").strip().lower()
+        # Resolve active provider from Settings:
+        current_env = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "").strip().lower()
         if current_env == "gemini":
             current_env = "google_ai_studio"
-        saved_provider = str(settings.value("translation_provider", current_env)).strip().lower()
-        idx_p = self.provider_combo.findData(saved_provider)
+        if current_env not in ("google_ai_studio", "openai", "ollama", "google"):
+            current_env = str(self.settings.value("translation_provider", "")).strip().lower()
+            if current_env == "gemini":
+                current_env = "google_ai_studio"
+        if current_env not in ("google_ai_studio", "openai", "ollama", "google"):
+            current_env = "google_ai_studio"
+
+        self.selected_provider = current_env
+        idx_p = self.provider_combo.findData(current_env)
         if idx_p >= 0:
             self.provider_combo.setCurrentIndex(idx_p)
         else:
             self.provider_combo.setCurrentIndex(0)
+        self.provider_combo.setEnabled(False)
+        self.provider_combo.setToolTip("AI Provider is configured in Settings. Open Settings to change provider or API keys.")
         provider_col.addWidget(self.provider_combo)
-        top_row.addLayout(provider_col, stretch=3)
-
-        # Batch size column
-        batch_col = QVBoxLayout()
-        batch_col.setSpacing(6)
-        batch_label = QLabel("Batch Size (Lines / Request):")
-        batch_label.setObjectName("fieldLabel")
-        batch_col.addWidget(batch_label)
-
-        self.batch_spin = QSpinBox()
-        self.batch_spin.setRange(1, 300)
-        self.batch_spin.setSingleStep(10)
-        saved_batch = int(settings.value("translation_batch_size", 80) or 80)
-        self.batch_spin.setValue(saved_batch)
-        batch_col.addWidget(self.batch_spin)
-        top_row.addLayout(batch_col, stretch=2)
-
-        layout.addLayout(top_row)
+        layout.addLayout(provider_col)
 
         # Provider note label
         self.provider_hint = QLabel()
@@ -129,10 +118,8 @@ class TranslationPromptDialog(QDialog):
             p_name = p.get("name", p_id)
             self.preset_combo.addItem(p_name, p_id)
 
-        saved_preset = str(
-            settings.value("translation_preset_id", os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default"))
-            or os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "general_default")
-        ).strip()
+        env_preset = str(os.getenv("CAPCAP_TRANSLATION_PRESET_ID", "")).strip()
+        saved_preset = env_preset or str(self.settings.value("translation_preset_id", "general_default")).strip()
         idx_preset = self.preset_combo.findData(saved_preset)
         if idx_preset >= 0:
             self.preset_combo.setCurrentIndex(idx_preset)
@@ -140,6 +127,17 @@ class TranslationPromptDialog(QDialog):
             self.preset_combo.setCurrentIndex(0)
 
         layout.addWidget(self.preset_combo)
+
+        # Auto-detect dialogue context & pronouns checkbox
+        self.auto_context_cb = QCheckBox("Tự động phân tích bối cảnh hội thoại & xưng hô (Auto-detect dialogue context & pronouns)")
+        saved_auto = self.settings.value("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
+        is_checked = str(saved_auto).strip().lower() not in ("0", "false", "no")
+        self.auto_context_cb.setChecked(is_checked)
+        self.auto_context_cb.setToolTip(
+            "AI sẽ phân tích toàn bộ kịch bản (video ngắn) hoặc các câu đầu (video dài) để lập hồ sơ nhân vật, "
+            "vai vế và quy tắc xưng hô 2 chiều (address_rules), đảm bảo xưng hô nhất quán tuyệt đối."
+        )
+        layout.addWidget(self.auto_context_cb)
 
         # Prompt editor
         prompt_box_label = QLabel("System Prompt (Editable):")
@@ -178,10 +176,12 @@ class TranslationPromptDialog(QDialog):
             self.provider_hint.setText("💡 Google Translate translates directly via web API (free, no key). It does not use LLM system prompts.")
             self.prompt_edit.setEnabled(False)
             self.preset_combo.setEnabled(False)
+            self.auto_context_cb.setEnabled(False)
         else:
             self.provider_hint.setText("")
             self.prompt_edit.setEnabled(True)
             self.preset_combo.setEnabled(True)
+            self.auto_context_cb.setEnabled(True)
 
     def _on_preset_changed(self):
         preset_id = self.preset_combo.currentData() or "general_default"
@@ -190,19 +190,33 @@ class TranslationPromptDialog(QDialog):
             source_lang=self.src_lang,
             target_lang=self.target_lang,
         )
+        self._rendered_preset_text = rendered.strip()
         self.prompt_edit.setPlainText(rendered)
 
     def _on_translate(self):
         self.selected_provider = self.provider_combo.currentData() or "google_ai_studio"
-        self.selected_batch_size = int(self.batch_spin.value())
-        self.selected_prompt = self.prompt_edit.toPlainText().strip()
         self.selected_preset_id = self.preset_combo.currentData() or "general_default"
 
-        settings = QSettings("CapCap", "CapCap")
-        settings.setValue("translation_provider", self.selected_provider)
-        settings.setValue("translation_batch_size", self.selected_batch_size)
-        settings.setValue("translation_preset_id", self.selected_preset_id)
+        current_prompt = self.prompt_edit.toPlainText().strip()
+        rendered_prompt = getattr(self, "_rendered_preset_text", "").strip()
+        if current_prompt == rendered_prompt:
+            self.selected_prompt = ""
+            self.is_custom_prompt = False
+        else:
+            self.selected_prompt = current_prompt
+            self.is_custom_prompt = True
+
+        auto_val = "1" if self.auto_context_cb.isChecked() else "0"
+        self.settings.setValue("auto_translation_context", auto_val)
+        os.environ["CAPCAP_AUTO_TRANSLATION_CONTEXT"] = auto_val
+
+        self.settings.setValue("translation_preset_id", self.selected_preset_id)
         os.environ["CAPCAP_TRANSLATION_PRESET_ID"] = self.selected_preset_id
+
+        # Mirror to legacy CapCap namespace for compatibility across controllers
+        legacy_s = QSettings("CapCap", "CapCap")
+        legacy_s.setValue("translation_preset_id", self.selected_preset_id)
+        legacy_s.setValue("auto_translation_context", auto_val)
 
         self.accept()
 
@@ -261,6 +275,11 @@ class TranslationPromptDialog(QDialog):
             }
             QComboBox:focus {
                 border: 1px solid #38bdf8;
+            }
+            QComboBox:disabled {
+                background: #141f2e;
+                color: #cbd5e1;
+                border: 1px solid #28394e;
             }
             QComboBox QAbstractItemView {
                 background: #1e293b;
@@ -486,8 +505,31 @@ class SubtitleController:
                 self.gui.log("[Translation] Translation canceled by user.")
                 return
             chosen_provider = dialog.selected_provider
-            chosen_batch_size = dialog.selected_batch_size
+            chosen_batch_size = getattr(dialog, "selected_batch_size", None)
             chosen_prompt = dialog.selected_prompt
+
+        chosen_preset_id = os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default"
+        has_diarization = False
+        speaker_count = 0
+        source_segments = None
+        if hasattr(self.gui, "current_segments") and self.gui.current_segments:
+            source_segments = [
+                seg.to_original_subtitle_dict() if hasattr(seg, "to_original_subtitle_dict")
+                else (seg if isinstance(seg, dict) else getattr(seg, "__dict__", {}))
+                for seg in self.gui.current_segments
+            ]
+            speakers = {
+                str(s.get("metadata", {}).get("speaker") or s.get("speaker") or "").strip()
+                for s in source_segments
+            }
+            speakers.discard("")
+            if speakers:
+                has_diarization = True
+                speaker_count = len(speakers)
+
+        diarize_label = f"ON ({speaker_count} speakers)" if has_diarization else "OFF"
+        prompt_label = f"'{chosen_preset_id}' (Customized)" if chosen_prompt else f"'{chosen_preset_id}'"
+        self.gui.log(f"[Translation] Prompt: {prompt_label} | Provider: '{chosen_provider or 'default'}' | Speaker Diarization: {diarize_label}")
 
         model_path = None
         enable_polish = False if chosen_provider == "google" else bool(self.gui.is_ai_polish_enabled())
@@ -509,6 +551,7 @@ class SubtitleController:
             provider=chosen_provider,
             batch_size=chosen_batch_size,
             custom_prompt=chosen_prompt,
+            segments=source_segments,
         )
         self.gui.translation_thread.finished.connect(self.gui.on_translation_finished)
         self.gui.translation_thread.start()

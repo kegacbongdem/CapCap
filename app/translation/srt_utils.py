@@ -50,8 +50,8 @@ def clone_with_texts(segments: list[dict], texts: list[str], provider: str, poli
     for seg, text in zip(segments, texts):
         cloned.append(
             {
-                "start": seg["start"],
-                "end": seg["end"],
+                "start": seg.get("start", 0.0),
+                "end": seg.get("end", 0.0),
                 "text": (text or "").strip(),
                 "source_text": seg.get("source_text") or seg.get("text", ""),
                 "provider": provider,

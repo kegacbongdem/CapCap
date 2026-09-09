@@ -65,6 +65,7 @@ class PreviewMuxWorker(QThread):
                     video_filter_state={} if final_render_applies_filters else self.video_filter_state,
                 )
 
+            warps = (self.subtitle_style or {}).get("video_time_warps")
             if self.render_subtitles and self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
                 engine = EngineRuntime()
                 ok = engine.embed_subtitles(
@@ -81,9 +82,43 @@ class PreviewMuxWorker(QThread):
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
                     fast=True,
+                    video_time_warps=warps,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview video.")
+                output = self.output_path
+            elif warps:
+                from video_processor import embed_ass_subtitles, srt_to_ass
+                temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                empty_srt = os.path.join(temp_dir, f"empty_preview_{int(time.time())}.srt")
+                with open(empty_srt, "w", encoding="utf-8") as f:
+                    f.write("")
+                empty_ass = os.path.join(temp_dir, f"empty_preview_{int(time.time())}.ass")
+                srt_to_ass(empty_srt, empty_ass)
+                ok = embed_ass_subtitles(
+                    current_video,
+                    empty_ass,
+                    self.output_path,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
+                    target_width=self.target_width,
+                    target_height=self.target_height,
+                    output_scale_mode=self.output_scale_mode,
+                    output_fill_focus_x=self.output_fill_focus_x,
+                    output_fill_focus_y=self.output_fill_focus_y,
+                    video_filter_state=self.video_filter_state,
+                    fast=True,
+                    video_time_warps=warps,
+                )
+                for p in (empty_srt, empty_ass):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+                if not ok:
+                    raise RuntimeError("Failed to render freeze frame preview video.")
                 output = self.output_path
             else:
                 if current_video != self.output_path:
@@ -165,6 +200,18 @@ class QuickPreviewWorker(QThread):
                 )
                 current_video = voice_clip
 
+            raw_warps = (self.subtitle_style or {}).get("video_time_warps") or []
+            clip_warps = []
+            if raw_warps:
+                c_start = float(self.start_seconds)
+                c_end = c_start + float(self.duration_seconds)
+                for w in raw_warps:
+                    w_t = float(w.get("time", 0.0))
+                    if c_start <= w_t <= c_end:
+                        cw = dict(w)
+                        cw["time"] = max(0.0, round(w_t - c_start, 3))
+                        clip_warps.append(cw)
+
             if self.mode in ("subtitle", "both") and self.ass_path and os.path.exists(self.ass_path):
                 engine = EngineRuntime()
                 ok = engine.embed_ass_subtitles(
@@ -184,6 +231,7 @@ class QuickPreviewWorker(QThread):
                     video_filter_state=self.video_filter_state,
                     audio_gain_db=self.original_audio_gain_db,
                     fast=True,
+                    video_time_warps=clip_warps,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")
@@ -208,9 +256,42 @@ class QuickPreviewWorker(QThread):
                     video_filter_state=self.video_filter_state,
                     audio_gain_db=self.original_audio_gain_db,
                     fast=True,
+                    video_time_warps=clip_warps,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")
+            elif clip_warps:
+                from video_processor import embed_ass_subtitles, srt_to_ass
+                empty_srt = os.path.join(temp_dir, f"empty_clip_{stamp}.srt")
+                with open(empty_srt, "w", encoding="utf-8") as f:
+                    f.write("")
+                empty_ass = os.path.join(temp_dir, f"empty_clip_{stamp}.ass")
+                srt_to_ass(empty_srt, empty_ass)
+                ok = embed_ass_subtitles(
+                    current_video,
+                    empty_ass,
+                    self.output_path,
+                    blur_region=self.blur_regions,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
+                    target_width=self.target_width,
+                    target_height=self.target_height,
+                    output_scale_mode=self.output_scale_mode,
+                    output_fill_focus_x=self.output_fill_focus_x,
+                    output_fill_focus_y=self.output_fill_focus_y,
+                    video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
+                    fast=True,
+                    video_time_warps=clip_warps,
+                )
+                for p in (empty_srt, empty_ass):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+                if not ok:
+                    raise RuntimeError("Failed to render preview clip.")
             else:
                 shutil.copyfile(current_video, self.output_path)
 

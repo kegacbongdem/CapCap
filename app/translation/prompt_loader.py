@@ -52,6 +52,10 @@ def load_prompt_options(template_name: str) -> list[tuple[str, str]]:
 def render_prompt(template_name: str, **values) -> str:
     template = load_prompt(template_name)
     required = set(_PLACEHOLDER_RE.findall(template))
+    defaults = {"context_guidance": "", "style_clause": ""}
+    for k, v in defaults.items():
+        if k not in values:
+            values[k] = v
     missing = sorted(key for key in required if key not in values)
     if missing:
         raise PromptTemplateError(
@@ -94,9 +98,18 @@ def render_preset_prompt(preset_id: str, **values) -> str:
         "source_lang": "auto",
         "target_lang": "vi",
         "style_clause": "",
+        "context_guidance": "",
     }
     merged_values.update(values)
-    return _PLACEHOLDER_RE.sub(lambda match: str(merged_values.get(match.group(1), "")), template).strip()
+    rendered = _PLACEHOLDER_RE.sub(lambda match: str(merged_values.get(match.group(1), "")), template).strip()
+    guidance = str(merged_values.get("context_guidance", "")).strip()
+    if guidance and "{{context_guidance}}" not in template:
+        closing = "Never merge, omit, reorder, or split cue numbers."
+        if closing in rendered:
+            rendered = rendered.replace(closing, f"{guidance}\n\n{closing}")
+        else:
+            rendered = f"{rendered}\n\n{guidance}"
+    return rendered
 
 
 def extract_preset_rules(preset_id: str) -> str:

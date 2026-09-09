@@ -54,6 +54,102 @@ def refresh_video_dimensions(gui, path: str, get_video_dimensions):
         pass
 
 
+def _is_warped_preview(gui) -> bool:
+    if not getattr(gui, "_preview_has_warps", False):
+        return False
+    current_source = str(getattr(gui.media_player, "_source_path", "") or "")
+    preview_source = str(getattr(gui, "last_preview_video_path", "") or "")
+    return bool(
+        current_source
+        and preview_source
+        and os.path.exists(preview_source)
+        and os.path.abspath(current_source) == os.path.abspath(preview_source)
+    )
+
+
+def _stop_freeze_timer(gui):
+    timer = getattr(gui, "_freeze_playback_timer", None)
+    if timer is not None and timer.isActive():
+        timer.stop()
+
+
+def _get_or_create_freeze_timer(gui):
+    timer = getattr(gui, "_freeze_playback_timer", None)
+    if timer is None:
+        timer = QTimer(gui)
+        timer.timeout.connect(lambda: _on_freeze_timer_tick(gui))
+        gui._freeze_playback_timer = timer
+    return timer
+
+
+def _on_freeze_timer_tick(gui):
+    w = getattr(gui, "_active_freeze_warp", None)
+    if not w:
+        _stop_freeze_timer(gui)
+        return
+
+    is_playing = False
+    try:
+        is_playing = bool(getattr(gui.timeline, "_playing", False))
+    except Exception:
+        pass
+
+    if not is_playing:
+        _stop_freeze_timer(gui)
+        gui._active_freeze_warp = None
+        return
+
+    now = time.monotonic()
+    elapsed = now - getattr(gui, "_freeze_start_mono", now)
+    dur = float(getattr(gui, "_freeze_duration_s", 0.0))
+
+    warps = getattr(gui, "video_time_warps", [])
+    total_warps_dur = sum(float(wp.get("duration", 0.0)) for wp in warps)
+    media_dur = int(gui.media_player.duration() or 0)
+    total_duration = media_dur + int(round(total_warps_dur * 1000))
+
+    if elapsed < dur:
+        current_tl_s = getattr(gui, "_freeze_anchor_tl_s", 0.0) + elapsed
+        tl_position = int(round(current_tl_s * 1000))
+
+        gui.timeline.set_position(tl_position)
+        update_duration_label(gui, tl_position, total_duration)
+        try:
+            gui.refresh_timed_layer_preview(tl_position)
+        except Exception:
+            pass
+        try:
+            gui.update_playback_subtitle_highlight(tl_position)
+        except Exception:
+            pass
+    else:
+        # Freeze period completed!
+        _stop_freeze_timer(gui)
+        completed = getattr(gui, "_completed_freeze_warps", None)
+        if completed is None:
+            completed = set()
+            gui._completed_freeze_warps = completed
+        completed.add(str(w.get("id", "")))
+        gui._active_freeze_warp = None
+
+        end_tl_s = getattr(gui, "_freeze_anchor_tl_s", 0.0) + dur
+        tl_position = int(round(end_tl_s * 1000))
+        gui.timeline.set_position(tl_position)
+        update_duration_label(gui, tl_position, total_duration)
+
+        # Resume media player playback from anchor point (+35ms to clear anchor threshold)
+        anchor_ms = getattr(gui, "_freeze_anchor_ms", int(round(float(w.get("time", 0.0)) * 1000)))
+        resume_pos = min(media_dur, anchor_ms + 35)
+        if hasattr(gui.media_player, "unfreeze_video_frame"):
+            gui.media_player.unfreeze_video_frame(resume_pos)
+        else:
+            gui.media_player.setPosition(resume_pos)
+            gui.media_player.play()
+        gui.timeline.set_playing(True)
+        if hasattr(gui, "refresh_play_button_icon"):
+            gui.refresh_play_button_icon()
+
+
 def toggle_play(gui):
     try:
         if hasattr(gui, "ensure_media_backend_ready"):
@@ -80,7 +176,11 @@ def toggle_play(gui):
             and gui._is_realtime_color_filter_state()
         )
 
-        if gui.media_player.is_playing():
+        if gui.media_player.is_playing() or getattr(gui, "_active_freeze_warp", None) is not None:
+            _stop_freeze_timer(gui)
+            gui._active_freeze_warp = None
+            if hasattr(gui.media_player, "unfreeze_video_frame"):
+                gui.media_player.unfreeze_video_frame()
             gui.media_player.pause()
             if hasattr(gui, "refresh_play_button_icon"):
                 gui.refresh_play_button_icon()
@@ -144,15 +244,43 @@ def toggle_play(gui):
                 and gui._blur_effect_enabled()
             ):
                 gui.video_view.set_blur_edit_enabled(False)
-            # The track inspector is always expanded - no auto-collapse.
+
+            # If resuming playback from inside an unbaked freeze region:
+            if not _is_warped_preview(gui) and getattr(gui, "video_time_warps", []):
+                warps = gui.video_time_warps
+                current_tl_s = gui.timeline._playhead if hasattr(gui, "timeline") else (gui.media_player.position() / 1000.0)
+                sorted_warps = sorted(warps, key=lambda x: float(x.get("time", 0.0)))
+                accum = 0.0
+                for w in sorted_warps:
+                    anchor = float(w.get("time", 0.0))
+                    dur = float(w.get("duration", 0.0))
+                    w_start = anchor + accum
+                    w_end = w_start + dur
+                    if w_start <= current_tl_s < w_end - 0.04:
+                        # Resume remaining freeze duration
+                        remaining = w_end - current_tl_s
+                        anchor_ms = int(round(anchor * 1000))
+                        if hasattr(gui.media_player, "freeze_video_frame"):
+                            gui.media_player.freeze_video_frame(anchor_ms)
+                        else:
+                            gui.media_player.setPosition(anchor_ms)
+                            gui.media_player.pause()
+                        gui._active_freeze_warp = w
+                        gui._freeze_start_mono = time.monotonic()
+                        gui._freeze_anchor_tl_s = current_tl_s
+                        gui._freeze_duration_s = remaining
+                        gui._freeze_anchor_ms = anchor_ms
+                        _get_or_create_freeze_timer(gui).start(20)
+                        gui.timeline.set_playing(True)
+                        if hasattr(gui, "refresh_play_button_icon"):
+                            gui.refresh_play_button_icon()
+                        return
+                    accum += dur
+
             gui.media_player.play()
             gui.timeline.set_playing(True)
             if hasattr(gui, "refresh_play_button_icon"):
                 gui.refresh_play_button_icon()
-            # Apply the M1 mask filter on play so the colour shows
-            # while the video is playing. Use force=True to bypass
-            # the is_playing() check (the play() call above already
-            # set the state to PlayingState).
             if hasattr(gui, "_apply_mask_to_preview"):
                 try:
                     gui._apply_mask_to_preview(force=True)
@@ -168,6 +296,9 @@ def toggle_play(gui):
 def stop_video(gui):
     if hasattr(gui, "ensure_media_backend_ready"):
         gui.ensure_media_backend_ready()
+    _stop_freeze_timer(gui)
+    gui._active_freeze_warp = None
+    gui._completed_freeze_warps = set()
     if hasattr(gui, "stop_audio_preview"):
         gui.stop_audio_preview()
     elif hasattr(gui, "audio_preview_player"):
@@ -184,15 +315,90 @@ def stop_video(gui):
 
 
 def position_changed(gui, position):
-    gui.timeline.set_position(position)
-    update_duration_label(gui, position, gui.media_player.duration())
+    if _is_warped_preview(gui):
+        tl_position = position
+        total_duration = gui.media_player.duration()
+        gui.timeline.set_position(tl_position)
+        update_duration_label(gui, tl_position, total_duration)
+        try:
+            gui.refresh_timed_layer_preview(tl_position)
+        except Exception:
+            pass
+        try:
+            gui.update_playback_subtitle_highlight(tl_position)
+        except Exception:
+            pass
+        return
+
+    # If freeze playback timer is holding frame, let timer handle position
+    if getattr(gui, "_active_freeze_warp", None) is not None:
+        return
+
+    warps = getattr(gui, "video_time_warps", [])
+    if warps:
+        from app.services.time_warp_service import TimeWarpService
+        is_playing = False
+        try:
+            is_playing = bool(gui.media_player.is_playing())
+        except Exception:
+            pass
+
+        if is_playing:
+            completed = getattr(gui, "_completed_freeze_warps", None)
+            if completed is None:
+                completed = set()
+                gui._completed_freeze_warps = completed
+
+            sorted_warps = sorted(warps, key=lambda x: float(x.get("time", 0.0)))
+            accum = 0.0
+            for w in sorted_warps:
+                w_id = str(w.get("id", ""))
+                anchor_s = float(w.get("time", 0.0))
+                anchor_ms = int(round(anchor_s * 1000))
+                dur_s = float(w.get("duration", 0.0))
+                w_tl_start = anchor_s + accum
+
+                prev_pos = getattr(gui, "_last_media_pos", position)
+                in_window = (w_id not in completed) and (
+                    (anchor_ms - 40 <= position <= anchor_ms + 150)
+                    or (prev_pos < anchor_ms <= position)
+                )
+                if in_window:
+                    # Trigger live freeze!
+                    gui._last_media_pos = anchor_ms
+                    if hasattr(gui.media_player, "freeze_video_frame"):
+                        gui.media_player.freeze_video_frame(anchor_ms)
+                    else:
+                        gui.media_player.pause()
+                        gui.media_player.setPosition(anchor_ms)
+                    gui._active_freeze_warp = w
+                    gui._freeze_start_mono = time.monotonic()
+                    gui._freeze_anchor_tl_s = w_tl_start
+                    gui._freeze_duration_s = dur_s
+                    gui._freeze_anchor_ms = anchor_ms
+                    _get_or_create_freeze_timer(gui).start(20)
+                    return
+
+                accum += dur_s
+
+        gui._last_media_pos = position
+        tl_time_s = TimeWarpService.media_to_timeline_time(position / 1000.0, warps)
+        tl_position = int(round(tl_time_s * 1000))
+        total_warps_dur = sum(float(w.get("duration", 0.0)) for w in warps)
+        total_duration = gui.media_player.duration() + int(round(total_warps_dur * 1000))
+    else:
+        tl_position = position
+        total_duration = gui.media_player.duration()
+
+    gui.timeline.set_position(tl_position)
+    update_duration_label(gui, tl_position, total_duration)
     try:
-        gui.refresh_timed_layer_preview(position)
+        gui.refresh_timed_layer_preview(tl_position)
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] timed layer refresh error: {exc}")
     try:
-        gui.update_playback_subtitle_highlight(position)
+        gui.update_playback_subtitle_highlight(tl_position)
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] position highlight error: {exc}")
@@ -311,15 +517,61 @@ def _compute_base_volume(gui, track, meta) -> float:
 
 
 def duration_changed(gui, duration):
-    gui.timeline.set_duration(duration)
-    update_duration_label(gui, gui.media_player.position(), duration)
+    if _is_warped_preview(gui):
+        tl_duration = duration
+    else:
+        warps = getattr(gui, "video_time_warps", [])
+        if warps:
+            total_warps_dur = sum(float(w.get("duration", 0.0)) for w in warps)
+            tl_duration = duration + int(round(total_warps_dur * 1000))
+        else:
+            tl_duration = duration
+    gui.timeline.set_duration(tl_duration)
+    update_duration_label(gui, gui.media_player.position(), tl_duration)
 
 
 def set_position(gui, position):
     if hasattr(gui, "ensure_media_backend_ready"):
         gui.ensure_media_backend_ready()
-    gui.media_player.setPosition(position)
-    gui.timeline.set_position(position)
+
+    _stop_freeze_timer(gui)
+    gui._active_freeze_warp = None
+
+    if _is_warped_preview(gui):
+        media_pos = position
+        if hasattr(gui.media_player, "set_time_warps"):
+            gui.media_player.set_time_warps([])
+        gui.media_player.setPosition(media_pos)
+        gui.timeline.set_position(position)
+    else:
+        warps = getattr(gui, "video_time_warps", [])
+        if warps:
+            from app.services.time_warp_service import TimeWarpService
+            target_tl_s = position / 1000.0
+            # Re-arm any warps whose timeline start is after the new position
+            completed = getattr(gui, "_completed_freeze_warps", None)
+            if completed:
+                sorted_warps = sorted(warps, key=lambda x: float(x.get("time", 0.0)))
+                accum = 0.0
+                to_remove = set()
+                for w in sorted_warps:
+                    w_start = float(w.get("time", 0.0)) + accum
+                    if w_start >= target_tl_s - 0.05:
+                        to_remove.add(str(w.get("id", "")))
+                    accum += float(w.get("duration", 0.0))
+                gui._completed_freeze_warps = completed - to_remove
+
+            media_time_s = TimeWarpService.timeline_to_media_time(target_tl_s, warps)
+            media_pos = int(round(media_time_s * 1000))
+        else:
+            media_pos = position
+        if hasattr(gui.media_player, "set_time_warps"):
+            gui.media_player.set_time_warps(warps)
+        try:
+            gui.media_player.setPosition(media_pos, timeline_pos=position)
+        except TypeError:
+            gui.media_player.setPosition(media_pos)
+        gui.timeline.set_position(position)
     try:
         gui.update_playback_subtitle_highlight(position)
     except Exception as exc:
@@ -333,7 +585,7 @@ def set_position(gui, position):
                 duration_ms = int(gui.media_player.duration() or 0)
             except Exception:
                 duration_ms = 0
-            gui.play_btn.setEnabled(duration_ms <= 0 or position < duration_ms - 250)
+            gui.play_btn.setEnabled(duration_ms <= 0 or media_pos < duration_ms - 250)
     except Exception:
         pass
     if (

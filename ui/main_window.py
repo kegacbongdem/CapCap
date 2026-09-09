@@ -11,7 +11,7 @@ from uuid import uuid4
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QToolButton, QLabel, QLineEdit,
-                             QFileDialog, QTextEdit, QComboBox,
+                             QFileDialog, QTextEdit, QComboBox, QCheckBox,
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout,
@@ -744,6 +744,10 @@ class VideoTranslatorGUI(QMainWindow):
 
         self._deferred_startup_stage1_done = False
         self._deferred_startup_stage2_done = False
+        self.video_time_warps: list[dict] = []
+        self._preview_has_warps = False
+        self._active_freeze_warp = None
+        self._completed_freeze_warps = set()
 
         self.setup_ui()
         self._configure_local_voice_mode_ui()
@@ -1173,6 +1177,8 @@ class VideoTranslatorGUI(QMainWindow):
             return "Piper"
         if provider_key == "vieneu":
             return "VieNeu"
+        if provider_key == "capcut":
+            return "CapCut"
         if provider_key == "edge":
             return "Edge"
         return str(provider or "Other").strip().title() or "Other"
@@ -1358,6 +1364,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.create_voice_clone_btn.setVisible(engine == "vieneu")
         self.refresh_voice_catalog_combos()
         self._update_voice_preview_meta()
+        if hasattr(self, "refresh_detected_speakers_section"):
+            self.refresh_detected_speakers_section()
 
     def load_voice_preview_catalog(self):
         self._auto_sync_piper_voices_to_catalog()
@@ -1923,6 +1931,7 @@ class VideoTranslatorGUI(QMainWindow):
         name: str | None = None,
         voice: str | None = None,
         voice_gender_filter: str | None = None,
+        voice_engine_filter: str | None = None,
     ) -> None:
         state = getattr(self, "current_project_state", None)
         speaker = str(speaker or "").strip()
@@ -1936,6 +1945,8 @@ class VideoTranslatorGUI(QMainWindow):
             entry["voice"] = str(voice or "").strip()
         if voice_gender_filter is not None:
             entry["voice_gender_filter"] = str(voice_gender_filter or "Any").strip() or "Any"
+        if voice_engine_filter is not None:
+            entry["voice_engine_filter"] = str(voice_engine_filter or "All").strip() or "All"
         assignments[speaker] = entry
         state.set_setting("speaker_voice_assignments", assignments)
         self.project_service.save_project(state)
@@ -1945,27 +1956,74 @@ class VideoTranslatorGUI(QMainWindow):
         self,
         *,
         gender: str = "any",
+        engine: str = "all",
         include_voice: str = "",
     ) -> list[tuple[str, str]]:
-        """Return gender-filtered voices for a speaker row independently.
+        """Return gender- and engine-filtered voices for a speaker row independently.
 
         ``free_voice_combo`` intentionally represents only Voice Setup.  A
-        speaker's filter/search must never depend on that combo's contents.
+        speaker can choose from all available voice providers (Piper, VieNeu,
+        CapCut, Edge) independently of the global Voice Setup selection.
         Keep an already assigned voice visible while filtering so changing a
         filter cannot silently replace the speaker's mapping.
         """
         wanted_gender = self._normalize_gender_value(gender)
+        wanted_engine = str(engine or "all").strip().lower()
         assigned = str(include_voice or "").strip()
+        target_language = self.get_target_language_code()
+
+        all_catalog = list(getattr(self, "voice_catalog_entries_all", []) or [])
+        if not all_catalog:
+            all_catalog = list(getattr(self, "voice_catalog_entries", []) or [])
+
         entries: list[tuple[str, str]] = []
-        for entry in sorted(list(getattr(self, "voice_catalog_entries", []) or []), key=self._voice_entry_sort_key):
+        for entry in sorted(all_catalog, key=self._voice_entry_sort_key):
+            if not entry or not isinstance(entry, dict):
+                continue
+            if not entry.get("enabled", True):
+                continue
+
             value = self._voice_catalog_data_value(entry)
             if not value:
                 continue
+
+            provider = str(entry.get("provider", "")).strip().lower()
+
+            # Engine / provider filter
+            if wanted_engine not in ("all", "any", ""):
+                if wanted_engine in ("vieneu", "vieneu_clone"):
+                    if provider not in ("vieneu", "vieneu_clone") and value != assigned:
+                        continue
+                elif wanted_engine == "capcut":
+                    if provider != "capcut" and value != assigned:
+                        continue
+                elif wanted_engine == "piper":
+                    if provider != "piper" and value != assigned:
+                        continue
+                elif wanted_engine == "edge":
+                    if provider != "edge" and value != assigned:
+                        continue
+
+            # Language filter
+            entry_lang = str(entry.get("language", "")).strip().lower().split("-", 1)[0]
+            if entry_lang and target_language and entry_lang != target_language and value != assigned:
+                continue
+
+            # Gender filter
             entry_gender = self._normalize_gender_value(str(entry.get("gender", "")))
-            label = str(entry.get("name", entry.get("id", "Voice")) or "Voice")
             gender_match = wanted_gender not in {"male", "female"} or entry_gender in {wanted_gender, "", "any"}
-            if gender_match or value == assigned:
-                entries.append((label, value))
+            if not gender_match and value != assigned:
+                continue
+
+            raw_name = str(entry.get("name", entry.get("id", "Voice")) or "Voice").strip()
+            provider_lbl = self._voice_provider_label(provider)
+            if f"({provider_lbl})" not in raw_name and f"[{provider_lbl}]" not in raw_name and "(clone)" not in raw_name.lower():
+                label = f"{raw_name} ({provider_lbl})"
+            else:
+                label = raw_name
+
+            entries.append((label, value))
+
         return entries
 
     def refresh_detected_speakers_section(self) -> None:
@@ -2014,12 +2072,31 @@ class VideoTranslatorGUI(QMainWindow):
             speaker_label.setToolTip(f"Timeline ID: {speaker}")
             header.addWidget(speaker_label, 1)
             row_layout.addLayout(header)
-            row_layout.addWidget(QLabel("Voice type"))
+            filter_row = QHBoxLayout()
+            filter_row.setSpacing(6)
+
+            engine_box = QVBoxLayout()
+            engine_box.setSpacing(2)
+            engine_box.addWidget(QLabel("Engine"))
+            engine_combo = QComboBox()
+            engine_combo.addItems(["All", "Piper", "VieNeu", "CapCut"])
+            saved_engine = str(entry.get("voice_engine_filter", "All") or "All").strip()
+            eng_map = {"all": "All", "piper": "Piper", "vieneu": "VieNeu", "capcut": "CapCut"}
+            engine_combo.setCurrentText(eng_map.get(saved_engine.lower(), "All"))
+            engine_box.addWidget(engine_combo)
+            filter_row.addLayout(engine_box, 1)
+
+            gender_box = QVBoxLayout()
+            gender_box.setSpacing(2)
+            gender_box.addWidget(QLabel("Voice type"))
             gender_combo = QComboBox()
             gender_combo.addItems(["Any", "Male", "Female"])
             saved_gender = str(entry.get("voice_gender_filter", "Any") or "Any").strip().title()
             gender_combo.setCurrentText(saved_gender if saved_gender in {"Any", "Male", "Female"} else "Any")
-            row_layout.addWidget(gender_combo)
+            gender_box.addWidget(gender_combo)
+            filter_row.addLayout(gender_box, 1)
+
+            row_layout.addLayout(filter_row)
             row_layout.addWidget(QLabel("Voice"))
             voice_combo = QComboBox()
             assigned_voice = str(entry.get("voice", "") or "")
@@ -2028,7 +2105,8 @@ class VideoTranslatorGUI(QMainWindow):
             def _refresh_speaker_voice_combo(
                 *,
                 combo=voice_combo,
-                filter_combo=gender_combo,
+                engine_filter=engine_combo,
+                gender_filter=gender_combo,
                 assigned=assigned_voice,
             ):
                 # ``"Use default voice"`` intentionally has an empty value;
@@ -2042,7 +2120,8 @@ class VideoTranslatorGUI(QMainWindow):
                 combo.clear()
                 combo.addItem("Use default voice", "")
                 for label, value in self._voice_display_entries(
-                    gender=filter_combo.currentText(),
+                    gender=gender_filter.currentText(),
+                    engine=engine_filter.currentText(),
                     include_voice=current_assigned,
                 ):
                     combo.addItem(label, value)
@@ -2054,6 +2133,12 @@ class VideoTranslatorGUI(QMainWindow):
             voice_combo.currentIndexChanged.connect(
                 lambda _index, sp=speaker, combo=voice_combo: self._save_speaker_voice_assignment(
                     sp, voice=str(combo.currentData() or "")
+                )
+            )
+            engine_combo.currentTextChanged.connect(
+                lambda value, sp=speaker, refresh=_refresh_speaker_voice_combo: (
+                    self._save_speaker_voice_assignment(sp, voice_engine_filter=value),
+                    refresh(),
                 )
             )
             gender_combo.currentTextChanged.connect(
@@ -2554,7 +2639,7 @@ class VideoTranslatorGUI(QMainWindow):
         _load_all()
         dialog.exec()
 
-    def _missing_resource_entries(self, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False) -> list[tuple[str, str]]:
+    def _missing_resource_entries(self, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False, voice_name: str | list[str] | set[str] | None = None) -> list[tuple[str, str]]:
         service = self._resource_service()
         missing: list[tuple[str, str]] = []
 
@@ -2571,37 +2656,37 @@ class VideoTranslatorGUI(QMainWindow):
                     missing.append((resource_id, f"Whisper {model_name.title()} model"))
 
         if include_voice and not is_remote_profile():
-            voice_name = self.get_active_voice_name()
-            if (
-                voice_name
-                and not str(voice_name).startswith("edge:")
-                and not str(voice_name).startswith("f5:")
-                and not str(voice_name).startswith("vieneu:")
-                and not str(voice_name).startswith("vieneu_clone:")
-                and not str(voice_name).startswith("capcut:")
-            ):
-                resource_id = f"voice:{voice_name}"
-                if not service.is_resource_installed(resource_id):
-                    voice_label = voice_name
-                    voice_entry = self.voice_catalog_map.get(voice_name) if hasattr(self, "voice_catalog_map") else None
-                    if isinstance(voice_entry, dict):
-                        voice_label = str(voice_entry.get("name", voice_name)).strip() or voice_name
-                    missing.append((resource_id, f"Local voice: {voice_label}"))
+            voices_to_check = set()
+            if voice_name:
+                if isinstance(voice_name, (list, set, tuple)):
+                    voices_to_check.update(str(v).strip() for v in voice_name if str(v).strip())
+                else:
+                    voices_to_check.add(str(voice_name).strip())
+            else:
+                active_v = self.get_active_voice_name()
+                if active_v:
+                    voices_to_check.add(active_v)
+
+            for v in voices_to_check:
+                if (
+                    v
+                    and not str(v).startswith("edge:")
+                    and not str(v).startswith("f5:")
+                    and not str(v).startswith("vieneu:")
+                    and not str(v).startswith("vieneu_clone:")
+                    and not str(v).startswith("capcut:")
+                ):
+                    resource_id = f"voice:{v}"
+                    if not service.is_resource_installed(resource_id):
+                        voice_label = v
+                        voice_entry = self.voice_catalog_map.get(v) if hasattr(self, "voice_catalog_map") else None
+                        if isinstance(voice_entry, dict):
+                            voice_label = str(voice_entry.get("name", v)).strip() or v
+                        missing.append((resource_id, f"Local voice: {voice_label}"))
+                    missing.extend(service.validate_piper_voice_runtime(v))
 
         if include_ocr:
             missing.extend(service.validate_ocr_runtime())
-
-        if include_voice and not is_remote_profile():
-            active_v = self.get_active_voice_name()
-            if (
-                active_v
-                and not str(active_v).startswith("edge:")
-                and not str(active_v).startswith("f5:")
-                and not str(active_v).startswith("vieneu:")
-                and not str(active_v).startswith("vieneu_clone:")
-                and not str(active_v).startswith("capcut:")
-            ):
-                missing.extend(service.validate_piper_voice_runtime(active_v))
 
         if validate_pipeline_runtime and not is_remote_profile():
             missing.extend(service.validate_pipeline_runtime())
@@ -2615,12 +2700,13 @@ class VideoTranslatorGUI(QMainWindow):
             deduped.append(item)
         return deduped
 
-    def ensure_required_resources(self, action_label: str, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False) -> bool:
+    def ensure_required_resources(self, action_label: str, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False, voice_name: str | list[str] | set[str] | None = None) -> bool:
         missing = self._missing_resource_entries(
             include_whisper=include_whisper,
             include_voice=include_voice,
             include_ocr=include_ocr,
             validate_pipeline_runtime=validate_pipeline_runtime,
+            voice_name=voice_name,
         )
         if not missing:
             return True
@@ -4362,6 +4448,7 @@ class VideoTranslatorGUI(QMainWindow):
             "B1": bool(self._blur_effect_enabled()),
         })
         state.set_setting("subtitle_style_controls", self._current_subtitle_style_controls_state())
+        state.set_setting("video_time_warps", list(getattr(self, "video_time_warps", [])))
         
         # Save timeline data (includes mask and logo layers)
         if hasattr(self, "timeline") and self.timeline._timeline:
@@ -4540,6 +4627,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_view.set_subtitle_track_visible(self._subtitle_track_preview_visible)
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_track_visible"):
             self.video_view.set_logo_track_visible(self._logo_track_preview_visible)
+        self.video_time_warps = list(getattr(state, "settings", {}).get("video_time_warps") or [])
         self.last_original_srt_path = ""
         self.last_translated_srt_path = ""
         self.last_extracted_audio = ""
@@ -6049,6 +6137,7 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self, "video_view") and self._blur_effect_enabled()
                 else None
             ),
+            "video_time_warps": list(getattr(self, "video_time_warps", [])),
             "render_subtitles": False,
         }
 
@@ -6256,6 +6345,9 @@ class VideoTranslatorGUI(QMainWindow):
                     "action_taken": str(translated.get("action_taken", "")),
                     "voice_speed": float(reference.get("voice_speed", 1.0)),
                     "manual_highlights": list(translated.get("manual_highlights", [])),
+                    "extended_duration": float(reference.get("extended_duration", 0.0) or 0.0),
+                    "time_warp_id": str(reference.get("time_warp_id", "") or ""),
+                    "_audio_end": float(reference.get("_audio_end", 0.0) or 0.0),
                 }
             )
         return rows
@@ -10732,50 +10824,50 @@ class VideoTranslatorGUI(QMainWindow):
                 original_label.setObjectName("helperLabel")
                 original_label.setVisible(show_original and bool(row["original"].strip()))
 
-                card_layout.addLayout(timing_meta_layout)
-
-                # Speaker assignment is intentionally local to the selected
-                # cue.  It lets users correct diarization mistakes without
-                # rerunning the entire audio analysis pass.
-                speaker_row = QHBoxLayout()
-                speaker_row.setContentsMargins(0, 0, 0, 0)
-                speaker_row.setSpacing(8)
+                # Speaker assignment (hidden if speaker diarization is disabled and no speakers detected)
                 speaker_ids = self._detected_speaker_ids()
-                segment_source = self.current_translated_segments or self.current_segments or []
-                selected_speaker = ""
-                if 0 <= idx < len(segment_source):
-                    selected_speaker = str(segment_source[idx].get("speaker", "") or "").strip()
-                try:
-                    speaker_position = speaker_ids.index(selected_speaker)
-                except ValueError:
-                    speaker_position = -1
-                speaker_indicator = QLabel()
-                speaker_indicator.setFixedSize(10, 10)
-                speaker_indicator.setStyleSheet(
-                    "background: %s; border-radius: 5px; border: 1px solid #dcecff;"
-                    % (self._speaker_color_hex(selected_speaker) if selected_speaker else "#53657d")
-                )
-                speaker_row.addWidget(speaker_indicator)
-                speaker_row.addWidget(QLabel("Speaker:"))
-                speaker_combo = QComboBox()
-                for position, speaker_id in enumerate(speaker_ids):
-                    speaker_combo.addItem(self._speaker_display_name(speaker_id, position), speaker_id)
-                combo_index = speaker_combo.findData(selected_speaker)
-                if combo_index >= 0:
-                    speaker_combo.setCurrentIndex(combo_index)
-                speaker_combo.setEnabled(bool(speaker_ids))
-                speaker_combo.setToolTip(
-                    "Assign this subtitle segment to a detected speaker."
-                    if speaker_ids else "Run Speaker Diarization first to assign a speaker."
-                )
-                speaker_combo.currentIndexChanged.connect(
-                    lambda _value, segment_index=idx, combo=speaker_combo: self.on_segment_speaker_changed(
-                        segment_index, str(combo.currentData() or "")
+                diarization_enabled = (
+                    hasattr(self, "is_speaker_diarization_enabled") and self.is_speaker_diarization_enabled()
+                ) or bool(speaker_ids)
+                if diarization_enabled and speaker_ids:
+                    speaker_row = QHBoxLayout()
+                    speaker_row.setContentsMargins(0, 0, 0, 0)
+                    speaker_row.setSpacing(8)
+                    segment_source = self.current_translated_segments or self.current_segments or []
+                    selected_speaker = ""
+                    if 0 <= idx < len(segment_source):
+                        selected_speaker = str(segment_source[idx].get("speaker", "") or "").strip()
+                    try:
+                        speaker_position = speaker_ids.index(selected_speaker)
+                    except ValueError:
+                        speaker_position = -1
+                    speaker_indicator = QLabel()
+                    speaker_indicator.setFixedSize(10, 10)
+                    speaker_indicator.setStyleSheet(
+                        "background: %s; border-radius: 5px; border: 1px solid #dcecff;"
+                        % (self._speaker_color_hex(selected_speaker) if selected_speaker else "#53657d")
                     )
-                )
-                speaker_row.addWidget(speaker_combo, 1)
-                speaker_row.addStretch()
-                card_layout.addLayout(speaker_row)
+                    speaker_row.addWidget(speaker_indicator)
+                    speaker_row.addWidget(QLabel("Speaker:"))
+                    speaker_combo = QComboBox()
+                    for position, speaker_id in enumerate(speaker_ids):
+                        speaker_combo.addItem(self._speaker_display_name(speaker_id, position), speaker_id)
+                    combo_index = speaker_combo.findData(selected_speaker)
+                    if combo_index >= 0:
+                        speaker_combo.setCurrentIndex(combo_index)
+                    speaker_combo.setEnabled(bool(speaker_ids))
+                    speaker_combo.setToolTip(
+                        "Assign this subtitle segment to a detected speaker."
+                        if speaker_ids else "Run Speaker Diarization first to assign a speaker."
+                    )
+                    speaker_combo.currentIndexChanged.connect(
+                        lambda _value, segment_index=idx, combo=speaker_combo: self.on_segment_speaker_changed(
+                            segment_index, str(combo.currentData() or "")
+                        )
+                    )
+                    speaker_row.addWidget(speaker_combo, 1)
+                    speaker_row.addStretch()
+                    card_layout.addLayout(speaker_row)
 
                 speed_row = QHBoxLayout()
                 speed_row.setContentsMargins(0, 0, 0, 0)
@@ -10788,7 +10880,9 @@ class VideoTranslatorGUI(QMainWindow):
                 speed_spin.setDecimals(1)
                 speed_spin.setValue(float(row.get("voice_speed", 1.0)))
                 speed_spin.setSuffix("x")
-                speed_spin.setFixedWidth(90)
+                speed_spin.setFixedWidth(85)
+                speed_spin.setFixedHeight(26)
+                speed_spin.setStyleSheet("QDoubleSpinBox { padding: 2px 4px; border-radius: 6px; }")
                 speed_spin.valueChanged.connect(
                     lambda val, idx=idx: self.on_segment_voice_speed_changed(idx, val)
                 )
@@ -10797,6 +10891,95 @@ class VideoTranslatorGUI(QMainWindow):
                 speed_row.addStretch()
 
                 card_layout.addLayout(speed_row)
+
+                # Video Freeze / Extension controls
+                ext_dur = float(row.get("extended_duration", 0.0) or 0.0)
+                video_ext_row = QHBoxLayout()
+                video_ext_row.setContentsMargins(0, 0, 0, 0)
+                video_ext_row.setSpacing(6)
+
+                if ext_dur > 0.0:
+                    badge_lbl = QLabel(f"⏸ Freeze (+{ext_dur:.1f}s)")
+                    badge_lbl.setStyleSheet(
+                        "background: #103444; color: #5eead4; border: 1px solid #146c78; "
+                        "border-radius: 6px; padding: 3px 8px; font-weight: bold; font-size: 11px;"
+                    )
+                    badge_lbl.setToolTip(f"This segment's video is extended by +{ext_dur:.2f}s")
+                    revert_btn = QPushButton("❌ Revert freeze")
+                    revert_btn.setFixedHeight(26)
+                    revert_btn.setStyleSheet(
+                        "QPushButton { background: #331f24; color: #fca5a5; border: 1px solid #662a34; "
+                        "border-radius: 6px; padding: 2px 8px; font-size: 11px; } "
+                        "QPushButton:hover { background: #4a272f; border-color: #f87171; }"
+                    )
+                    revert_btn.setToolTip("Restore original duration for this segment and ripple shift timeline back (-Δt)")
+                    revert_btn.clicked.connect(lambda _=False, i=idx: self.revert_segment_video_extension(i))
+                    video_ext_row.addWidget(badge_lbl)
+                    video_ext_row.addWidget(revert_btn)
+                    video_ext_row.addStretch()
+                else:
+                    ext_label = QLabel("Freeze frame:")
+                    ext_label.setObjectName("helperLabel")
+                    ext_spin = ReliableDoubleSpinBox()
+                    ext_spin.setRange(0.1, 30.0)
+                    ext_spin.setSingleStep(0.5)
+                    ext_spin.setDecimals(1)
+                    ext_spin.setValue(1.0)
+                    ext_spin.setSuffix("s")
+                    ext_spin.setFixedWidth(85)
+                    ext_spin.setFixedHeight(26)
+                    ext_spin.setStyleSheet("QDoubleSpinBox { padding: 2px 4px; border-radius: 6px; }")
+
+                    extend_btn = QPushButton("+ Freeze")
+                    extend_btn.setFixedHeight(26)
+                    extend_btn.setStyleSheet(
+                        "QPushButton { background: #133246; color: #7dd3fc; border: 1px solid #1f506e; "
+                        "border-radius: 6px; padding: 2px 8px; font-size: 11px; } "
+                        "QPushButton:hover { background: #1a435e; border-color: #38bdf8; }"
+                    )
+                    extend_btn.setToolTip("Extend the last frame of this segment by the selected duration and ripple shift subsequent segments (+Δt)")
+                    extend_btn.clicked.connect(
+                        lambda _=False, i=idx, sp=ext_spin: self.extend_segment_video(i, sp.value())
+                    )
+
+                    # Fit Voice button (with breathing buffer +0.15s)
+                    audio_end = float(row.get("_audio_end", 0.0) or 0.0)
+                    seg_end = float(row.get("end", 0.0) or 0.0)
+                    excess = round(audio_end - seg_end, 2)
+                    fit_voice_btn = QPushButton()
+                    fit_voice_btn.setFixedHeight(26)
+                    if excess > 0.05:
+                        dur_with_buffer = round(excess + 0.15, 2)
+                        fit_voice_btn.setText(f"⚡ Fit Voice (+{dur_with_buffer:.1f}s)")
+                        fit_voice_btn.setStyleSheet(
+                            "QPushButton { background: #262c16; color: #bef264; border: 1px solid #485c21; "
+                            "border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: bold; } "
+                            "QPushButton:hover { background: #353f1d; border-color: #a3e635; }"
+                        )
+                        fit_voice_btn.setToolTip(
+                            f"Extend video by {excess:.2f}s (+0.15s breathing buffer) to fit dubbed voiceover"
+                        )
+                        fit_voice_btn.setEnabled(True)
+                        fit_voice_btn.clicked.connect(
+                            lambda _=False, i=idx, dur=dur_with_buffer: self.extend_segment_video(i, dur)
+                        )
+                    else:
+                        fit_voice_btn.setText("⚡ Fit Voice")
+                        fit_voice_btn.setStyleSheet(
+                            "QPushButton { background: #182230; color: #53657d; border: 1px solid #24354b; "
+                            "border-radius: 6px; padding: 2px 8px; font-size: 11px; }"
+                        )
+                        fit_voice_btn.setToolTip("Automatically extend video to fit voiceover (active when voiceover exceeds segment duration)")
+                        fit_voice_btn.setEnabled(False)
+
+                    video_ext_row.addWidget(ext_label)
+                    video_ext_row.addWidget(ext_spin)
+                    video_ext_row.addWidget(extend_btn)
+                    video_ext_row.addWidget(fit_voice_btn)
+                    video_ext_row.addStretch()
+
+                card_layout.addLayout(video_ext_row)
+                card_layout.addLayout(timing_meta_layout)
                 card_layout.addWidget(original_label)
 
                 # The QTabWidget wrapper (with the "Subtitle" tab label
@@ -10939,6 +11122,269 @@ class VideoTranslatorGUI(QMainWindow):
                 segments_list[index]["voice_speed"] = round(float(value), 1)
                 self._voiceover_force_refresh = True
         self.persist_current_timeline_project_data()
+
+    def extend_segment_video(self, segment_index: int, added_duration: float):
+        from app.services.time_warp_service import TimeWarpService
+        if not self.current_segments and not self.current_translated_segments:
+            return
+        target_list = self.current_translated_segments or self.current_segments
+        if segment_index < 0 or segment_index >= len(target_list):
+            return
+        try:
+            dur = round(float(added_duration), 3)
+            if dur <= 0:
+                return
+            warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
+                self.current_segments or [], segment_index, dur, self.current_translated_segments
+            )
+            self.current_segments = updated_base
+            if updated_trans is not None:
+                self.current_translated_segments = updated_trans
+            if not hasattr(self, "video_time_warps") or self.video_time_warps is None:
+                self.video_time_warps = []
+            self.video_time_warps.append(warp)
+            if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+                self.media_player.set_time_warps(self.video_time_warps)
+
+            # Also ripple shift non-subtitle timeline layers starting at or after the warp point
+            warp_split_time = float(warp.get("time", 0.0))
+            if hasattr(self, "timeline") and self.timeline._timeline:
+                TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, warp_split_time, dur)
+
+            self.apply_segments_to_timeline()
+            self.persist_current_timeline_project_data()
+            self.sync_segment_editor_rows()
+            self.log(f"[Time Warp] Extended video for segment #{segment_index + 1} by +{dur:.2f}s (Warp ID {warp['id']})")
+        except Exception as exc:
+            self.show_error("Freeze Frame Error", "Could not extend video for segment.", str(exc))
+
+    def revert_segment_video_extension(self, segment_index: int):
+        from app.services.time_warp_service import TimeWarpService
+        if not self.current_segments and not self.current_translated_segments:
+            return
+        try:
+            target_list = self.current_translated_segments or self.current_segments
+            if segment_index < 0 or segment_index >= len(target_list):
+                return
+            seg = target_list[segment_index]
+            ext_dur = float(seg.get("extended_duration", 0.0) or 0.0)
+            split_time = float(seg.get("end", 0.0)) - ext_dur
+
+            delta, updated_base, updated_trans, updated_warps = TimeWarpService.remove_segment_extension(
+                self.current_segments or [], segment_index, self.current_translated_segments, getattr(self, "video_time_warps", [])
+            )
+            self.current_segments = updated_base
+            if updated_trans is not None:
+                self.current_translated_segments = updated_trans
+            self.video_time_warps = updated_warps
+            if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+                self.media_player.set_time_warps(self.video_time_warps)
+
+            # Also ripple shift back non-subtitle timeline layers
+            if delta > 0 and hasattr(self, "timeline") and self.timeline._timeline:
+                TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_time, -delta)
+
+            self.apply_segments_to_timeline()
+            self.persist_current_timeline_project_data()
+            self.sync_segment_editor_rows()
+            self.log(f"[Time Warp] Restored original duration for segment #{segment_index + 1} (-{delta:.2f}s)")
+        except Exception as exc:
+            self.show_error("Freeze Frame Error", "Could not revert video extension.", str(exc))
+
+    def auto_fit_all_voice_overflows(self, buffer_seconds: float = 0.15):
+        from app.services.time_warp_service import TimeWarpService
+        target_list = self.current_translated_segments or self.current_segments
+        if not target_list:
+            QMessageBox.information(self, "Auto-Fit Voice", "No subtitle segments available to process.")
+            return
+
+        # 1. Scan for segments where voice duration exceeds segment duration
+        candidates = []
+        for i, seg in enumerate(target_list):
+            audio_end = float(seg.get("_audio_end", 0.0) or 0.0)
+            seg_end = float(seg.get("end", 0.0) or 0.0)
+            excess = round(audio_end - seg_end, 2)
+            if excess > 0.05:
+                dur = round(excess + buffer_seconds, 2)
+                candidates.append((i, excess, dur))
+
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "Auto-Fit Voice",
+                "All voiceovers already fit within their video segments (no overflow detected)."
+            )
+            return
+
+        total_added = sum(c[2] for c in candidates)
+        reply = QMessageBox.question(
+            self,
+            "Auto-Fit All Voice",
+            f"Found {len(candidates)} segment(s) where dubbed voiceover exceeds video duration.\n"
+            f"Total freeze frame time to add: +{total_added:.2f}s "
+            f"(includes {buffer_seconds:.2f}s breathing buffer per segment).\n\n"
+            f"Do you want to automatically extend the video for all these segments?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            if not hasattr(self, "video_time_warps") or self.video_time_warps is None:
+                self.video_time_warps = []
+
+            for idx, excess, dur in candidates:
+                warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
+                    self.current_segments or [], idx, dur, self.current_translated_segments
+                )
+                self.current_segments = updated_base
+                if updated_trans is not None:
+                    self.current_translated_segments = updated_trans
+                self.video_time_warps.append(warp)
+
+                warp_split_time = float(warp.get("time", 0.0))
+                if hasattr(self, "timeline") and self.timeline._timeline:
+                    TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, warp_split_time, dur)
+
+            if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+                self.media_player.set_time_warps(self.video_time_warps)
+
+            self.apply_segments_to_timeline()
+            self.persist_current_timeline_project_data()
+            self.sync_segment_editor_rows()
+            self.log(f"[Time Warp] Auto-fit voice for {len(candidates)} segments (total +{total_added:.2f}s, buffer +{buffer_seconds}s)")
+            QMessageBox.information(
+                self,
+                "Auto-Fit Voice Complete",
+                f"Successfully extended video for {len(candidates)} segment(s)!\n"
+                f"Total video duration increased by +{total_added:.2f}s to match dubbed voiceovers."
+            )
+        except Exception as exc:
+            self.show_error("Freeze Frame Error", "Could not auto fit voice for segments.", str(exc))
+
+    def revert_all_segment_video_extensions(self):
+        from app.services.time_warp_service import TimeWarpService
+        target_list = self.current_translated_segments or self.current_segments
+        warps = getattr(self, "video_time_warps", []) or []
+        extended_indices = [
+            i for i, s in enumerate(target_list or [])
+            if float(s.get("extended_duration", 0.0) or 0.0) > 0
+        ]
+        if not extended_indices and not warps:
+            QMessageBox.information(self, "Revert Freezes", "No freeze frames are currently applied.")
+            return
+
+        count_desc = f"{len(extended_indices)} segment(s)" if extended_indices else f"{len(warps)} freeze frame(s)"
+        reply = QMessageBox.question(
+            self,
+            "Revert All Freezes",
+            f"Are you sure you want to revert all {count_desc} back to the original video duration?\n\n"
+            "This will remove all freeze frames and restore the timeline and subtitles to their original timing.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            # Revert backwards from highest index to lowest index so subsequent ripple shifts don't affect lower indices
+            for idx in sorted(extended_indices, reverse=True):
+                target_curr = self.current_translated_segments or self.current_segments
+                if idx < 0 or idx >= len(target_curr):
+                    continue
+                seg = target_curr[idx]
+                ext_dur = float(seg.get("extended_duration", 0.0) or 0.0)
+                if ext_dur <= 0:
+                    continue
+                split_time = float(seg.get("end", 0.0)) - ext_dur
+
+                delta, updated_base, updated_trans, updated_warps = TimeWarpService.remove_segment_extension(
+                    self.current_segments or [], idx, self.current_translated_segments, getattr(self, "video_time_warps", [])
+                )
+                self.current_segments = updated_base
+                if updated_trans is not None:
+                    self.current_translated_segments = updated_trans
+                self.video_time_warps = updated_warps
+
+                if delta > 0 and hasattr(self, "timeline") and self.timeline._timeline:
+                    TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_time, -delta)
+
+            # Ensure all warps are cleared
+            self.video_time_warps = []
+            if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+                self.media_player.set_time_warps(self.video_time_warps)
+
+            self.apply_segments_to_timeline()
+            self.persist_current_timeline_project_data()
+            self.sync_segment_editor_rows()
+            self.log(f"[Time Warp] Reverted all video freeze extensions to original media duration.")
+            QMessageBox.information(
+                self,
+                "Revert Complete",
+                "All freeze frames have been removed and original video duration restored!"
+            )
+        except Exception as exc:
+            self.show_error("Freeze Frame Error", "Could not revert video extensions.", str(exc))
+
+    def prompt_extend_range(self):
+        if not hasattr(self, "timeline"):
+            return
+        range_val = self.timeline.selection_range()
+        if not range_val:
+            QMessageBox.information(self, "Select Range", "Please select a range on the timeline ruler first.")
+            return
+        start_s, end_s = range_val
+        from PySide6.QtWidgets import QInputDialog
+        dur, ok = QInputDialog.getDouble(
+            self,
+            "Extend Video at Selection",
+            f"Selection: {self.format_timestamp(start_s)} -> {self.format_timestamp(end_s)}\n\n"
+            f"Enter freeze frame duration (seconds) to hold at end point ({self.format_timestamp(end_s)}):",
+            value=1.0,
+            minValue=0.1,
+            maxValue=60.0,
+            decimals=1,
+        )
+        if ok and dur > 0:
+            self.extend_timeline_at_time(end_s, dur, note=f"Range {start_s:.2f}-{end_s:.2f}")
+
+    def extend_timeline_at_time(self, split_time: float, duration: float, note: str = ""):
+        from app.services.time_warp_service import TimeWarpService
+        dur = round(float(duration), 3)
+        split_s = round(float(split_time), 3)
+        if dur <= 0:
+            return
+        warp = TimeWarpService.create_time_warp(split_s, dur, warp_type="freeze", note=note)
+        if not hasattr(self, "video_time_warps") or self.video_time_warps is None:
+            self.video_time_warps = []
+        self.video_time_warps.append(warp)
+        if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+            self.media_player.set_time_warps(self.video_time_warps)
+
+        # Ripple shift all subsequent segments
+        for segs in (self.current_segments, self.current_translated_segments):
+            if segs:
+                for seg in segs:
+                    s = float(seg.get("start", 0.0))
+                    e = float(seg.get("end", 0.0))
+                    if s >= split_s - 0.005:
+                        seg["start"] = round(s + dur, 3)
+                        seg["end"] = round(e + dur, 3)
+                    elif s < split_s < e:
+                        seg["end"] = round(e + dur, 3)
+                        prev_ext = float(seg.get("extended_duration", 0.0) or 0.0)
+                        seg["extended_duration"] = round(prev_ext + dur, 3)
+
+        # Shift other timeline layers
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_s, dur)
+            self.timeline.clear_selection_range()
+
+        self.apply_segments_to_timeline()
+        self.persist_current_timeline_project_data()
+        self.sync_segment_editor_rows()
+        self.log(f"[Time Warp] Extended video by +{dur:.2f}s at {split_s:.2f}s")
 
     def _set_segment_editor_highlight(self, active_index: int):
         rows = getattr(self, "_segment_editor_rows", [])
@@ -11590,6 +12036,8 @@ class VideoTranslatorGUI(QMainWindow):
         playback. Also sync the timeline play state so the timeline
         stops running when the video ends (Bug 2).
         """
+        if getattr(getattr(self, "media_player", None), "_video_frozen", False) or getattr(self, "_active_freeze_warp", None) is not None:
+            return
         try:
             is_playing = bool(self.media_player.is_playing())
         except Exception:
@@ -12177,18 +12625,23 @@ class VideoTranslatorGUI(QMainWindow):
             QMessageBox.warning(self, "Missing Subtitle", "This subtitle line is not ready yet.")
             return
 
-        if not self.ensure_required_resources("Subtitle audio preview", include_voice=True):
-            return
-
         source_segments = self.current_translated_segments or self.current_segments
-        text = str(source_segments[index].get("tts_text") or source_segments[index].get("text", "")).strip()
+        seg = source_segments[index] if 0 <= index < len(source_segments) else {}
+        text = str(seg.get("tts_text") or seg.get("text", "")).strip()
         if not text:
             QMessageBox.warning(self, "Missing Subtitle", "This subtitle line is empty.")
             return
 
-        voice_name = self.get_active_voice_name()
+        speaker = str(seg.get("speaker", "") or "").strip()
+        assignments = self._speaker_voice_assignments() if hasattr(self, "_speaker_voice_assignments") else {}
+        speaker_voice = str((assignments.get(speaker, {}) or {}).get("voice", "") or "").strip()
+        voice_name = speaker_voice or str(seg.get("voice_name", "") or "").strip() or self.get_active_voice_name()
+
         if not voice_name:
             QMessageBox.warning(self, "Missing Voice", "Choose a voice first before generating subtitle audio preview.")
+            return
+
+        if not self.ensure_required_resources("Subtitle audio preview", include_voice=True, voice_name=voice_name):
             return
         voice_speed = self._parse_voice_speed_value()
         project_state = getattr(self, "current_project_state", None) or self.ensure_current_project()
@@ -13190,6 +13643,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.rewrite_selected_segment_btn.setEnabled(
                 translation_ready and bool(self.transcript_text.toPlainText().strip()) and has_translated_text and has_selected_segment
             )
+        has_segs = bool(self.current_segments or self.current_translated_segments)
+        has_warps = bool(getattr(self, "video_time_warps", []))
+        if hasattr(self, "batch_fit_voice_btn"):
+            self.batch_fit_voice_btn.setEnabled(has_segs)
+        if hasattr(self, "revert_all_freezes_btn"):
+            self.revert_all_freezes_btn.setEnabled(has_warps or has_segs)
         if hasattr(self, "_refresh_audio_inspector_dub_voice_buttons"):
             self._refresh_audio_inspector_dub_voice_buttons()
         generated_mode = not self.using_existing_audio_source()
@@ -13454,6 +13913,10 @@ class VideoTranslatorGUI(QMainWindow):
                 self.timeline.set_playing(False)
                 self.current_segments = []
                 self.current_translated_segments = []
+                self.video_time_warps = []
+                self._preview_has_warps = False
+                self._active_freeze_warp = None
+                self._completed_freeze_warps = set()
                 self.current_segment_models = []
                 self.current_translated_segment_models = []
                 self.current_project_state = self.ensure_current_project()
@@ -13986,7 +14449,7 @@ class VideoTranslatorGUI(QMainWindow):
         provider_combo.addItem("Google AI Studio", "google_ai_studio")
         provider_combo.addItem("OpenAI", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
-        current_provider = (os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+        current_provider = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or self.settings.value("translation_provider", "google")).strip().lower()
         if current_provider == "gemini":
             current_provider = "google_ai_studio"
         if current_provider not in {"google", "google_ai_studio", "openai", "ollama"}:
@@ -14042,28 +14505,6 @@ class VideoTranslatorGUI(QMainWindow):
         base_url_edit.setVisible(not remote_mode)
         layout.addLayout(base_url_layout)
 
-        batch_size_layout = QHBoxLayout()
-        batch_size_label = QLabel("Batch Size (Lines/req):")
-        batch_size_spin = QSpinBox(dialog)
-        batch_size_spin.setRange(5, 200)
-        batch_size_spin.setSingleStep(5)
-        env_batch = str(os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS", "")).strip()
-        if env_batch.isdigit() and int(env_batch) > 0:
-            batch_size_spin.setValue(int(env_batch))
-        else:
-            batch_size_spin.setValue(40 if current_provider == "ollama" else 80)
-        batch_size_layout.addWidget(batch_size_label)
-        batch_size_layout.addWidget(batch_size_spin, 1)
-        batch_size_label.setVisible(not remote_mode)
-        batch_size_spin.setVisible(not remote_mode)
-        layout.addLayout(batch_size_layout)
-
-        batch_size_hint = QLabel("Subtitle lines sent per AI request (Recommended: 80 for Gemini/OpenAI, 20-40 for Ollama).")
-        batch_size_hint.setObjectName("helperLabel")
-        batch_size_hint.setWordWrap(True)
-        batch_size_hint.setVisible(not remote_mode)
-        layout.addWidget(batch_size_hint)
-
         # Translation Prompt Preset Selector
         preset_layout = QVBoxLayout()
         preset_layout.setSpacing(4)
@@ -14112,6 +14553,18 @@ class VideoTranslatorGUI(QMainWindow):
         preset_layout.addWidget(preset_desc_label)
         layout.addLayout(preset_layout)
 
+        auto_context_cb = QCheckBox("Auto-detect dialogue context & character pronouns", dialog)
+        initial_auto_context = str(
+            self.settings.value("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
+            or os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1")
+        ).strip().lower() not in ("0", "false", "no")
+        auto_context_cb.setChecked(initial_auto_context)
+        auto_context_cb.setToolTip(
+            "Analyzes dialogue context and speaker relationships across segments to build character profiles "
+            "and bidirectional pronoun addressing rules (address_rules) for consistent translation."
+        )
+        layout.addWidget(auto_context_cb)
+
         provider_hint = QLabel("Get an API key at https://aistudio.google.com/apikey")
         provider_hint.setObjectName("helperLabel")
         provider_hint.setWordWrap(True)
@@ -14132,12 +14585,10 @@ class VideoTranslatorGUI(QMainWindow):
             _toggle_visible(key_section_widget, is_google_ai_studio or is_openai)
             _toggle_visible(base_url_label, not remote_mode and is_ai)
             _toggle_visible(base_url_edit, not remote_mode and is_ai)
-            _toggle_visible(batch_size_label, not remote_mode and is_ai)
-            _toggle_visible(batch_size_spin, not remote_mode and is_ai)
-            _toggle_visible(batch_size_hint, not remote_mode and is_ai)
             _toggle_visible(preset_label, not remote_mode and is_ai)
             _toggle_visible(translation_preset_combo, not remote_mode and is_ai)
             _toggle_visible(preset_desc_label, not remote_mode and is_ai)
+            _toggle_visible(auto_context_cb, not remote_mode and is_ai)
             _toggle_visible(test_btn, not remote_mode and is_ai)
             _toggle_visible(test_status, not remote_mode and is_ai)
             _toggle_visible(model_label, not remote_mode and is_ai)
@@ -14155,8 +14606,6 @@ class VideoTranslatorGUI(QMainWindow):
                 base_url_edit.setText(base_url or "https://generativelanguage.googleapis.com/v1beta/openai/")
                 if not model_edit.text().strip():
                     model_edit.setText("gemini-3.7-flash")
-                if batch_size_spin.value() == 40:
-                    batch_size_spin.setValue(80)
                 provider_hint.setText("Use a Google AI Studio Gemini API key: https://aistudio.google.com/apikey")
             elif is_openai:
                 model_label.setText("AI Model:")
@@ -14166,16 +14615,12 @@ class VideoTranslatorGUI(QMainWindow):
                 base_url_edit.setText(base_url or "https://api.openai.com/v1/")
                 if not model_edit.text().strip():
                     model_edit.setText("gpt-4o-mini")
-                if batch_size_spin.value() == 40:
-                    batch_size_spin.setValue(80)
                 provider_hint.setText("Get an API key at https://platform.openai.com/api-keys")
             elif p == "ollama":
                 model_label.setText("AI Model:")
                 base_url_edit.setText("http://localhost:11434/v1")
                 key_edit.clear()
                 model_edit.setText("gemma4:31b-cloud")
-                if batch_size_spin.value() == 80:
-                    batch_size_spin.setValue(40)
                 provider_hint.setText("Requires a running Ollama server. Default model: gemma4:31b-cloud")
             model_edit.setReadOnly(False)
             dialog.layout().invalidate()
@@ -14373,9 +14818,11 @@ class VideoTranslatorGUI(QMainWindow):
                 "CAPCAP_REMOTE_API_TOKEN": remote_token_edit.text().strip(),
             }
         else:
-            new_batch_size = str(batch_size_spin.value())
             new_preset = str(translation_preset_combo.currentData() or "general_default").strip()
+            self.settings.setValue("translation_provider", new_provider)
             self.settings.setValue("translation_preset_id", new_preset)
+            os.environ["OPENAI_PROVIDER"] = new_provider
+            os.environ["AI_POLISHER_PROVIDER"] = new_provider
             if new_provider == "google":
                 updates = {
                     "AI_POLISHER_PROVIDER": "google",
@@ -14389,7 +14836,6 @@ class VideoTranslatorGUI(QMainWindow):
                     "GOOGLE_AI_STUDIO_API_KEY": new_key,
                     "GOOGLE_AI_STUDIO_MODEL": new_model or "gemini-3.7-flash",
                     "GOOGLE_AI_STUDIO_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
-                    "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
                     "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
             elif new_provider == "ollama":
@@ -14399,7 +14845,6 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_API_KEY": "ollama",
                     "OPENAI_MODEL": new_model,
                     "OPENAI_BASE_URL": new_base_url or "http://localhost:11434/v1",
-                    "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
                     "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
             else:
@@ -14409,9 +14854,12 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_API_KEY": new_key,
                     "OPENAI_MODEL": new_model or "gpt-4o-mini",
                     "OPENAI_BASE_URL": new_base_url or "https://api.openai.com/v1/",
-                    "CAPCAP_AI_TRANSLATION_MAX_SEGMENTS": new_batch_size,
                     "CAPCAP_TRANSLATION_PRESET_ID": new_preset,
                 }
+            new_auto_context = "1" if auto_context_cb.isChecked() else "0"
+            self.settings.setValue("auto_translation_context", new_auto_context)
+            os.environ["CAPCAP_AUTO_TRANSLATION_CONTEXT"] = new_auto_context
+            updates["CAPCAP_AUTO_TRANSLATION_CONTEXT"] = new_auto_context
         
         updates.update(_engine_updates)
 
@@ -14722,10 +15170,6 @@ class VideoTranslatorGUI(QMainWindow):
         return self._apply_speaker_voice_assignments(grouped_segments)
 
     def run_voiceover(self):
-        if not self.ensure_required_resources("Voice generation", include_voice=True):
-            if getattr(self, "_pipeline_active", False):
-                self._pipeline_fail("Missing resources")
-            return
         state = self.ensure_current_project()
         if state and not self.translated_text.toPlainText().strip():
             self.load_project_context(state)
@@ -14742,6 +15186,20 @@ class VideoTranslatorGUI(QMainWindow):
             if getattr(self, "_pipeline_active", False):
                 self._pipeline_fail("Translated SRT could not be parsed to segments")
             QMessageBox.warning(self, "Error", "Translated SRT could not be parsed to segments.")
+            return
+
+        used_voices = set()
+        active_v = self._resolve_active_voice_name(persist_new_clone=False)
+        for s in segments:
+            v = str(s.get("voice_name") or "").strip() or active_v
+            if v:
+                used_voices.add(v)
+        if not used_voices and active_v:
+            used_voices.add(active_v)
+
+        if not self.ensure_required_resources("Voice generation", include_voice=True, voice_name=used_voices):
+            if getattr(self, "_pipeline_active", False):
+                self._pipeline_fail("Missing resources")
             return
 
         out_dir = self.voice_output_folder_edit.text().strip() or os.path.join(self.workspace_root, "output")
@@ -15252,6 +15710,10 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_translated_segment_models = []
         self.current_segments = []
         self.current_translated_segments = []
+        self.video_time_warps = []
+        self._preview_has_warps = False
+        self._active_freeze_warp = None
+        self._completed_freeze_warps = set()
         self.processed_artifacts = {}
         self.last_extracted_audio = ""
         self.last_vocals_path = ""

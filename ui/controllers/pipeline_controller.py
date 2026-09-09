@@ -4,6 +4,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from PySide6.QtCore import Qt, QTimer
@@ -29,6 +30,7 @@ class PipelineController:
         self.progress_dialog = None
         self.whisper_download_dialog = None
         self.local_worker_process = None
+        self.worker_log_thread = None
         self.local_worker_api_url = ""
         self.local_worker_api_token = ""
         self.prepare_run_id = 0
@@ -90,13 +92,26 @@ class PipelineController:
         self.local_worker_process = None
         self.local_worker_api_url = ""
         self.local_worker_api_token = ""
-        self._kill_process_tree(process)
+        log_thread = self.worker_log_thread
+        self.worker_log_thread = None
+        if process is not None:
+            self._kill_process_tree(process)
+            if log_thread is not None and log_thread.is_alive():
+                try:
+                    log_thread.join(timeout=2.0)
+                except Exception:
+                    pass
+            try:
+                if process.stdout and not process.stdout.closed:
+                    process.stdout.close()
+            except Exception:
+                pass
 
     def _start_prepare_status_polling(self):
         self._stop_prepare_status_polling()
         self.prepare_status_phase = ""
         timer = QTimer(self.gui)
-        timer.setInterval(10000)
+        timer.setInterval(800)
         timer.timeout.connect(self._poll_prepare_status)
         self.prepare_status_timer = timer
         timer.start()
@@ -148,6 +163,7 @@ class PipelineController:
         # default text encoding cannot inherit a locale-specific ANSI codec.
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
         pythonpath_entries = [app_root, os.path.join(app_root, "app")]
         current_pythonpath = env.get("PYTHONPATH", "")
         if current_pythonpath:
@@ -176,18 +192,51 @@ class PipelineController:
             cwd=app_root,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=None,
-            stderr=None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             close_fds=False,
             **process_kwargs,
         )
         self.local_worker_api_url = f"http://127.0.0.1:{port}"
         self.local_worker_api_token = token
+        self._start_worker_log_forwarding()
         try:
             self._wait_for_local_worker_server(self.local_worker_api_url)
         except Exception:
             self._stop_local_worker_server()
             raise
+
+    def _start_worker_log_forwarding(self):
+        process = self.local_worker_process
+        if process is None or process.stdout is None:
+            return
+
+        def _forward_logs():
+            try:
+                for raw_line in iter(process.stdout.readline, b""):
+                    if not raw_line:
+                        break
+                    text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not text:
+                        continue
+                    if any(h in text for h in ("/v1/status", "/health", "/v1/health")):
+                        continue
+                    if text.startswith("[Worker]"):
+                        self.gui.log(text)
+                    else:
+                        self.gui.log(f"[Worker] {text}")
+            except Exception:
+                pass
+            finally:
+                try:
+                    if process.stdout and not process.stdout.closed:
+                        process.stdout.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_forward_logs, daemon=True, name="WorkerLogForwarder")
+        t.start()
+        self.worker_log_thread = t
 
     def _mark_running_project_steps_stopped(self):
         state = getattr(self.gui, "current_project_state", None)
@@ -435,8 +484,6 @@ class PipelineController:
                 self.gui.update_project_step("translate_raw", "running")
             except Exception:
                 pass
-        if not self.progress_dialog:
-            return
         labels = {
             "prepare": "Preparing project",
             "extract_audio": "Extracting audio",
@@ -449,9 +496,11 @@ class PipelineController:
             "error": "Prepare failed",
         }
         label = str(message or labels.get(str(step_id or ""), step_id or "Processing")).strip()
-        if label and self.progress_dialog:
-            self.progress_dialog.footer.setText(f"Prepare: {label}")
-            self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
+        if label:
+            self.gui.log(f"[Pipeline] Phase: {label}")
+            if self.progress_dialog:
+                self.progress_dialog.footer.setText(f"Prepare: {label}")
+                self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
         if step_id == "transcription":
             self._hide_whisper_download_dialog()
 

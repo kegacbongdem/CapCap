@@ -11,6 +11,7 @@ __all__ = [
     "SegmentRegroupService",
     "SegmentService",
     "SpeakerDiarizationService",
+    "TimeWarpService",
     "VoiceCatalogService",
     "WorkflowRuntime",
 ]
@@ -26,6 +27,7 @@ _MODULE_MAP = {
     "SegmentRegroupService": ".segment_regroup_service",
     "SegmentService": ".segment_service",
     "SpeakerDiarizationService": ".speaker_diarization_service",
+    "TimeWarpService": ".time_warp_service",
     "VoiceCatalogService": ".voice_catalog_service",
     "WorkflowRuntime": ".workflow_runtime",
 }

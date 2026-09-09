@@ -680,6 +680,7 @@ class PrepareWorkflow:
                         project_state.set_step_status("diarize", "done")
                         self.project_service.save_project(project_state)
             else:
+                print("\n[Prepare Workflow] Speaker Diarization: DISABLED (Checkbox is OFF or OCR mode)")
                 project_state.set_step_status("diarize", "skipped")
                 self.project_service.save_project(project_state)
 

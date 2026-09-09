@@ -1113,6 +1113,14 @@ class EditorTimeline(QGraphicsView):
                         layer_end = float(getattr(layer, "end", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         layer_end = 0.0
+                    meta = getattr(layer, "metadata", None)
+                    if isinstance(meta, dict):
+                        raw_ae = meta.get("_audio_end")
+                        if raw_ae is not None:
+                            try:
+                                layer_end = max(layer_end, float(raw_ae))
+                            except (TypeError, ValueError):
+                                pass
                     max_end = max(max_end, layer_end)
                     prefix_max_ends.append(max_end)
                 cached_layout = (
@@ -1158,10 +1166,21 @@ class EditorTimeline(QGraphicsView):
         for layer in visible_layers:
             x = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
             w = max(int(layer.duration * self.pixels_per_second), 20)
+            overflow_w = 0
+            raw_ae = None
+            if isinstance(getattr(layer, "metadata", None), dict):
+                raw_ae = layer.metadata.get("_audio_end")
+            if raw_ae is not None:
+                try:
+                    ex = float(raw_ae) - float(getattr(layer, "end", 0.0) or 0.0)
+                    if ex > 0.05 and float(getattr(layer, "extended_duration", 0.0) or 0.0) <= 0.001:
+                        overflow_w = int(round(ex * self.pixels_per_second))
+                except (TypeError, ValueError):
+                    pass
             # Off-screen bars have no visual effect. Skip row assignment,
             # QPainter path creation, labels, and glyph work for them.
             clip_x = max(x, 0)
-            clip_w = min(x + w, view_w) - clip_x
+            clip_w = min(x + w + overflow_w, view_w) - clip_x
             if clip_w <= 0:
                 visible_row_index += 1
                 continue
@@ -1352,17 +1371,120 @@ class EditorTimeline(QGraphicsView):
             border = fill.darker(140)
         elif is_subtitle_type or force_subtitle_color or force_subtitle_track or has_dub_marker:
             fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
+            fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
             border = QColor(141, 75, 29)  # #8d4b1d — color.darker(140) baked in
         else:
             fill = self._layer_color(layer.type)
             border = fill.darker(140)
 
+        # Check for video time-warp / freeze frame extension
+        extended_duration = 0.0
+        if isinstance(layer_metadata, dict):
+            extended_duration = float(layer_metadata.get("extended_duration", 0.0) or 0.0)
+            if extended_duration <= 0.0:
+                extended_duration = float(segment_metadata.get("extended_duration", 0.0) or 0.0)
+        if extended_duration <= 0.0:
+            extended_duration = float(getattr(layer, "extended_duration", 0.0) or 0.0)
+
+        # Check for voiceover audio overflowing past segment end (needs Khớp Voice)
+        raw_audio_end = None
+        if isinstance(layer_metadata, dict):
+            raw_audio_end = layer_metadata.get("_audio_end")
+            if raw_audio_end is None and isinstance(segment_metadata, dict):
+                raw_audio_end = segment_metadata.get("_audio_end")
+        if raw_audio_end is None:
+            raw_audio_end = getattr(layer, "_audio_end", None)
+
+        excess_voice = 0.0
+        layer_end_val = float(getattr(layer, "end", 0.0) or 0.0)
+        if raw_audio_end is not None and extended_duration <= 0.001:
+            try:
+                a_end = float(raw_audio_end)
+                if a_end > layer_end_val + 0.05:
+                    excess_voice = round(a_end - layer_end_val, 2)
+            except (TypeError, ValueError):
+                excess_voice = 0.0
+
         rect = QRectF(x, y, w, h)
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
-        painter.fillPath(path, fill)
-        painter.setPen(QPen(border, 1))
-        painter.drawPath(path)
+
+        w_ext = 0
+        w_base = w
+        if extended_duration > 0.0:
+            w_ext = int(round(extended_duration * self.pixels_per_second))
+            # Ensure base part has at least 15px so text/cue is visible
+            w_ext = min(w_ext, max(0, w - 15))
+            w_base = w - w_ext
+
+        if w_ext > 4:
+            base_rect = QRectF(x, y, w_base, h)
+            ext_rect = QRectF(x + w_base, y, w_ext, h)
+
+            # Draw base bar
+            base_path = QPainterPath()
+            base_path.addRoundedRect(base_rect, 4, 4)
+            painter.fillPath(base_path, fill)
+            painter.setPen(QPen(border, 1))
+            painter.drawPath(base_path)
+
+            # Draw extended freeze tail with distinct cyan-teal hatched pattern
+            ext_path = QPainterPath()
+            ext_path.addRoundedRect(ext_rect, 4, 4)
+            ext_fill = QColor(14, 66, 80)
+            ext_border = QColor(20, 115, 135)
+            painter.fillPath(ext_path, ext_fill)
+            # Hatch overlay
+            hatch_brush = QBrush(QColor(110, 231, 214, 50), Qt.BDiagPattern)
+            painter.fillPath(ext_path, hatch_brush)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(ext_border, 1))
+            painter.drawPath(ext_path)
+
+            # Draw freeze icon/duration on extended tail
+            if w_ext >= 24:
+                painter.setPen(QColor("#a7f3d0"))
+                font_ext = QFont("Segoe UI", 7, QFont.Bold)
+                painter.setFont(font_ext)
+                badge_text = f"⏸ +{extended_duration:.1f}s" if w_ext >= 50 else f"+{extended_duration:.1f}s"
+                painter.drawText(ext_rect, Qt.AlignCenter, badge_text)
+        elif excess_voice > 0.05:
+            w_overflow = int(round(excess_voice * self.pixels_per_second))
+
+            # Draw base bar with warning amber border if not selected
+            painter.fillPath(path, fill)
+            warning_border = QColor("#f59e0b") if not is_selected else border
+            painter.setPen(QPen(warning_border, 1.5 if not is_selected else 1))
+            painter.drawPath(path)
+
+            # Draw overflow ghost tail extending past the segment end
+            if w_overflow > 4:
+                overflow_rect = QRectF(x + w, y, w_overflow, h)
+                overflow_path = QPainterPath()
+                overflow_path.addRoundedRect(overflow_rect, 4, 4)
+
+                # Warm dark amber background + diagonal hatch
+                overflow_fill = QColor(68, 42, 10, 200)
+                overflow_border = QColor(245, 158, 11)  # #f59e0b Amber
+                painter.fillPath(overflow_path, overflow_fill)
+
+                hatch_brush = QBrush(QColor(251, 191, 36, 75), Qt.BDiagPattern)
+                painter.fillPath(overflow_path, hatch_brush)
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(overflow_border, 1, Qt.DashLine))
+                painter.drawPath(overflow_path)
+
+                # Badge text inside the overflow tail
+                if w_overflow >= 22:
+                    painter.setPen(QColor("#fde68a"))
+                    font_overflow = QFont("Segoe UI", 7, QFont.Bold)
+                    painter.setFont(font_overflow)
+                    badge_text = f"⚡ +{excess_voice:.1f}s" if w_overflow >= 45 else f"+{excess_voice:.1f}s"
+                    painter.drawText(overflow_rect, Qt.AlignCenter, badge_text)
+        else:
+            painter.fillPath(path, fill)
+            painter.setPen(QPen(border, 1))
+            painter.drawPath(path)
 
         if w > 40 and not hide_label:
             painter.setPen(QColor("#ffffff"))
@@ -1380,7 +1502,8 @@ class EditorTimeline(QGraphicsView):
             else:
                 label = layer.name or layer.type.value.title()
             short_label = os.path.basename(label) if os.path.sep in label else label
-            text_rect = QRectF(x + 4, y, min(w - 8, view_w - x - 4), h)
+            max_label_w = min(w_base - 8, view_w - x - 4) if w_ext > 4 else min(w - 8, view_w - x - 4)
+            text_rect = QRectF(x + 4, y, max(max_label_w, 10), h)
             elided = painter.fontMetrics().elidedText(short_label, Qt.ElideRight, int(text_rect.width()))
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
 
@@ -1392,26 +1515,14 @@ class EditorTimeline(QGraphicsView):
                 and getattr(layer, "audio_path", "")
                 and h >= 14
             ):
-                # Use a fixed glyph color (no derivation from the bar
-                # fill) so the glyph can't make one bar look lighter
-                # than another.
-                self._draw_audio_glyph(painter, x + w - 14, y + (h - 10) / 2, QColor("#ffffff"))
-                # _draw_audio_glyph leaves the brush set to the glyph
-                # color (white). Reset it so the next bar's border
-                # drawPath doesn't fill that bar white. Without this
-                # reset the brush leaks across bars in the same paint
-                # event: the first audio-glyph bar turns the next bar
-                # white via its border stroke, and the selection
-                # drawPath on the clicked bar also fills white over
-                # the orange fillPath.
+                # Tint glyph amber if voice is overflowing and needs sync
+                glyph_x = x + w_base - 14 if w_ext > 4 else x + w - 14
+                glyph_color = QColor("#fbbf24") if excess_voice > 0.05 else QColor("#ffffff")
+                self._draw_audio_glyph(painter, glyph_x, y + (h - 10) / 2, glyph_color)
                 painter.setBrush(Qt.NoBrush)
 
         if is_selected:
             painter.setPen(QPen(QColor("#4a8cff"), 2))
-            # _draw_audio_glyph above left the brush as glyph_color
-            # (white). drawPath() strokes AND fills, so without
-            # resetting the brush the selection pass would paint the
-            # bar white on top of the orange fillPath from earlier.
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
         elif speaker and speaker == self._highlighted_speaker:
@@ -1577,11 +1688,22 @@ class EditorTimeline(QGraphicsView):
             for layer in layers_in_row:
                 lx = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
                 lw = max(int(layer.duration * self.pixels_per_second), 20)
-                if lx - 4 <= pos.x() <= lx + lw + 4:
+                lw_hit = lw
+                meta = getattr(layer, "metadata", None)
+                if isinstance(meta, dict):
+                    raw_ae = meta.get("_audio_end")
+                    if raw_ae is not None:
+                        try:
+                            ex = float(raw_ae) - float(getattr(layer, "end", 0.0) or 0.0)
+                            if ex > 0.05 and float(getattr(layer, "extended_duration", 0.0) or 0.0) <= 0.001:
+                                lw_hit += int(round(ex * self.pixels_per_second))
+                        except (TypeError, ValueError):
+                            pass
+                if lx - 4 <= pos.x() <= lx + lw_hit + 4:
                     dx = pos.x() - lx
                     if dx <= self.HANDLE_W:
                         return "left", layer.id
-                    if lw - dx <= self.HANDLE_W:
+                    if 0 <= lw - dx <= self.HANDLE_W:
                         return "right", layer.id
                     return "body", layer.id
             return None, ""

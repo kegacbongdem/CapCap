@@ -4,6 +4,7 @@ import re
 import math
 import hashlib
 import threading
+import time
 from functools import lru_cache
 
 from new_highlight_selector import auto_select_matches
@@ -43,6 +44,88 @@ def _subprocess_run_kwargs() -> dict:
 def _text_subprocess_run_kwargs() -> dict:
     """Decode FFmpeg diagnostics independently of the Windows ANSI locale."""
     return {"text": True, "encoding": "utf-8", "errors": "replace", **_subprocess_run_kwargs()}
+
+
+class _CompletedProcess:
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_ffmpeg_command_with_progress(command: list, total_duration: float = None, on_progress=None):
+    """Run an FFmpeg command with optional live progress parsing via `-progress pipe:1`.
+
+    If on_progress is callable and total_duration is known (>0), parses
+    out_time_us and speed to report real-time percentage and formatted progress.
+    """
+    if not on_progress or not total_duration or total_duration <= 0:
+        return subprocess.run(command, capture_output=True, check=True, **_text_subprocess_run_kwargs())
+
+    cmd = list(command)
+    cmd.insert(1, "-progress")
+    cmd.insert(2, "pipe:1")
+    cmd.insert(3, "-nostats")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_text_subprocess_run_kwargs(),
+    )
+
+    stderr_chunks = []
+
+    def _drain_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    t_err = threading.Thread(target=_drain_stderr, daemon=True)
+    t_err.start()
+
+    last_pct = -1
+    last_report_t = 0.0
+    current_speed = ""
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("speed="):
+                current_speed = line.split("=", 1)[1].strip()
+            elif line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1].strip())
+                    cur_sec = us / 1_000_000.0
+                    pct = min(99, max(0, int(cur_sec / total_duration * 100)))
+                    now = time.time()
+                    if pct != last_pct or (now - last_report_t) >= 0.5:
+                        last_pct = pct
+                        last_report_t = now
+                        cur_hms = time.strftime("%H:%M:%S", time.gmtime(max(0, cur_sec)))
+                        tot_hms = time.strftime("%H:%M:%S", time.gmtime(max(0, total_duration)))
+                        speed_str = f" [{current_speed}]" if current_speed else ""
+                        msg = f"Encoding video: {pct}% ({cur_hms} / {tot_hms}){speed_str}"
+                        on_progress(pct, msg)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    proc.wait()
+    t_err.join(timeout=2.0)
+    stderr_text = "".join(stderr_chunks)
+
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output="", stderr=stderr_text)
+
+    if on_progress and last_pct < 100:
+        on_progress(100, "Encoding video: 100% (Complete)")
+
+    return _CompletedProcess(proc.returncode, "", stderr_text)
+
 
 
 _FFMPEG_ENCODER_CACHE = {}
@@ -694,10 +777,25 @@ def _build_video_lut_chain(video_filter_state=None):
     return build_video_lut_chain(video_filter_state)
 
 
+_VIDEO_DIMS_CACHE: dict = {}
+_VIDEO_DUR_CACHE: dict = {}
+
+
 def get_video_dimensions(video_path):
     """Return (width, height) of the first video stream using ffprobe.
     Falls back to (1920, 1080) if ffprobe is unavailable or fails.
     """
+    if not video_path:
+        return 1920, 1080
+    norm_path = os.path.abspath(video_path)
+    try:
+        mtime = os.path.getmtime(norm_path)
+        cache_key = (norm_path, mtime)
+        if cache_key in _VIDEO_DIMS_CACHE:
+            return _VIDEO_DIMS_CACHE[cache_key]
+    except OSError:
+        cache_key = None
+
     ffprobe = _ffprobe_path()
     if not os.path.exists(ffprobe):
         print("ffprobe not found — using default resolution 1920x1080")
@@ -713,7 +811,10 @@ def get_video_dimensions(video_path):
             **_text_subprocess_run_kwargs(),
         )
         w, h = result.stdout.strip().split('x')
-        return int(w), int(h)
+        res = int(w), int(h)
+        if cache_key:
+            _VIDEO_DIMS_CACHE[cache_key] = res
+        return res
     except Exception as e:
         print(f"ffprobe failed ({e}) — using default 1920x1080")
         return 1920, 1080
@@ -721,6 +822,17 @@ def get_video_dimensions(video_path):
 
 def get_video_duration(video_path):
     """Return duration in seconds of the video using ffprobe."""
+    if not video_path:
+        return 0.0
+    norm_path = os.path.abspath(video_path)
+    try:
+        mtime = os.path.getmtime(norm_path)
+        cache_key = (norm_path, mtime)
+        if cache_key in _VIDEO_DUR_CACHE:
+            return _VIDEO_DUR_CACHE[cache_key]
+    except OSError:
+        cache_key = None
+
     ffprobe = _ffprobe_path()
     if not os.path.exists(ffprobe):
         return 0.0
@@ -733,7 +845,10 @@ def get_video_duration(video_path):
             capture_output=True, check=True,
             **_text_subprocess_run_kwargs(),
         )
-        return float(result.stdout.strip() or 0.0)
+        dur = float(result.stdout.strip() or 0.0)
+        if cache_key:
+            _VIDEO_DUR_CACHE[cache_key] = dur
+        return dur
     except Exception:
         return 0.0
 
@@ -1696,7 +1811,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None, on_progress=None):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}, video_quality={video_quality}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1705,6 +1820,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     if not os.path.exists(ass_path):
         raise FileNotFoundError(f"ASS subtitle file not found at {ass_path}")
 
+    video_duration = get_video_duration(video_path)
     source_w, source_h = get_video_dimensions(video_path)
     video_w, video_h = source_w, source_h
 
@@ -1861,7 +1977,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     print(f"Executing ({encoder_name}): {' '.join(command)}")
 
     try:
-        result = subprocess.run(command, capture_output=True, check=True, **_text_subprocess_run_kwargs())
+        result = _run_ffmpeg_command_with_progress(command, total_duration=video_duration, on_progress=on_progress)
         font_selects = re.findall(r".*fontselect:.*", result.stderr or "", flags=re.IGNORECASE)
         if font_selects:
             print(f"[Subtitle Font] libass selected: {font_selects[-1].strip()}")
@@ -1886,7 +2002,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             
             print(f"NVENC failed, retrying with libx264. Error:\n{e.stderr}")
             try:
-                result = subprocess.run(command, capture_output=True, check=True, **_text_subprocess_run_kwargs())
+                result = _run_ffmpeg_command_with_progress(command, total_duration=video_duration, on_progress=on_progress)
                 font_selects = re.findall(r".*fontselect:.*", result.stderr or "", flags=re.IGNORECASE)
                 if font_selects:
                     print(f"[Subtitle Font] libass selected: {font_selects[-1].strip()}")
@@ -2085,9 +2201,12 @@ def extract_audio(video_path, audio_output_path, ffmpeg_path=None):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     command = [
-        ffmpeg, '-i', video_path,
+        ffmpeg, '-y', '-i', video_path,
+        '-vn',
+        '-af', 'aresample=async=1',
+        '-acodec', 'pcm_s16le',
         '-ar', '16000', '-ac', '1',
-        '-y', audio_output_path
+        audio_output_path
     ]
     print(f"Executing: {' '.join(command)}")
     try:
@@ -2141,7 +2260,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                     audio_gain_db=0.0,
                     fast=False,
                     video_quality="medium",
-                    video_time_warps=None):
+                    video_time_warps=None,
+                    on_progress=None):
     """Burn subtitles into video using a properly-styled ASS file.
 
     Workflow:
@@ -2155,27 +2275,22 @@ def embed_subtitles(video_path, srt_path, output_path,
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
-    # Step 1: get real video resolution
-    # ASS is rendered before the output Fit/Fill transform, just like MPV's
-    # live subtitle track, so author it in source-video coordinates.
-    video_w, video_h = get_video_dimensions(video_path)
+    # Step 1: probe resolution
+    video_w, video_h = get_video_dimensions(video_path, ffmpeg_path=ffmpeg)
+    print(f"Video resolution for ASS PlayRes: {video_w}x{video_h}")
 
-    # Step 2: generate ASS
+    # Step 2: convert SRT → ASS
     ass_path = srt_to_ass(
         srt_path, video_w, video_h,
         alignment=alignment, margin_v=margin_v,
-        font_name=font_name, font_size=font_size, font_color=font_color,
-        background_box=background_box,
+        font_name=font_name, font_size=font_size,
+        font_color=font_color, background_box=background_box,
         animation_style=animation_style,
         highlight_color=highlight_color,
-        outline_color=outline_color,
-        outline_width=outline_width,
-        shadow_color=shadow_color,
-        shadow_depth=shadow_depth,
-        background_color=background_color,
-        background_alpha=background_alpha,
-        bold=bold,
-        preset_key=preset_key,
+        outline_color=outline_color, outline_width=outline_width,
+        shadow_color=shadow_color, shadow_depth=shadow_depth,
+        background_color=background_color, background_alpha=background_alpha,
+        bold=bold, preset_key=preset_key,
         auto_keyword_highlight=auto_keyword_highlight,
         animation_duration=animation_duration,
         manual_highlights=manual_highlights,
@@ -2190,6 +2305,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         speaker_colors=speaker_colors,
     )
 
+    # Step 3: apply via embed_ass_subtitles
     success = embed_ass_subtitles(
         video_path,
         ass_path,
@@ -2211,6 +2327,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         fast=fast,
         video_quality=video_quality,
         video_time_warps=video_time_warps,
+        on_progress=on_progress,
     )
 
     # Step 4: clean up temp ASS

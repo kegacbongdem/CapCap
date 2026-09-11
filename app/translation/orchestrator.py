@@ -137,6 +137,8 @@ class TranslationOrchestrator:
                         custom_system_prompt=custom_system_prompt,
                         context_guidance=context_guidance,
                         polish_batch_size=polish_batch_size or 0,
+                        batch_callback=batch_callback,
+                        base_segments=segments,
                     )
                     warnings.extend(batch_warnings)
 
@@ -218,6 +220,7 @@ class TranslationOrchestrator:
         src_lang: str = "zh-Hans",
         target_lang: str = "vi",
         style_instruction: str = "",
+        batch_callback=None,
     ) -> TranslationResult:
         if not source_segments:
             return TranslationResult(success=False, errors=["No source segments to rewrite."], stage="rewrite")
@@ -263,6 +266,8 @@ class TranslationOrchestrator:
                 target_lang=target_lang,
                 style_instruction=style_instruction,
                 polish_batch_size=rewrite_batch_size,
+                batch_callback=batch_callback,
+                base_segments=source_segments,
             )
             if not validate_texts(rewritten_texts, len(source_segments)):
                 raise TranslationValidationError("AI rewrite returned an invalid number of segments.")
@@ -357,6 +362,8 @@ class TranslationOrchestrator:
         custom_system_prompt: str = "",
         context_guidance: str = "",
         polish_batch_size: int,
+        batch_callback=None,
+        base_segments: list[dict] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         warnings = []
         providers_used = set()
@@ -392,6 +399,9 @@ class TranslationOrchestrator:
                     custom_system_prompt=custom_system_prompt,
                     context_guidance=context_guidance,
                     max_workers=1 if full_context_request else min(len(batches), 4),
+                    batch_callback=batch_callback,
+                    base_segments=base_segments,
+                    provider_type=provider_type,
                 )
             else:
                 return self._run_ai_batches_sequential(
@@ -402,6 +412,9 @@ class TranslationOrchestrator:
                     style_instruction=style_instruction,
                     custom_system_prompt=custom_system_prompt,
                     context_guidance=context_guidance,
+                    batch_callback=batch_callback,
+                    base_segments=base_segments,
+                    provider_type=provider_type,
                 )
         except TranslationValidationError as exc:
             if not full_context_request:
@@ -431,6 +444,9 @@ class TranslationOrchestrator:
                         custom_system_prompt=custom_system_prompt,
                         context_guidance=context_guidance,
                         max_workers=min(len(fallback_batches), 4),
+                        batch_callback=batch_callback,
+                        base_segments=base_segments,
+                        provider_type=provider_type,
                     )
                 else:
                     recovered = self._run_ai_batches_sequential(
@@ -441,6 +457,9 @@ class TranslationOrchestrator:
                         style_instruction=style_instruction,
                         custom_system_prompt=custom_system_prompt,
                         context_guidance=context_guidance,
+                        batch_callback=batch_callback,
+                        base_segments=base_segments,
+                        provider_type=provider_type,
                     )
                 print("[AI Translation] Batch translation completed successfully.")
                 return recovered
@@ -458,6 +477,9 @@ class TranslationOrchestrator:
         style_instruction: str,
         custom_system_prompt: str = "",
         context_guidance: str = "",
+        batch_callback=None,
+        base_segments: list[dict] | None = None,
+        provider_type: str = "",
     ) -> tuple[list[str], list[str], list[str]]:
         """Execute batches sequentially, carrying forward confirmed pronouns and dialogue boundary cues."""
         warnings: list[str] = []
@@ -467,6 +489,7 @@ class TranslationOrchestrator:
         ledger = RollingContextLedger(base_context=context_guidance)
 
         total_batches = len(batches)
+        offset = 0
         for idx, batch_item in enumerate(batches):
             source_batch = batch_item[0]
             draft_batch = batch_item[1]
@@ -493,16 +516,42 @@ class TranslationOrchestrator:
 
             update_ledger_from_batch(ledger, source_batch, batch_result)
 
+            if batch_callback is not None and base_segments is not None:
+                self._emit_batch_callback(
+                    batch_callback=batch_callback,
+                    base_segments=base_segments,
+                    start_idx=offset,
+                    translated_texts=batch_result,
+                    provider=provider_name or provider_type,
+                    polished=True,
+                )
+            offset += len(source_batch)
+
             if total_batches > 1:
                 print(
                     f"[AI Translation] Completed batch {idx + 1}/{total_batches} "
                     f"({len(source_batch)} cues). Rolling memory: {len(ledger.confirmed_rules)} rules."
                 )
+                if idx + 1 < total_batches:
+                    time.sleep(0.25)
 
         return translated_texts, sorted(providers_used), warnings
 
-    @staticmethod
-    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, custom_system_prompt="", context_guidance="", max_workers):
+    def _run_ai_batch_requests(
+        self,
+        *,
+        polisher,
+        batches,
+        src_lang,
+        target_lang,
+        style_instruction,
+        custom_system_prompt="",
+        context_guidance="",
+        max_workers,
+        batch_callback=None,
+        base_segments: list[dict] | None = None,
+        provider_type: str = "",
+    ):
         """Submit validated ordered batches and merge their results by index."""
         warnings = []
         providers_used = set()
@@ -536,6 +585,16 @@ class TranslationOrchestrator:
                     warnings.extend(batch_warnings)
                     if provider_name:
                         providers_used.add(provider_name)
+                    if batch_callback is not None and base_segments is not None:
+                        start_offset = sum(len(batches[i][0]) for i in range(idx))
+                        self._emit_batch_callback(
+                            batch_callback=batch_callback,
+                            base_segments=base_segments,
+                            start_idx=start_offset,
+                            translated_texts=batch_result,
+                            provider=provider_name or provider_type,
+                            polished=True,
+                        )
                 except Exception as exc:
                     if isinstance(exc, TranslationValidationError):
                         raise

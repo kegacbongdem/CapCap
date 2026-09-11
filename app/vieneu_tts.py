@@ -159,10 +159,45 @@ def get_cached_vieneu_model(on_progress: callable = None):
                 on_progress("Loading VieNeu-TTS v3 Turbo (ONNX)...")
             setup_vieneu_hf_env()
             from vieneu import Vieneu
-            _VIENEU_MODEL = Vieneu(mode="v3turbo", backend="onnx")
+            precision = os.getenv("CAPCAP_VIENEU_PRECISION", "int8").strip().lower()
+            if precision not in ("fp32", "int8"):
+                precision = "int8"
+            cpu_cnt = os.cpu_count() or 4
+            default_threads = max(1, min(cpu_cnt - 2, 10)) if cpu_cnt >= 8 else min(cpu_cnt, 4)
+            threads_env = os.getenv("CAPCAP_VIENEU_THREADS")
+            try:
+                threads = int(threads_env) if threads_env else default_threads
+            except (ValueError, TypeError):
+                threads = default_threads
+            _VIENEU_MODEL = Vieneu(mode="v3turbo", backend="onnx", precision=precision, threads=threads)
             if on_progress:
                 on_progress("VieNeu-TTS loaded successfully.")
         return _VIENEU_MODEL
+
+
+def unload_vieneu_model():
+    """Unload cached VieNeu model and free its memory and ONNX sessions."""
+    global _VIENEU_MODEL, _CLONE_VOICE_CACHE_KEYS
+    with _VIENEU_MODEL_LOCK:
+        if _VIENEU_MODEL is not None:
+            try:
+                engine = getattr(_VIENEU_MODEL, "engine", None)
+                if engine is not None:
+                    for attr in [
+                        "sess_pre", "sess_dec", "sess_ac", "sess_codec_dec",
+                        "_sess_codec_enc", "sess_codec_step", "speaker_encoder", "denoiser"
+                    ]:
+                        setattr(engine, attr, None)
+                    _VIENEU_MODEL.engine = None
+                if hasattr(_VIENEU_MODEL, "_preset_voices"):
+                    _VIENEU_MODEL._preset_voices.clear()
+            except Exception as exc:
+                print(f"[VieNeu] Error during model teardown: {exc}")
+            _VIENEU_MODEL = None
+            _CLONE_VOICE_CACHE_KEYS.clear()
+            import gc
+            gc.collect()
+            print("[VieNeu] Model unloaded and RAM released", flush=True)
 
 
 def list_vieneu_preset_voices() -> list[dict]:
@@ -351,6 +386,10 @@ def _ffmpeg_path() -> str:
     return "ffmpeg"
 
 
+_CLONE_VOICE_REGISTER_LOCK = threading.Lock()
+_CLONE_VOICE_CACHE_KEYS = {}
+
+
 def vieneu_synthesize_wav_16k_mono(
     *,
     text: str,
@@ -411,7 +450,25 @@ def vieneu_synthesize_wav_16k_mono(
     if ref_audio and os.path.exists(ref_audio):
         if on_progress:
             on_progress(f"Synthesizing with clone voice '{raw_stem}'...")
-        audio_data = model.infer(text.strip(), ref_audio=ref_audio, ref_text=ref_text or "")
+        clone_voice_key = f"clone_{raw_stem}"
+        file_sig = f"{os.path.getmtime(ref_audio)}_{os.path.getsize(ref_audio)}"
+        with _CLONE_VOICE_REGISTER_LOCK:
+            needs_register = (
+                not hasattr(model, "_preset_voices")
+                or clone_voice_key not in model._preset_voices
+                or _CLONE_VOICE_CACHE_KEYS.get(clone_voice_key) != file_sig
+            )
+            if needs_register and hasattr(model, "add_voice"):
+                try:
+                    model.add_voice(clone_voice_key, ref_audio=ref_audio)
+                    _CLONE_VOICE_CACHE_KEYS[clone_voice_key] = file_sig
+                except Exception as exc:
+                    print(f"[VieNeu] Warning: could not pre-register clone voice '{raw_stem}': {exc}")
+
+        if hasattr(model, "_preset_voices") and clone_voice_key in model._preset_voices:
+            audio_data = model.infer(text.strip(), voice=clone_voice_key)
+        else:
+            audio_data = model.infer(text.strip(), ref_audio=ref_audio, ref_text=ref_text or "")
     else:
         preset_name = raw_stem if raw_stem in VIENEU_PRESET_VOICE_META else "Ngọc Huyền"
         if on_progress:

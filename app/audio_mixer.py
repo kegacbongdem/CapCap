@@ -2,6 +2,9 @@ import os
 import subprocess
 import wave
 
+import numpy as np
+import soundfile as sf
+
 from runtime_paths import bin_path, subprocess_text_kwargs
 
 
@@ -357,6 +360,50 @@ def _apply_timeline_ducking(
     return processed
 
 
+def _resample_audio(data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample 1D float32 audio data to target_sr using best available method."""
+    if orig_sr == target_sr:
+        return data
+    try:
+        import soxr
+        return soxr.resample(data, orig_sr, target_sr)
+    except Exception:
+        try:
+            from scipy import signal
+            gcd = int(np.gcd(orig_sr, target_sr))
+            up = target_sr // gcd
+            down = orig_sr // gcd
+            return signal.resample_poly(data, up, down).astype(np.float32)
+        except Exception:
+            num_samples = max(1, int(round(len(data) * target_sr / orig_sr)))
+            x_old = np.linspace(0, 1, len(data), endpoint=False)
+            x_new = np.linspace(0, 1, num_samples, endpoint=False)
+            return np.interp(x_new, x_old, data).astype(np.float32)
+
+
+def _read_audio_to_mono_float32(wav_path: str, target_sr: int = 16000) -> tuple[np.ndarray, int]:
+    """Read any audio file to 1D float32 numpy array at target_sr (16000Hz)."""
+    try:
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = np.mean(data, axis=-1)
+        if sr != target_sr:
+            data = _resample_audio(data, sr, target_sr)
+        return data.astype(np.float32), target_sr
+    except Exception:
+        _require_pydub()
+        from pydub import AudioSegment
+        clip = AudioSegment.from_file(wav_path).set_frame_rate(target_sr).set_channels(1)
+        samples = np.array(clip.get_array_of_samples(), dtype=np.float32)
+        if clip.sample_width == 2:
+            samples /= 32768.0
+        elif clip.sample_width == 4:
+            samples /= 2147483648.0
+        elif clip.sample_width == 1:
+            samples = (samples - 128.0) / 128.0
+        return samples.astype(np.float32), target_sr
+
+
 def build_voice_track_from_srt_segments(
     *,
     segments: list,
@@ -366,24 +413,29 @@ def build_voice_track_from_srt_segments(
     gain_db: float = 0.0,
 ) -> str:
     """
-    Build a single voice track by overlaying each segment wav at its start time.
+    Build a single voice track by placing each segment wav at its start time.
 
+    Uses an in-place float32 numpy buffer to achieve O(N) performance and avoid
+    large-scale memory reallocations on multi-hour media.
     segments: list of dicts {start: seconds, end: seconds, text: str}
     tts_wav_paths: list of wav paths aligned to segments index
     """
-    _require_pydub()
-    from pydub import AudioSegment
-
     if len(segments) != len(tts_wav_paths):
         raise ValueError("segments and tts_wav_paths length mismatch")
 
-    if total_duration_ms is None:
+    target_sr = 16000
+    linear_gain = 10.0 ** (gain_db / 20.0) if gain_db else 1.0
+
+    if total_duration_ms is not None:
+        init_duration_ms = max(0, int(total_duration_ms))
+    else:
         max_end = 0.0
         for seg in segments:
             max_end = max(max_end, float(seg.get("end", 0.0)))
-        total_duration_ms = int(max_end * 1000) + 500
+        init_duration_ms = int(max_end * 1000) + 500
 
-    base = AudioSegment.silent(duration=max(0, total_duration_ms), frame_rate=16000).set_channels(1)
+    total_samples = int(init_duration_ms * target_sr / 1000)
+    base_buffer = np.zeros(max(0, total_samples), dtype=np.float32)
 
     for idx, (seg, wav_path) in enumerate(zip(segments, tts_wav_paths)):
         if not wav_path or not os.path.exists(wav_path):
@@ -392,37 +444,51 @@ def build_voice_track_from_srt_segments(
         end_ms = int(float(seg.get("end", 0.0)) * 1000)
         max_len = max(0, end_ms - start_ms)
 
-        clip = AudioSegment.from_file(wav_path)
-        clip = clip.set_frame_rate(16000).set_channels(1)
-        if gain_db:
-            clip = clip + gain_db
+        clip_data, _ = _read_audio_to_mono_float32(wav_path, target_sr=target_sr)
+        if clip_data.size == 0:
+            continue
 
-        if max_len > 0:
-            clip_len = len(clip)
-            if clip_len < max_len:
-                gap_ms = max_len - clip_len
-                clip_end_ms = start_ms + clip_len
-                if idx + 1 < len(segments):
-                    next_start_ms = int(float(segments[idx + 1].get("start", 0.0)) * 1000)
-                    next_gap = next_start_ms - clip_end_ms
-                    if 0 < next_gap <= 20:
-                        overlap_ms = 10
-                        extend_ms = min(next_gap + overlap_ms, clip_len)
-                        clip = clip.fade_out(duration=extend_ms)
-                        clip = clip + AudioSegment.silent(duration=extend_ms, frame_rate=16000)
-                        gap_ms = 0
-                if gap_ms > 0:
-                    fade_ms = min(gap_ms, 50)
-                    clip = clip.fade_out(duration=fade_ms)
-                    silent_ms = gap_ms - fade_ms
-                    if silent_ms > 0:
-                        clip = clip + AudioSegment.silent(duration=silent_ms, frame_rate=16000)
+        if linear_gain != 1.0:
+            clip_data = clip_data * linear_gain
 
-        final_clip_len = len(clip)
-        base = base.overlay(clip, position=max(0, start_ms))
+        clip_len_ms = int(round(len(clip_data) * 1000.0 / target_sr))
+
+        if max_len > 0 and clip_len_ms < max_len:
+            gap_ms = max_len - clip_len_ms
+            clip_end_ms = start_ms + clip_len_ms
+            if idx + 1 < len(segments):
+                next_start_ms = int(float(segments[idx + 1].get("start", 0.0)) * 1000)
+                next_gap = next_start_ms - clip_end_ms
+                if 0 < next_gap <= 20:
+                    overlap_ms = 10
+                    extend_ms = min(next_gap + overlap_ms, clip_len_ms)
+                    fade_samples = int(extend_ms * target_sr / 1000)
+                    if 0 < fade_samples <= len(clip_data):
+                        fade_curve = np.linspace(1.0, 0.0, fade_samples, endpoint=True, dtype=np.float32)
+                        clip_data[-fade_samples:] *= fade_curve
+                    gap_ms = 0
+            if gap_ms > 0:
+                fade_ms = min(gap_ms, 50)
+                fade_samples = int(fade_ms * target_sr / 1000)
+                if 0 < fade_samples <= len(clip_data):
+                    fade_curve = np.linspace(1.0, 0.0, fade_samples, endpoint=True, dtype=np.float32)
+                    clip_data[-fade_samples:] *= fade_curve
+
+        start_sample = max(0, int(start_ms * target_sr / 1000))
+        end_sample = start_sample + len(clip_data)
+
+        if end_sample > base_buffer.size:
+            pad_size = max(end_sample - base_buffer.size, target_sr)
+            base_buffer = np.pad(base_buffer, (0, pad_size))
+
+        base_buffer[start_sample:end_sample] += clip_data
+
+    peak = float(np.max(np.abs(base_buffer))) if base_buffer.size else 0.0
+    if peak > 1.0:
+        base_buffer = (base_buffer / peak) * 0.999
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
-    base.export(output_wav_path, format="wav")
+    sf.write(output_wav_path, base_buffer, target_sr, subtype="PCM_16")
     return output_wav_path
 
 
@@ -638,38 +704,49 @@ def mix_audio_tracks(
 
     rendered = []
     for raw, path, volume, start_ms, end_ms, source_start_ms in normalized_tracks:
-        audio = AudioSegment.from_file(path).set_frame_rate(sample_rate).set_channels(1)
-        if source_start_ms:
-            audio = audio[source_start_ms:]
-        if len(audio) <= 0:
+        audio, _ = _read_audio_to_mono_float32(path, target_sr=sample_rate)
+        if source_start_ms > 0:
+            source_start_samples = int(source_start_ms * sample_rate / 1000)
+            if source_start_samples < len(audio):
+                audio = audio[source_start_samples:]
+            else:
+                continue
+        if len(audio) == 0:
             continue
 
-        requested_len = max(0, end_ms - start_ms) if end_ms > start_ms else 0
-        if bool(raw.get("loop", False)) and requested_len > 0 and len(audio) < requested_len:
-            repeats = (requested_len + len(audio) - 1) // len(audio)
-            audio = audio * max(1, repeats)
-        if requested_len > 0:
-            audio = audio[:requested_len]
-        if volume != 100.0:
-            # Keep 0% as a skip above; pydub gain is logarithmic and matches
-            # the existing A1/TS1 percentage conversion used by the UI.
-            import math
-            gain_db = 20.0 * math.log10(volume / 100.0)
-            audio = audio + gain_db
-        if len(audio) <= 0:
-            continue
-        render_end = start_ms + len(audio)
-        max_end_ms = max(max_end_ms, render_end, end_ms)
+        requested_samples = int((end_ms - start_ms) * sample_rate / 1000) if end_ms > start_ms else 0
+        if bool(raw.get("loop", False)) and requested_samples > len(audio) and len(audio) > 0:
+            repeats = int(np.ceil(requested_samples / len(audio)))
+            audio = np.tile(audio, repeats)[:requested_samples]
+        elif requested_samples > 0 and len(audio) > requested_samples:
+            audio = audio[:requested_samples]
+
+        linear_gain = float(volume / 100.0)
+        if abs(linear_gain - 1.0) > 0.001:
+            audio = audio * linear_gain
+
+        render_end_ms = start_ms + int(len(audio) * 1000 / sample_rate)
+        max_end_ms = max(max_end_ms, render_end_ms, end_ms)
         rendered.append((start_ms, audio))
 
     if not rendered or max_end_ms <= 0:
         raise ValueError("Active audio tracks contain no audio.")
 
-    base = AudioSegment.silent(duration=max_end_ms, frame_rate=sample_rate).set_channels(1)
+    total_samples = int(max_end_ms * sample_rate / 1000)
+    base_buffer = np.zeros(total_samples, dtype=np.float32)
+
     for start_ms, audio in rendered:
-        base = base.overlay(audio, position=max(0, start_ms))
+        start_sample = int(start_ms * sample_rate / 1000)
+        end_sample = min(total_samples, start_sample + len(audio))
+        fit_len = end_sample - start_sample
+        if fit_len > 0:
+            base_buffer[start_sample:end_sample] += audio[:fit_len]
+
+    peak = float(np.max(np.abs(base_buffer))) if base_buffer.size else 0.0
+    if peak > 1.0:
+        base_buffer = (base_buffer / peak) * 0.999
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
-    base.export(output_wav_path, format="wav")
+    sf.write(output_wav_path, base_buffer, sample_rate, subtype="PCM_16")
     return output_wav_path
 

@@ -491,8 +491,18 @@ class _BlurRegionOverlayWindow(QWidget):
     def attach_to_view(self, view: QWidget):
         self._target_view = view
         if view and view.window():
-            self._main_window = view.window()
-            self._main_window.installEventFilter(self)
+            new_win = view.window()
+            if self._main_window is not None and self._main_window is not new_win:
+                try:
+                    self._main_window.removeEventFilter(self)
+                except Exception:
+                    pass
+            self._main_window = new_win
+            try:
+                self._main_window.removeEventFilter(self)
+                self._main_window.installEventFilter(self)
+            except Exception:
+                pass
         self.sync_to_view()
 
     def set_editable(self, editable: bool):
@@ -519,10 +529,24 @@ class _BlurRegionOverlayWindow(QWidget):
         self._active_index = -1
         self._regions = []
         self._target_view = None
-        self._main_window = None
+        if self._main_window is not None:
+            try:
+                self._main_window.removeEventFilter(self)
+            except Exception:
+                pass
+            self._main_window = None
         self._suspended = False
         self.hide()
         self.update()
+
+    def closeEvent(self, event):
+        if self._main_window is not None:
+            try:
+                self._main_window.removeEventFilter(self)
+            except Exception:
+                pass
+            self._main_window = None
+        super().closeEvent(event)
 
     def has_region(self) -> bool:
         return bool(self._regions)
@@ -595,18 +619,42 @@ class _BlurRegionOverlayWindow(QWidget):
         QTimer.singleShot(120, self.sync_to_view)
 
     def hideEvent(self, event):
-        super().hideEvent(event)
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return
+        except Exception:
+            pass
+        if getattr(self, "mouseGrabber", None) and self.mouseGrabber() is self:
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+        try:
+            super().hideEvent(event)
+        except (RuntimeError, ReferenceError):
+            pass
 
     def eventFilter(self, watched, event):
-        if watched is self._main_window:
-            if event.type() == QEvent.WindowDeactivate:
-                self._suspended = True
-                self.hide()
-            elif event.type() == QEvent.WindowActivate:
-                self._suspended = False
-                if self._editable and self._regions and not self._has_active_popup():
-                    self._queue_sync_to_view()
-        return super().eventFilter(watched, event)
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if self._main_window is not None and watched is self._main_window:
+                if event.type() == QEvent.WindowDeactivate:
+                    self._suspended = True
+                    if self.isVisible():
+                        self.hide()
+                elif event.type() == QEvent.WindowActivate:
+                    self._suspended = False
+                    if self._editable and self._regions and not self._has_active_popup():
+                        self._queue_sync_to_view()
+        except (RuntimeError, ReferenceError):
+            return False
+        return False
 
     def _has_active_popup(self):
         from PySide6.QtWidgets import QApplication
@@ -923,11 +971,19 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         self._sync_timer.start()
 
     def eventFilter(self, watched, event):
-        if watched is self._target_view and event.type() in (
-            QEvent.Resize, QEvent.Move,
-        ):
-            # Re-sync the overlay to the target view's new position/size.
-            QTimer.singleShot(0, self.sync_to_view)
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if self._target_view is not None and watched is self._target_view and event.type() in (
+                QEvent.Resize, QEvent.Move,
+            ):
+                QTimer.singleShot(0, self.sync_to_view)
+        except (RuntimeError, ReferenceError):
+            return False
         return super().eventFilter(watched, event)
 
     def set_pixmap(self, path):
@@ -1152,10 +1208,19 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
         self._sync_timer.start()
 
     def eventFilter(self, watched, event):
-        if watched is self._target_view and event.type() in (
-            QEvent.Resize, QEvent.Move,
-        ):
-            QTimer.singleShot(0, self.sync_to_view)
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if self._target_view is not None and watched is self._target_view and event.type() in (
+                QEvent.Resize, QEvent.Move,
+            ):
+                QTimer.singleShot(0, self.sync_to_view)
+        except (RuntimeError, ReferenceError):
+            return False
         return super().eventFilter(watched, event)
 
     def paintEvent(self, event):
@@ -1396,7 +1461,8 @@ class MpvVideoView(QWidget):
             "}"
         )
         self.ratio_badge.hide()
-        self.video_surface.show()
+        # Do not call self.video_surface.show() here. It will be shown naturally in
+        # showEvent() once the main window is displayed, avoiding an orphan native surface.
         self._sync_preview_stack()
         self.video_surface.winId()
 
@@ -1520,23 +1586,27 @@ class MpvVideoView(QWidget):
         self.mask_overlay.sync_to_view()
 
     def eventFilter(self, watched, event):
-        # The subtitle is a top-level Qt tool window so it can sit above
-        # MPV's native surface. Windows may hide that tool while the app is
-        # inactive; restore it when the main window becomes active again.
-        if watched is self.window():
-            event_type = event.type()
-            if event_type == QEvent.WindowActivate:
-                QTimer.singleShot(0, self._restore_subtitle_overlay)
-            else:
-                blocked_type = getattr(QEvent.Type, "WindowBlocked", None)
-                if event_type != QEvent.WindowDeactivate and event_type != blocked_type:
-                    return super().eventFilter(watched, event)
-                # Modal dialogs do not own this top-level overlay, so hide it
-                # explicitly while the parent window is blocked.
-                self.subtitle_item.hide()
-                if self.text_overlay is not None:
-                    self.text_overlay.hide()
-        return super().eventFilter(watched, event)
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if watched is self.window():
+                event_type = event.type()
+                if event_type == QEvent.WindowActivate:
+                    QTimer.singleShot(0, self._restore_subtitle_overlay)
+                else:
+                    blocked_type = getattr(QEvent.Type, "WindowBlocked", None)
+                    if event_type != QEvent.WindowDeactivate and event_type != blocked_type:
+                        return False
+                    self.subtitle_item.hide()
+                    if self.text_overlay is not None:
+                        self.text_overlay.hide()
+        except (RuntimeError, ReferenceError):
+            return False
+        return False
 
     def _restore_subtitle_overlay(self):
         if not self.isVisible():

@@ -55,7 +55,7 @@ def translate_segments(
     return result.segments
 
 
-def rewrite_translated_segments(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction=""):
+def rewrite_translated_segments(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction="", batch_callback=None):
     from translation import TranslationOrchestrator
 
     orchestrator = TranslationOrchestrator()
@@ -65,13 +65,14 @@ def rewrite_translated_segments(source_segments, translated_segments, model_path
         src_lang=src_lang,
         target_lang=target_lang,
         style_instruction=style_instruction,
+        batch_callback=batch_callback,
     )
     if not result.success:
         raise TranslationError("; ".join(result.errors) or "Rewrite failed.")
     return result.segments
 
 
-def rewrite_translated_segments_to_srt(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction=""):
+def rewrite_translated_segments_to_srt(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction="", batch_callback=None):
     segments = rewrite_translated_segments(
         source_segments,
         translated_segments,
@@ -79,5 +80,6 @@ def rewrite_translated_segments_to_srt(source_segments, translated_segments, mod
         src_lang=src_lang,
         target_lang=target_lang,
         style_instruction=style_instruction,
+        batch_callback=batch_callback,
     )
     return to_srt(segments)

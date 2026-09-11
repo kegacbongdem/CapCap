@@ -58,6 +58,17 @@ class OpenAICompatiblePolisherProvider:
 
         return kwargs
 
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "429" in msg
+            or "resource_exhausted" in msg
+            or "rate limit" in msg
+            or "ratelimit" in msg
+            or "quota" in msg
+            or "too many requests" in msg
+        )
+
     def generate_text(
         self,
         *,
@@ -65,25 +76,48 @@ class OpenAICompatiblePolisherProvider:
         user_msg: str,
         max_tokens: int = 1024,
         timeout: int = 60,
+        max_retries: int = 4,
     ) -> str:
         if not self.is_configured():
             raise TranslationConfigError(f"{self.display_name} is not configured. Set its API key and model in Settings.")
         client = self._get_client()
-        kwargs = self._build_completion_kwargs(
-            system_msg=system_msg,
-            user_msg=user_msg,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        try:
-            response = client.chat.completions.create(**kwargs)
-        except Exception as api_err:
-            if "reasoning_effort" in kwargs and "reasoning_effort" in str(api_err):
-                kwargs.pop("reasoning_effort", None)
-                response = client.chat.completions.create(**kwargs)
-            else:
-                raise
-        return (response.choices[0].message.content or "").strip()
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            kwargs = self._build_completion_kwargs(
+                system_msg=system_msg,
+                user_msg=user_msg,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            try:
+                try:
+                    response = client.chat.completions.create(**kwargs)
+                except Exception as api_err:
+                    if "reasoning_effort" in kwargs and "reasoning_effort" in str(api_err):
+                        kwargs.pop("reasoning_effort", None)
+                        response = client.chat.completions.create(**kwargs)
+                    else:
+                        raise
+                return (response.choices[0].message.content or "").strip()
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries:
+                    if self._is_rate_limit_error(e):
+                        sleep_s = min(60.0, 5.0 * (2.2 ** (attempt - 1)))
+                        print(
+                            f"[{self.display_name}] Rate limit (429/Quota) on generate_text attempt {attempt}/{max_retries}. "
+                            f"Backing off for {sleep_s:.1f}s..."
+                        )
+                    else:
+                        sleep_s = min(15.0, 2.0 * attempt)
+                        print(
+                            f"[{self.display_name}] Error on generate_text attempt {attempt}/{max_retries}: {e}. "
+                            f"Retrying in {sleep_s:.1f}s..."
+                        )
+                    time.sleep(sleep_s)
+                    continue
+
+        raise TranslationProviderError(f"{self.display_name} generate_text failed: {last_error}")
 
     def polish_batch(
         self,
@@ -97,7 +131,7 @@ class OpenAICompatiblePolisherProvider:
         custom_system_prompt: str = "",
         context_guidance: str = "",
         timeout: int = 120,
-        max_retries: int = 2,
+        max_retries: int = 4,
         max_tokens: int = 4096,
     ) -> tuple[list[str], list[str], str]:
         if not self.is_configured():
@@ -158,7 +192,19 @@ class OpenAICompatiblePolisherProvider:
             except Exception as e:
                 last_error = str(e)
                 if attempt < max_retries:
-                    time.sleep(attempt)
+                    if self._is_rate_limit_error(e):
+                        sleep_s = min(60.0, 5.0 * (2.2 ** (attempt - 1)))
+                        print(
+                            f"[{self.display_name}] Rate limit (429/Quota) on batch attempt {attempt}/{max_retries}. "
+                            f"Backing off for {sleep_s:.1f}s..."
+                        )
+                    else:
+                        sleep_s = min(15.0, 2.0 * attempt)
+                        print(
+                            f"[{self.display_name}] Error on batch attempt {attempt}/{max_retries}: {e}. "
+                            f"Retrying in {sleep_s:.1f}s..."
+                        )
+                    time.sleep(sleep_s)
                     continue
 
         raise TranslationProviderError(f"{self.display_name} failed: {last_error}")

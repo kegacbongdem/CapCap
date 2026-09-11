@@ -158,6 +158,7 @@ class ExportWorkflow:
         text_image_layers=None,
         original_audio_gain_db=0.0,
         video_quality="medium",
+        on_progress=None,
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
@@ -184,6 +185,7 @@ class ExportWorkflow:
                 audio_gain_db=original_audio_gain_db,
                 video_quality=video_quality,
                 video_time_warps=warps,
+                on_progress=on_progress,
             )
         else:
             ok = self.engine_runtime.embed_subtitles(
@@ -204,6 +206,7 @@ class ExportWorkflow:
                 audio_gain_db=original_audio_gain_db,
                 video_quality=video_quality,
                 video_time_warps=warps,
+                on_progress=on_progress,
             )
         if not ok:
             raise RuntimeError("Failed to burn subtitles into the output video.")
@@ -620,9 +623,12 @@ class ExportWorkflow:
         tmp_mux_path = ""
         try:
             if mode == "subtitle":
-                self._emit_progress(on_progress, 20, "Burning subtitles into the video...")
+                self._emit_progress(on_progress, 15, "Burning subtitles into the video...")
                 if abs(float(original_audio_gain_db or 0.0)) > 0.001:
                     print(f"[Export] Applying A1 Original audio gain: {float(original_audio_gain_db):.2f} dB")
+                def _sub_prog_s(pct, msg):
+                    scaled = int(15 + (pct / 100.0) * 80)
+                    self._emit_progress(on_progress, scaled, msg)
                 self._export_subtitle_video(
                     video_path=video_path,
                     srt_path=srt_path,
@@ -642,6 +648,7 @@ class ExportWorkflow:
                     text_image_layers=text_image_layers,
                     original_audio_gain_db=original_audio_gain_db,
                     video_quality=video_quality,
+                    on_progress=_sub_prog_s,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
@@ -670,6 +677,9 @@ class ExportWorkflow:
                     video_quality=video_quality,
                 )
                 if voice_output != output_path:
+                    def _sub_prog_v(pct, msg):
+                        scaled = int(50 + (pct / 100.0) * 45)
+                        self._emit_progress(on_progress, scaled, msg)
                     self._export_subtitle_video(
                         video_path=voice_output,
                         srt_path=srt_path,
@@ -688,10 +698,11 @@ class ExportWorkflow:
                         blur_regions=blur_regions,
                         text_image_layers=text_image_layers,
                         video_quality=video_quality,
+                        on_progress=_sub_prog_v,
                     )
             elif mode == "both":
                 tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
-                self._emit_progress(on_progress, 18, "Muxing Vietnamese audio with the source video...")
+                self._emit_progress(on_progress, 15, "Muxing Vietnamese audio with the source video...")
                 # Keep this mux fast (no scaling). Scaling happens in the subtitle-burn step.
                 self.engine_runtime.mux_audio_for_preview(
                     video_path,
@@ -703,7 +714,10 @@ class ExportWorkflow:
                     output_fps=target_fps,
                     video_quality=video_quality,
                 )
-                self._emit_progress(on_progress, 62, "Burning styled subtitles into the final video...")
+                self._emit_progress(on_progress, 50, "Burning styled subtitles into the final video...")
+                def _sub_prog_b(pct, msg):
+                    scaled = int(50 + (pct / 100.0) * 45)
+                    self._emit_progress(on_progress, scaled, msg)
                 self._export_subtitle_video(
                     video_path=tmp_mux_path,
                     srt_path=srt_path,
@@ -722,6 +736,7 @@ class ExportWorkflow:
                     blur_regions=blur_regions,
                     text_image_layers=text_image_layers,
                     video_quality=video_quality,
+                    on_progress=_sub_prog_b,
                 )
             else:
                 raise ValueError(f"Unsupported export mode: {mode}")

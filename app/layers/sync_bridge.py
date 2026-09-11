@@ -65,12 +65,27 @@ def sync_segments_to_dub_subtitle_layers(
 
     existing_by_idx: dict[int, DubSubtitleLayer] = {}
     existing_by_key: dict[tuple[float, float, str], list[DubSubtitleLayer]] = {}
+    layer_to_idx: dict[int, int] = {}
     for layer in target.layers:
         if isinstance(layer, DubSubtitleLayer):
-            idx = int(layer.metadata.get("_seg_index", -1))
+            idx = -1
+            if isinstance(layer.metadata, dict):
+                raw_idx = layer.metadata.get("_seg_index")
+                if raw_idx is None and isinstance(layer.metadata.get("_seg_dict"), dict):
+                    raw_idx = layer.metadata["_seg_dict"].get("_seg_index")
+                if raw_idx is not None:
+                    try:
+                        idx = int(raw_idx)
+                    except (TypeError, ValueError):
+                        idx = -1
+            if idx < 0:
+                try:
+                    idx = int(getattr(layer, "z_index", -1))
+                except (TypeError, ValueError):
+                    idx = -1
             if idx >= 0:
-                existing_by_idx[idx] = idx and layer or layer
                 existing_by_idx[idx] = layer
+                layer_to_idx[id(layer)] = idx
             key = (
                 round(float(getattr(layer, "start", 0.0) or 0.0), 6),
                 round(float(getattr(layer, "end", 0.0) or 0.0), 6),
@@ -103,10 +118,9 @@ def sync_segments_to_dub_subtitle_layers(
             existing_by_idx.pop(orig_idx, None) if allow_index_fallback else None
         )
         if existing is not None:
-            for existing_idx, existing_layer in list(existing_by_idx.items()):
-                if existing_layer is existing:
-                    existing_by_idx.pop(existing_idx, None)
-                    break
+            existing_idx = layer_to_idx.pop(id(existing), None)
+            if existing_idx is not None:
+                existing_by_idx.pop(existing_idx, None)
         if existing is not None:
             existing.text = text
             existing.dub_text = dub_text
@@ -118,11 +132,12 @@ def sync_segments_to_dub_subtitle_layers(
                     existing.voice_speed = float(seg_speed)
                 except (TypeError, ValueError):
                     pass
+            existing.metadata["_seg_index"] = int(orig_idx)
             existing.metadata["_seg_dict"] = {
                 k: v for k, v in d.items() if k != "text"
             }
-            existing.metadata["_seg_index"] = int(orig_idx)
-            raw_ae = d.get("_audio_end")
+            d_meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+            raw_ae = d.get("_audio_end") if d.get("_audio_end") is not None else d_meta.get("_audio_end")
             if raw_ae is not None:
                 try:
                     existing.metadata["_audio_end"] = float(raw_ae)
@@ -130,7 +145,8 @@ def sync_segments_to_dub_subtitle_layers(
                     existing.metadata.pop("_audio_end", None)
             else:
                 existing.metadata.pop("_audio_end", None)
-            raw_ext = d.get("extended_duration")
+
+            raw_ext = d.get("extended_duration") if d.get("extended_duration") is not None else d_meta.get("extended_duration")
             if raw_ext is not None:
                 try:
                     existing.metadata["extended_duration"] = float(raw_ext)
@@ -138,6 +154,12 @@ def sync_segments_to_dub_subtitle_layers(
                     existing.metadata.pop("extended_duration", None)
             else:
                 existing.metadata.pop("extended_duration", None)
+
+            raw_warp = d.get("time_warp_id") if d.get("time_warp_id") is not None else d_meta.get("time_warp_id")
+            if raw_warp:
+                existing.metadata["time_warp_id"] = str(raw_warp)
+            else:
+                existing.metadata.pop("time_warp_id", None)
             layer = existing
         else:
             seg_speed = d.get("voice_speed", 1.0)
@@ -154,11 +176,12 @@ def sync_segments_to_dub_subtitle_layers(
                 voice_speed=seg_speed,
             )
             layer.z_index = orig_idx
+            layer.metadata["_seg_index"] = int(orig_idx)
             layer.metadata["_seg_dict"] = {
                 k: v for k, v in d.items() if k != "text"
             }
-            layer.metadata["_seg_index"] = int(orig_idx)
-            raw_ae = d.get("_audio_end")
+            d_meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+            raw_ae = d.get("_audio_end") if d.get("_audio_end") is not None else d_meta.get("_audio_end")
             if raw_ae is not None:
                 try:
                     layer.metadata["_audio_end"] = float(raw_ae)
@@ -166,7 +189,8 @@ def sync_segments_to_dub_subtitle_layers(
                     layer.metadata.pop("_audio_end", None)
             else:
                 layer.metadata.pop("_audio_end", None)
-            raw_ext = d.get("extended_duration")
+
+            raw_ext = d.get("extended_duration") if d.get("extended_duration") is not None else d_meta.get("extended_duration")
             if raw_ext is not None:
                 try:
                     layer.metadata["extended_duration"] = float(raw_ext)
@@ -174,6 +198,12 @@ def sync_segments_to_dub_subtitle_layers(
                     layer.metadata.pop("extended_duration", None)
             else:
                 layer.metadata.pop("extended_duration", None)
+
+            raw_warp = d.get("time_warp_id") if d.get("time_warp_id") is not None else d_meta.get("time_warp_id")
+            if raw_warp:
+                layer.metadata["time_warp_id"] = str(raw_warp)
+            else:
+                layer.metadata.pop("time_warp_id", None)
             target.layers.append(layer)
         new_layers.append(layer)
 

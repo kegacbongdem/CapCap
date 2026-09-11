@@ -33,7 +33,7 @@ def _acquire_single_instance() -> bool:
         # A mutex failure should never prevent the application from starting.
         return True
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWidgets import QApplication
 
 # Keep the worker entrypoint before the GUI import.  In a windowed PyInstaller
@@ -190,6 +190,51 @@ def _bootstrap_env(app_root: str) -> None:
             os.environ.setdefault(key, value.strip())
 
 
+def launch_editor_for_video(target_video: str, runtime_logs=None) -> VideoTranslatorGUI:
+    win = VideoTranslatorGUI()
+    if runtime_logs is not None:
+        runtime_logs.attach(win)
+    win.prepare_initial_editor_layout()
+    win._current_video_path = os.path.abspath(target_video)
+
+    # Show the complete editor UI immediately so all child widgets and borders render
+    # simultaneously as one cohesive window, preventing any detached preview popup.
+    win.show()
+    win.raise_()
+    win.activateWindow()
+    win.setFocus()
+    QApplication.processEvents()
+
+    win.ensure_media_backend_ready()
+    win.video_path_edit.setText(target_video)
+    win.media_player.setSource(QUrl.fromLocalFile(target_video))
+    QApplication.processEvents()
+
+    if hasattr(win, "refresh_video_dimensions"):
+        win.refresh_video_dimensions(target_video)
+    QApplication.processEvents()
+
+    win.current_project_state = win.ensure_current_project()
+    win.load_project_context(win.current_project_state)
+    QApplication.processEvents()
+
+    if hasattr(win, "timeline") and hasattr(win.timeline, "set_video_source"):
+        try:
+            dur = win.media_player.duration() / 1000.0
+        except Exception:
+            dur = 60.0
+        win.timeline.set_video_source(win._current_video_path, dur)
+        ensure_tracks = getattr(win.timeline, "_ensure_tracks_populated", None)
+        if callable(ensure_tracks):
+            ensure_tracks()
+        redraw = getattr(win.timeline, "_redraw", None)
+        if callable(redraw):
+            redraw()
+    win.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
+    QApplication.processEvents()
+    return win
+
+
 if __name__ == "__main__":
     app_root = _app_root()
     _bootstrap_env(app_root)
@@ -198,45 +243,16 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     from views.launcher import show_launcher, LauncherWindow
+
     video_path = show_launcher(None)
     if not video_path:
         sys.exit(0)
 
     LauncherWindow.add_recent(None, video_path)
 
-    window = VideoTranslatorGUI()
-    runtime_logs.attach(window)
-    # Resolve all responsive sizes and splitter geometry while the editor is
-    # hidden, so the first frame after the Launcher is already settled.
-    window.prepare_initial_editor_layout()
+    window = launch_editor_for_video(video_path, runtime_logs)
     window.show()
-
-    def _init_video():
-        try:
-            window._current_video_path = os.path.abspath(video_path)
-            window.ensure_media_backend_ready()
-            window.video_path_edit.setText(video_path)
-            window.media_player.setSource(QUrl.fromLocalFile(video_path))
-            if hasattr(window, "refresh_video_dimensions"):
-                window.refresh_video_dimensions(video_path)
-            window.current_project_state = window.ensure_current_project()
-            window.load_project_context(window.current_project_state)
-
-            if hasattr(window, "timeline") and hasattr(window.timeline, "set_video_source"):
-                try:
-                    dur = window.media_player.duration() / 1000.0
-                except Exception:
-                    dur = 60.0
-                window.timeline.set_video_source(window._current_video_path, dur)
-                ensure_tracks = getattr(window.timeline, "_ensure_tracks_populated", None)
-                if callable(ensure_tracks):
-                    ensure_tracks()
-                redraw = getattr(window.timeline, "_redraw", None)
-                if callable(redraw):
-                    redraw()
-            window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
-        except Exception:
-            runtime_logs.add("[Startup Error]\n" + traceback.format_exc())
-
-    QTimer.singleShot(100, _init_video)
+    window.raise_()
+    window.activateWindow()
+    window.setFocus()
     sys.exit(app.exec())

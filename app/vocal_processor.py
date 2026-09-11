@@ -1,4 +1,8 @@
+import math
 import os
+import shutil
+import subprocess
+import tempfile
 import warnings
 
 import numpy as np
@@ -7,7 +11,10 @@ import librosa
 import onnxruntime as ort
 from scipy.signal.windows import hann as periodic_hann
 
-from runtime_paths import bin_path
+try:
+    from runtime_paths import bin_path, subprocess_hidden_kwargs
+except ImportError:
+    from app.runtime_paths import bin_path, subprocess_hidden_kwargs
 
 warnings.filterwarnings("ignore", message="NOLA condition failed")
 
@@ -36,11 +43,24 @@ def _get_session():
         path = _model_path()
         if not os.path.exists(path):
             raise FileNotFoundError(f"ONNX model not found: {path}")
+        available = ort.get_available_providers()
+        providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"] if p in available]
         _ONNX_SESSION = ort.InferenceSession(
             path,
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
     return _ONNX_SESSION
+
+
+def _get_ffmpeg() -> str:
+    bundled = bin_path("ffmpeg", "ffmpeg.exe")
+    if os.path.isfile(bundled):
+        return bundled
+    alt = bin_path("ffmpeg.exe")
+    if os.path.isfile(alt):
+        return alt
+    return shutil.which("ffmpeg") or "ffmpeg"
+
 
 
 class _STFT:
@@ -99,7 +119,12 @@ class _STFT:
         return result
 
 
-def separate_vocals(audio_path, output_dir):
+def separate_vocals(audio_path: str, output_dir: str, on_progress=None):
+    """Separate vocals and instrumental using UVR MDX-NET model with streaming I/O.
+
+    Streams chunk-by-chunk to disk so RAM remains strictly bounded (<200MB) even
+    for long audio tracks (>4 hours).
+    """
     if not os.path.exists(audio_path):
         return None, None
 
@@ -107,127 +132,147 @@ def separate_vocals(audio_path, output_dir):
     session = _get_session()
     model = _STFT()
 
-    audio, sr = sf.read(audio_path, dtype="float32")
-    if audio.ndim == 1:
-        audio = np.stack([audio, audio], axis=0)
-    else:
-        audio = audio.T
-        if audio.shape[0] == 1:
-            audio = np.repeat(audio, 2, axis=0)
-        elif audio.shape[0] > 2:
-            audio = audio[:2]
-
-    if sr != SR:
-        from scipy.signal import resample_poly
-        gcd_val = np.gcd(sr, SR)
-        up = SR // gcd_val
-        down = sr // gcd_val
-        audio = resample_poly(audio.astype(np.float64), up, down, axis=1).astype(np.float32)
-
-    samples = audio.shape[-1]
-    margin = SR
-    chunk_size = 15 * SR
-
-    if samples < chunk_size:
-        chunk_size = samples
-    if margin > chunk_size:
-        margin = chunk_size
-
-    segments = {}
-    counter = -1
-    for skip in range(0, samples, chunk_size):
-        counter += 1
-        s_margin = 0 if counter == 0 else margin
-        end = min(skip + chunk_size + margin, samples)
-        start = skip - s_margin
-        segments[skip] = audio[:, start:end].copy()
-        if end == samples:
-            break
-
-    chunked_sources = []
-    for mix_start in segments:
-        cmix = segments[mix_start]
-        sources = []
-        n_sample = cmix.shape[1]
-        trim = model.n_fft // 2
-        gen_size = model.chunk_size - 2 * trim
-        pad = gen_size - n_sample % gen_size
-        if pad == gen_size:
-            pad = 0
-
-        mix_p = np.concatenate([
-            np.zeros((2, trim), dtype=np.float32),
-            cmix,
-            np.zeros((2, pad), dtype=np.float32),
-            np.zeros((2, trim), dtype=np.float32),
-        ], axis=1)
-
-        mix_waves = []
-        i = 0
-        while i < n_sample + pad:
-            waves = mix_p[:, i:i + model.chunk_size]
-            mix_waves.append(waves)
-            i += gen_size
-
-        if not mix_waves:
-            continue
-
-        mix_waves = np.array(mix_waves, dtype=np.float32)
-
-        spek = model.stft(mix_waves)
-
-        spec_pred = session.run(None, {"input": spek})[0]
-
-        tar_waves = model.istft(spec_pred)
-
-        tar_signal = tar_waves[:, :, trim:-trim]
-        tar_signal = tar_signal.transpose(1, 0, 2).reshape(2, -1)
-
-        tar_signal = tar_signal[:, :n_sample + pad]
-
-        start = 0 if mix_start == 0 else margin
-        end = None if mix_start == list(segments.keys())[-1] else -margin
-        if margin == 0:
-            end = None
-
-        sources.append(tar_signal[:, start:end])
-        chunked_sources.append(sources)
-
-    if not chunked_sources:
-        return None, None
-
-    vocals_441 = np.concatenate([s[0] for s in chunked_sources], axis=-1)[:, :samples]
-
-    if sr != SR:
-        from scipy.signal import resample_poly
-        gcd_val = np.gcd(SR, sr)
-        up = sr // gcd_val
-        down = SR // gcd_val
-        vocals_441 = resample_poly(vocals_441.astype(np.float64), up, down, axis=1).astype(np.float32)
-
-    audio_orig, orig_sr = sf.read(audio_path, dtype="float32")
-    if audio_orig.ndim == 1:
-        audio_orig = audio_orig
-    else:
-        audio_orig = audio_orig[:, 0]
-
-    vocals_mono = vocals_441[0]
-    if len(vocals_mono) < len(audio_orig):
-        vocals_mono = np.pad(vocals_mono, (0, len(audio_orig) - len(vocals_mono)))
-    else:
-        vocals_mono = vocals_mono[:len(audio_orig)]
-
-    # Model outputs instrumental; vocals = original - instrumental
-    instrumental = vocals_mono
-    vocals_final = audio_orig - instrumental
-
+    orig_info = sf.info(audio_path)
+    orig_sr = orig_info.samplerate
     base_name = os.path.splitext(os.path.basename(audio_path))[0]
     result_dir = os.path.join(output_dir, "onnx_separated", base_name)
     os.makedirs(result_dir, exist_ok=True)
 
     vocal_out = os.path.join(result_dir, "vocals.wav")
     music_out = os.path.join(result_dir, "no_vocals.wav")
-    sf.write(vocal_out, vocals_final, orig_sr)
-    sf.write(music_out, instrumental, orig_sr)
 
-    return vocal_out, music_out
+    temp_dir = tempfile.mkdtemp(prefix="uvr_sep_")
+    try:
+        ffmpeg_bin = _get_ffmpeg()
+        temp_mix_441 = os.path.join(temp_dir, "mix_441.wav")
+        # Streaming convert input audio to 44.1kHz stereo WAV via FFmpeg
+        cmd = [
+            ffmpeg_bin, "-y", "-i", audio_path,
+            "-vn", "-ar", str(SR), "-ac", "2",
+            "-c:a", "pcm_s16le",
+            temp_mix_441
+        ]
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_hidden_kwargs()
+        )
+
+        mix_info = sf.info(temp_mix_441)
+        samples = mix_info.frames
+        margin = SR
+        chunk_size = 15 * SR
+
+        if samples < chunk_size:
+            chunk_size = samples
+        if margin > chunk_size:
+            margin = chunk_size
+
+        total_chunks = max(1, math.ceil(samples / chunk_size)) if chunk_size > 0 else 1
+
+        temp_inst_441 = os.path.join(temp_dir, "inst_441.wav")
+        temp_voc_441 = os.path.join(temp_dir, "voc_441.wav")
+
+        with sf.SoundFile(temp_mix_441, "r") as in_f, \
+             sf.SoundFile(temp_inst_441, "w", samplerate=SR, channels=1, subtype="FLOAT") as inst_f, \
+             sf.SoundFile(temp_voc_441, "w", samplerate=SR, channels=1, subtype="FLOAT") as voc_f:
+
+            for chunk_idx in range(total_chunks):
+                skip = chunk_idx * chunk_size
+                s_margin = 0 if chunk_idx == 0 else margin
+                read_start = skip - s_margin
+                read_end = min(skip + chunk_size + margin, samples)
+                read_frames = read_end - read_start
+
+                in_f.seek(read_start)
+                cmix = in_f.read(frames=read_frames, dtype="float32", always_2d=True).T
+                if cmix.shape[0] == 1:
+                    cmix = np.repeat(cmix, 2, axis=0)
+                elif cmix.shape[0] > 2:
+                    cmix = cmix[:2]
+
+                n_sample = cmix.shape[1]
+                trim = model.n_fft // 2
+                gen_size = model.chunk_size - 2 * trim
+                pad = gen_size - n_sample % gen_size
+                if pad == gen_size:
+                    pad = 0
+
+                mix_p = np.concatenate([
+                    np.zeros((2, trim), dtype=np.float32),
+                    cmix,
+                    np.zeros((2, pad), dtype=np.float32),
+                    np.zeros((2, trim), dtype=np.float32),
+                ], axis=1)
+
+                mix_waves = []
+                i = 0
+                while i < n_sample + pad:
+                    waves = mix_p[:, i:i + model.chunk_size]
+                    mix_waves.append(waves)
+                    i += gen_size
+
+                if not mix_waves:
+                    continue
+
+                mix_waves = np.array(mix_waves, dtype=np.float32)
+                spek = model.stft(mix_waves)
+                spec_pred = session.run(None, {"input": spek})[0]
+                tar_waves = model.istft(spec_pred)
+
+                tar_signal = tar_waves[:, :, trim:-trim]
+                tar_signal = tar_signal.transpose(1, 0, 2).reshape(2, -1)
+                tar_signal = tar_signal[:, :n_sample]
+
+                valid_start = 0 if chunk_idx == 0 else margin
+                valid_end = n_sample if chunk_idx == total_chunks - 1 else n_sample - margin
+                if margin == 0:
+                    valid_end = n_sample
+
+                inst_chunk = tar_signal[0, valid_start:valid_end]
+                orig_chunk = cmix[0, valid_start:valid_end]
+                vocal_chunk = orig_chunk - inst_chunk
+
+                inst_f.write(inst_chunk)
+                voc_f.write(vocal_chunk)
+
+                pct = int((chunk_idx + 1) / total_chunks * 100)
+                msg = f"Separating audio: {chunk_idx + 1}/{total_chunks} chunks ({pct}%)"
+                print(f"[Vocal Separation Progress] {chunk_idx + 1}/{total_chunks} chunks ({pct}%)", flush=True)
+                if on_progress:
+                    on_progress(pct, msg)
+
+        # Resample back to original sample rate and save as standard 16-bit PCM WAV
+        cmd_vocal = [
+            ffmpeg_bin, "-y", "-i", temp_voc_441,
+            "-ar", str(orig_sr), "-ac", "1",
+            "-c:a", "pcm_s16le",
+            vocal_out
+        ]
+        cmd_music = [
+            ffmpeg_bin, "-y", "-i", temp_inst_441,
+            "-ar", str(orig_sr), "-ac", "1",
+            "-c:a", "pcm_s16le",
+            music_out
+        ]
+        subprocess.run(
+            cmd_vocal,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_hidden_kwargs()
+        )
+        subprocess.run(
+            cmd_music,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_hidden_kwargs()
+        )
+
+        return vocal_out, music_out
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+

@@ -44,3 +44,4 @@ recent_projects.json
 *.spec
 dist_installer/
 installer/*.exe
+bug*.png

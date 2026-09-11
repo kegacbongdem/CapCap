@@ -408,7 +408,7 @@ def _texts_equal(current_texts, prev_texts):
     return all(a == b for a, b in zip(current_texts, prev_texts))
 
 
-def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=None, start_seconds=0.0, end_seconds=None):
+def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=None, start_seconds=0.0, end_seconds=None, on_progress=None):
     workflow_started = time.perf_counter()
     profiling = {
         "engine_init": 0.0,
@@ -543,9 +543,15 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
 
             step += 1
 
-            if sampled_count % 30 == 0:
-                pct = sampled_count * 100 // total_steps if total_steps > 0 else 0
-                print(f"[OCR] Frame {sampled_count}/{total_steps} ({pct}%, OCR: {ocr_count}, skip: {skip_count})")
+            if sampled_count % 15 == 0 or sampled_count == total_steps:
+                pct = min(99, max(1, int(sampled_count * 100 / total_steps))) if total_steps > 0 else 0
+                log_line = f"[OCR Progress] Frame {sampled_count}/{total_steps} ({pct}%, OCR: {ocr_count}, skip: {skip_count})"
+                print(log_line, flush=True)
+                if on_progress:
+                    try:
+                        on_progress(pct, f"OCR: {pct}% ({sampled_count}/{total_steps} frames)", log_line)
+                    except Exception:
+                        pass
 
             temporal_started = time.perf_counter()
             if not texts:
@@ -626,6 +632,12 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
     )
     print(f"OCR inference: avg={inference_avg_ms:.0f}ms, p95={inference_p95_ms:.0f}ms")
     print(f"Frame decode/preprocess: avg={decode_preprocess_avg_ms:.0f}ms")
+    print(f"[OCR Progress] 100% completed: {total_steps} frames scanned, {len(merged)} subtitles found", flush=True)
+    if on_progress:
+        try:
+            on_progress(100, f"OCR: 100% ({len(merged)} subtitles)")
+        except Exception:
+            pass
     return merged
 
 

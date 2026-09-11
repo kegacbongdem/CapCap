@@ -61,7 +61,7 @@ class TranslatorAdapter:
             batch_callback=batch_callback,
         )
 
-    def rewrite_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = ""):
+    def rewrite_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = "", batch_callback=None):
         funcs = self._translator_module()
         return funcs["rewrite_translated_segments"](
             source_segments,
@@ -69,6 +69,7 @@ class TranslatorAdapter:
             model_path,
             src_lang=src_lang,
             style_instruction=style_instruction,
+            batch_callback=batch_callback,
         )
 
     def rewrite_srt(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = "") -> str:

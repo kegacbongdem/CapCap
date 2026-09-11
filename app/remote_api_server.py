@@ -71,13 +71,20 @@ from whisper_processor import transcribe_audio
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _STATUS_LOCK = threading.Lock()
-_STATUS = {"phase": "idle", "message": "Idle"}
+_STATUS = {"phase": "idle", "message": "Idle", "progress": 0, "detail": ""}
 
 
-def _set_status(phase: str, message: str = "") -> None:
+def _set_status(phase: str, message: str = "", progress: int | None = None, detail: str = "") -> None:
     with _STATUS_LOCK:
         _STATUS["phase"] = str(phase or "idle")
         _STATUS["message"] = str(message or _STATUS["phase"])
+        if progress is not None:
+            try:
+                _STATUS["progress"] = max(0, min(100, int(progress)))
+            except (ValueError, TypeError):
+                pass
+        if detail:
+            _STATUS["detail"] = str(detail)
 
 
 def _get_status() -> dict:
@@ -331,7 +338,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         runtime = WorkflowRuntime(workspace_root)
         _set_status("prepare", "Preparing project")
 
-        def step_callback(step_id):
+        def step_callback(step_id, message="", percent=None):
             labels = {
                 "prepare": "Preparing project",
                 "extract_audio": "Extracting audio",
@@ -341,9 +348,13 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 "transcription": "Transcribing audio",
                 "translation": "Translating subtitles",
             }
-            lbl = labels.get(str(step_id or ""), str(step_id or "Processing"))
-            _set_status(step_id, lbl)
-            _log(f"[Prepare] Step: {lbl}")
+            base_lbl = labels.get(str(step_id or ""), str(step_id or "Processing"))
+            disp_msg = str(message or base_lbl)
+            _set_status(step_id, disp_msg, progress=percent, detail=str(message or ""))
+            if percent is not None:
+                _log(f"[Prepare] Step: {disp_msg} ({percent}%)")
+            else:
+                _log(f"[Prepare] Step: {disp_msg}")
 
         try:
             state = runtime.run_prepare(

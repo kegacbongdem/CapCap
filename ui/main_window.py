@@ -3197,7 +3197,13 @@ class VideoTranslatorGUI(QMainWindow):
         if self.using_existing_audio_source():
             audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
             return bool(audio_path and os.path.exists(audio_path))
-        return bool(self._resolve_preview_voice_only_audio_path() or self._music_audio_tracks())
+        voice = self._resolve_preview_voice_only_audio_path()
+        if voice:
+            return True
+        music_tracks = self._music_audio_tracks()
+        if any(not bool(t.get("muted", False)) for t in music_tracks):
+            return True
+        return False
 
     def _timeline_audio_track_mutes(self) -> tuple[bool, bool] | None:
         if not hasattr(self, "timeline") or not getattr(self.timeline, "_timeline", None):
@@ -3254,14 +3260,17 @@ class VideoTranslatorGUI(QMainWindow):
         return choices
 
     def _preferred_preview_audio_track_mode(self) -> str:
+        has_active_music = any(not bool(t.get("muted", False)) for t in self._music_audio_tracks())
         track_mutes = self._timeline_audio_track_mutes()
         if track_mutes:
             _a1_muted, a2_muted = track_mutes
             # A2 mute applies only to TTS.  Music is composed into the
             # dubbed sidecar independently, so keep that sidecar selected
-            # when a Music Layer exists.
-            if a2_muted and not self._music_audio_tracks():
+            # when an unmuted Music Layer exists.
+            if a2_muted and not has_active_music:
                 return "original"
+        if has_active_music:
+            return "dubbed"
         mode = str(self.get_output_mode_key() or "subtitle").strip().lower()
         if mode in ("voice", "both"):
             if self._has_preview_dubbed_audio_source():
@@ -3546,18 +3555,34 @@ class VideoTranslatorGUI(QMainWindow):
             self._timeline_waveform_duration_s = 0.0
             self.timeline.set_waveform_data([], 0.0)
             return
-        launcher_cache = self._load_launcher_timeline_visual_cache()
-        if launcher_cache and launcher_cache.get("waveform"):
-            self._desired_timeline_waveform_request = request_signature
-            self._timeline_waveform_cache_key = request_signature
-            self._timeline_waveform_samples = list(launcher_cache.get("waveform") or [])
-            self._timeline_waveform_duration_s = max(0.0, float(launcher_cache.get("duration_s") or 0.0))
+
+        self._desired_timeline_waveform_request = request_signature
+        if self._timeline_waveform_cache_key == request_signature:
             self.timeline.set_waveform_data(
                 self._timeline_waveform_samples, self._timeline_waveform_duration_s
             )
             return
-        self._desired_timeline_waveform_request = request_signature
-        if self._timeline_waveform_cache_key == request_signature:
+
+        duration_s = max(0.0, float(getattr(self.timeline, "duration", 0) or 0) / 1000.0)
+        if duration_s <= 0.0:
+            duration_s = max(0.0, float(getattr(self.timeline, "_duration", 0.0) or 0.0))
+        max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
+        if duration_s > max_visual_dur:
+            self._timeline_waveform_cache_key = request_signature
+            self._timeline_waveform_samples = []
+            self._timeline_waveform_duration_s = duration_s
+            self.timeline.set_waveform_data([], duration_s)
+            self.log(
+                f"[Timeline] Video duration ({duration_s:.1f}s > {max_visual_dur:.0f}s): "
+                "waveform generation skipped for high performance."
+            )
+            return
+
+        launcher_cache = self._load_launcher_timeline_visual_cache()
+        if launcher_cache and launcher_cache.get("waveform"):
+            self._timeline_waveform_cache_key = request_signature
+            self._timeline_waveform_samples = list(launcher_cache.get("waveform") or [])
+            self._timeline_waveform_duration_s = max(0.0, float(launcher_cache.get("duration_s") or 0.0))
             self.timeline.set_waveform_data(
                 self._timeline_waveform_samples, self._timeline_waveform_duration_s
             )
@@ -3569,7 +3594,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
         )
         worker = TimelineWaveformWorker(
-            request_signature, video_path, "", self._waveform_temp_path()
+            request_signature, video_path, "", self._waveform_temp_path(), duration_s=duration_s
         )
         worker.finished.connect(self._on_timeline_waveform_ready)
         self._timeline_waveform_worker = worker
@@ -3630,6 +3655,26 @@ class VideoTranslatorGUI(QMainWindow):
             self._desired_timeline_thumbnail_request = None
             self.timeline.set_video_thumbnails([])
             return
+
+        self._desired_timeline_thumbnail_request = request_signature
+        if self._timeline_video_thumb_cache_key == request_signature:
+            self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
+            return
+
+        duration_s = max(0.0, float(getattr(self.timeline, "duration", 0) or 0) / 1000.0)
+        if duration_s <= 0.0:
+            duration_s = max(0.0, float(getattr(self.timeline, "_duration", 0.0) or 0.0))
+        max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
+        if duration_s > max_visual_dur:
+            self._timeline_video_thumb_cache_key = request_signature
+            self._timeline_video_thumbnails = []
+            self.timeline.set_video_thumbnails([])
+            self.log(
+                f"[Timeline] Video duration ({duration_s:.1f}s > {max_visual_dur:.0f}s): "
+                "thumbnail generation skipped for high performance."
+            )
+            return
+
         launcher_cache = self._load_launcher_timeline_visual_cache()
         if launcher_cache and launcher_cache.get("thumbnails"):
             pixmaps = []
@@ -3638,20 +3683,14 @@ class VideoTranslatorGUI(QMainWindow):
                 if not pixmap.isNull():
                     pixmaps.append((float(timestamp_s), pixmap))
             if pixmaps:
-                self._desired_timeline_thumbnail_request = request_signature
                 self._timeline_video_thumb_cache_key = request_signature
                 self._timeline_video_thumbnails = pixmaps
                 self.timeline.set_video_thumbnails(pixmaps)
                 return
-        self._desired_timeline_thumbnail_request = request_signature
-        if self._timeline_video_thumb_cache_key == request_signature:
-            self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
-            return
         worker = self._timeline_thumbnail_worker
         if worker is not None and worker.isRunning():
             return
         video_path = self._normalize_local_file_path(self.video_path_edit.text().strip())
-        duration_s = max(0.0, float(self.timeline.duration or 0) / 1000.0)
         thumb_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_thumbnails")
         worker = TimelineThumbnailWorker(request_signature, video_path, duration_s, thumb_dir)
         worker.finished.connect(self._on_timeline_video_thumbnails_ready)
@@ -4628,6 +4667,8 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_track_visible"):
             self.video_view.set_logo_track_visible(self._logo_track_preview_visible)
         self.video_time_warps = list(getattr(state, "settings", {}).get("video_time_warps") or [])
+        if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
+            self.media_player.set_time_warps(self.video_time_warps)
         self.last_original_srt_path = ""
         self.last_translated_srt_path = ""
         self.last_extracted_audio = ""
@@ -4673,6 +4714,20 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_translated_segment_models = context["current_translated_segment_models"]
         self.current_segments = context["current_segments"]
         self.current_translated_segments = context["current_translated_segments"]
+        # Cross-reference video_time_warps to restore extended_duration / time_warp_id if missing from legacy artifacts
+        if self.video_time_warps:
+            for warp in self.video_time_warps:
+                s_idx = warp.get("segment_index")
+                w_dur = float(warp.get("duration", 0.0) or 0.0)
+                w_id = str(warp.get("id", "") or "")
+                if s_idx is not None and w_dur > 0:
+                    for seg_list in (self.current_segments, self.current_translated_segments):
+                        if seg_list and 0 <= s_idx < len(seg_list):
+                            seg = seg_list[s_idx]
+                            if float(seg.get("extended_duration", 0.0) or 0.0) <= 0:
+                                seg["extended_duration"] = w_dur
+                            if not seg.get("time_warp_id") and w_id:
+                                seg["time_warp_id"] = w_id
         self.refresh_detected_speakers_section()
         if self.current_translated_segments:
             self.refresh_auto_keyword_highlights(force=True)
@@ -4690,6 +4745,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._enable_post_pipeline_preview_assets(refresh=True)
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
+            QApplication.processEvents()
         # Restore A2 Dub track if TTS was generated
         voice_path = context.get("artifacts", {}).get("voice_vi", "")
         if voice_path and os.path.exists(voice_path) and hasattr(self, "timeline"):
@@ -4774,6 +4830,7 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             if hasattr(self, "sync_preview_audio_track_to_output"):
                 self.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
+                QApplication.processEvents()
         except Exception:
             pass
         # Stop any active playback so the user re-presses Play after
@@ -6617,6 +6674,32 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
 
+    MAX_TIMELINE_HISTORY_DEPTH = 30
+
+    def _push_timeline_undo_entry(self, entry: dict):
+        if getattr(self, "_suspend_timeline_undo", False):
+            return
+        self._timeline_timing_undo_stack.append(entry)
+        self._timeline_timing_redo_stack = []
+        max_depth = getattr(self, "MAX_TIMELINE_HISTORY_DEPTH", 30)
+        if len(self._timeline_timing_undo_stack) > max_depth:
+            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-max_depth:]
+        self._refresh_timeline_history_buttons()
+
+    def _push_timeline_redo_entry(self, entry: dict):
+        self._timeline_timing_redo_stack.append(entry)
+        max_depth = getattr(self, "MAX_TIMELINE_HISTORY_DEPTH", 30)
+        if len(self._timeline_timing_redo_stack) > max_depth:
+            self._timeline_timing_redo_stack = self._timeline_timing_redo_stack[-max_depth:]
+        self._refresh_timeline_history_buttons()
+
+    def _push_timeline_undo_repush(self, entry: dict):
+        self._timeline_timing_undo_stack.append(entry)
+        max_depth = getattr(self, "MAX_TIMELINE_HISTORY_DEPTH", 30)
+        if len(self._timeline_timing_undo_stack) > max_depth:
+            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-max_depth:]
+        self._refresh_timeline_history_buttons()
+
     def on_timeline_segment_timing_edit_started(self, index: int, start: float, end: float):
         if self._suspend_timeline_undo:
             return
@@ -6624,7 +6707,7 @@ class VideoTranslatorGUI(QMainWindow):
         if last_entry and str(last_entry.get("type", "timing")) == "timing" and int(last_entry.get("index", -1)) == int(index):
             if abs(float(last_entry.get("start", 0.0)) - float(start)) < 0.0001 and abs(float(last_entry.get("end", 0.0)) - float(end)) < 0.0001:
                 return
-        self._timeline_timing_undo_stack.append(
+        self._push_timeline_undo_entry(
             {
                 "type": "timing",
                 "index": int(index),
@@ -6632,10 +6715,6 @@ class VideoTranslatorGUI(QMainWindow):
                 "end": float(end),
             }
         )
-        self._timeline_timing_redo_stack = []
-        if len(self._timeline_timing_undo_stack) > 100:
-            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
-        self._refresh_timeline_history_buttons()
 
     def on_timeline_segment_selected(self, index: int):
         self.set_selected_segment_index(index, sync_ui=True)
@@ -9010,11 +9089,7 @@ class VideoTranslatorGUI(QMainWindow):
                 self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
                 self._sync_hidden_translated_text_from_segments()
             self._sync_hidden_transcript_text_from_segments()
-            self._timeline_timing_undo_stack.append(history_entry)
-            self._timeline_timing_redo_stack = []
-            if len(self._timeline_timing_undo_stack) > 100:
-                self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_undo_entry(history_entry)
             self.set_selected_segment_index(index, sync_ui=True)
             self.timeline.set_active_segment_index(index)
             self.apply_segments_to_timeline()
@@ -9433,13 +9508,7 @@ class VideoTranslatorGUI(QMainWindow):
         # which has just been removed, especially when a new segment is
         # inserted at the same point in the timeline.
         self._single_line_split_cache = None
-
-        self._timeline_timing_undo_stack.append(history_entry)
-        self._timeline_timing_redo_stack = []
-        if len(self._timeline_timing_undo_stack) > 100:
-            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
-        self._refresh_timeline_history_buttons()
-
+        self._push_timeline_undo_entry(history_entry)
         self.set_selected_segment_index(index, sync_ui=True)
         if hasattr(self, "timeline"):
             self.timeline.set_active_segment_index(index)
@@ -9565,11 +9634,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
 
-        self._timeline_timing_undo_stack.append(split_history_entry)
-        self._timeline_timing_redo_stack = []
-        if len(self._timeline_timing_undo_stack) > 100:
-            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
-        self._refresh_timeline_history_buttons()
+        self._push_timeline_undo_entry(split_history_entry)
 
         self.set_selected_segment_index(index + 1, sync_ui=True)
         if hasattr(self, "timeline"):
@@ -9949,9 +10014,7 @@ class VideoTranslatorGUI(QMainWindow):
             return False
         history["current_after"] = copy.deepcopy(self.current_segments)
         history["translated_after"] = copy.deepcopy(self.current_translated_segments)
-        self._timeline_timing_undo_stack.append(history)
-        self._timeline_timing_redo_stack = []
-        self._refresh_timeline_history_buttons()
+        self._push_timeline_undo_entry(history)
         self.apply_segments_to_timeline()
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
@@ -10012,9 +10075,7 @@ class VideoTranslatorGUI(QMainWindow):
         selected_track.layers[index:index + 1] = pieces
         new_layer = pieces[-1]
         timeline._selected_layer_id = new_layer.id
-        self._timeline_timing_undo_stack.append({"type": "overlay_split", "track_id": selected_track.id, "before_layers": before_layers, "after_layers": copy.deepcopy(selected_track.layers)})
-        self._timeline_timing_redo_stack = []
-        self._refresh_timeline_history_buttons()
+        self._push_timeline_undo_entry({"type": "overlay_split", "track_id": selected_track.id, "before_layers": before_layers, "after_layers": copy.deepcopy(selected_track.layers)})
         timeline._redraw()
         self.persist_current_timeline_project_data()
         self.on_timeline_layer_selected(new_layer.id)
@@ -10344,11 +10405,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._single_line_split_cache = None
         self._pending_delete_segment_key = None
 
-        self._timeline_timing_undo_stack.append(delete_history_entry)
-        self._timeline_timing_redo_stack = []
-        if len(self._timeline_timing_undo_stack) > 100:
-            self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
-        self._refresh_timeline_history_buttons()
+        self._push_timeline_undo_entry(delete_history_entry)
 
         self.set_selected_segment_index(target_selection, sync_ui=True)
         if hasattr(self, "timeline"):
@@ -10420,18 +10477,15 @@ class VideoTranslatorGUI(QMainWindow):
         entry = self._timeline_timing_undo_stack.pop()
         if str(entry.get("type", "")) == "range_split":
             self._apply_range_split_history(entry, use_after=False)
-            self._timeline_timing_redo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_redo_entry(entry)
             return True
         if str(entry.get("type", "")) == "overlay_split":
             self._apply_overlay_split_history(entry, use_after=False)
-            self._timeline_timing_redo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_redo_entry(entry)
             return True
         if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=False)
-            self._timeline_timing_redo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_redo_entry(entry)
             return True
         current_entry = None
         active_segments = self.get_active_segments()
@@ -10452,8 +10506,9 @@ class VideoTranslatorGUI(QMainWindow):
         finally:
             self._suspend_timeline_undo = False
         if current_entry:
-            self._timeline_timing_redo_stack.append(current_entry)
-        self._refresh_timeline_history_buttons()
+            self._push_timeline_redo_entry(current_entry)
+        else:
+            self._refresh_timeline_history_buttons()
         return True
 
     def redo_last_timeline_timing_edit(self):
@@ -10464,18 +10519,15 @@ class VideoTranslatorGUI(QMainWindow):
         entry = self._timeline_timing_redo_stack.pop()
         if str(entry.get("type", "")) == "range_split":
             self._apply_range_split_history(entry, use_after=True)
-            self._timeline_timing_undo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_undo_repush(entry)
             return True
         if str(entry.get("type", "")) == "overlay_split":
             self._apply_overlay_split_history(entry, use_after=True)
-            self._timeline_timing_undo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_undo_repush(entry)
             return True
         if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=True)
-            self._timeline_timing_undo_stack.append(entry)
-            self._refresh_timeline_history_buttons()
+            self._push_timeline_undo_repush(entry)
             return True
         current_entry = None
         active_segments = self.get_active_segments()
@@ -10496,8 +10548,9 @@ class VideoTranslatorGUI(QMainWindow):
         finally:
             self._suspend_timeline_undo = False
         if current_entry:
-            self._timeline_timing_undo_stack.append(current_entry)
-        self._refresh_timeline_history_buttons()
+            self._push_timeline_undo_repush(current_entry)
+        else:
+            self._refresh_timeline_history_buttons()
         return True
 
     def _apply_overlay_split_history(self, entry, *, use_after: bool):
@@ -10943,7 +10996,7 @@ class VideoTranslatorGUI(QMainWindow):
                     )
 
                     # Fit Voice button (with breathing buffer +0.15s)
-                    audio_end = float(row.get("_audio_end", 0.0) or 0.0)
+                    audio_end = self._get_segment_audio_end(row, idx)
                     seg_end = float(row.get("end", 0.0) or 0.0)
                     excess = round(audio_end - seg_end, 2)
                     fit_voice_btn = QPushButton()
@@ -11123,6 +11176,167 @@ class VideoTranslatorGUI(QMainWindow):
                 self._voiceover_force_refresh = True
         self.persist_current_timeline_project_data()
 
+    def _resolve_tts_temp_dir(self) -> str:
+        voice_track = self._resolve_preview_voice_only_audio_path()
+        if voice_track and os.path.exists(voice_track):
+            return os.path.dirname(voice_track)
+        try:
+            tts_dir = self.get_project_temp_dir("tts")
+            if tts_dir and os.path.exists(tts_dir):
+                return tts_dir
+        except Exception:
+            pass
+        if hasattr(self, "current_project_state") and self.current_project_state:
+            p = os.path.join(self.current_project_state.project_root, "tts")
+            if os.path.exists(p):
+                return p
+        return ""
+
+    def _resolve_segment_wav_path(self, seg: dict, idx: int, tts_dir: str = "") -> str:
+        w = seg.get("_wav_path", "")
+        if w and os.path.exists(w):
+            return w
+
+        if not tts_dir:
+            tts_dir = self._resolve_tts_temp_dir()
+        if not tts_dir or not os.path.exists(tts_dir):
+            return ""
+
+        manifest_path = os.path.join(tts_dir, "tts_cache_manifest.json")
+        if not hasattr(self, "_cached_tts_manifest") or getattr(self, "_cached_tts_manifest_path", "") != manifest_path:
+            self._cached_tts_manifest = {}
+            self._cached_tts_manifest_path = manifest_path
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        self._cached_tts_manifest = json.load(f)
+                except Exception:
+                    pass
+
+        mw = self._cached_tts_manifest.get("segments", {}).get(str(idx), {}).get("wav_path", "")
+        if mw and os.path.exists(mw):
+            seg["_wav_path"] = mw
+            return mw
+
+        candidates = [
+            f"seg_{idx:04d}_smartfit.wav",
+            f"seg_{idx:04d}_timelinefit.wav",
+            f"seg_{idx:04d}_forcefit.wav",
+            f"seg_{idx:04d}_deficit_stretch.wav",
+            f"seg_{idx:04d}_medium_speed.wav",
+            f"seg_{idx:04d}_rescue_speed.wav",
+            f"seg_{idx:04d}_polish_speed.wav",
+            f"seg_{idx:04d}_stubborn_speed.wav",
+            f"seg_{idx:04d}_base.wav",
+        ]
+        for name in candidates:
+            p = os.path.join(tts_dir, name)
+            if os.path.exists(p):
+                seg["_wav_path"] = p
+                return p
+        return ""
+
+    def _get_segment_audio_end(self, seg: dict, idx: int) -> float:
+        raw = seg.get("_audio_end")
+        if raw is not None:
+            try:
+                val = float(raw)
+                if val > 0:
+                    return val
+            except (TypeError, ValueError):
+                pass
+
+        wav_path = self._resolve_segment_wav_path(seg, idx)
+        if wav_path and os.path.exists(wav_path):
+            try:
+                import wave
+                with wave.open(wav_path, "rb") as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    if rate > 0:
+                        dur = frames / float(rate)
+                        start_s = float(seg.get("start", 0.0))
+                        audio_end = round(start_s + dur, 3)
+                        seg["_audio_end"] = audio_end
+                        return audio_end
+            except Exception:
+                pass
+        return 0.0
+
+    def _rebuild_voice_track_for_timeline(self) -> str | None:
+        """Rebuild voice_vi.wav from segment audio clips using current shifted segment timestamps.
+
+        This ensures dubbed audio timing matches video freeze extensions, preventing
+        subsequent segments' audio from playing prematurely during freeze frames.
+        """
+        segments = self.current_translated_segments or self.current_segments
+        if not segments:
+            return None
+
+        tts_dir = self._resolve_tts_temp_dir()
+        if not tts_dir:
+            try:
+                tts_dir = self.get_project_temp_dir("tts")
+            except Exception:
+                tts_dir = ""
+            if not tts_dir and hasattr(self, "current_project_state") and self.current_project_state:
+                tts_dir = os.path.join(self.current_project_state.project_root, "tts")
+
+        if not tts_dir:
+            return None
+
+        os.makedirs(tts_dir, exist_ok=True)
+        voice_track = os.path.join(tts_dir, "voice_vi.wav")
+
+        tts_wav_paths = []
+        for idx, seg in enumerate(segments):
+            w = self._resolve_segment_wav_path(seg, idx, tts_dir=tts_dir)
+            tts_wav_paths.append(w)
+
+        if not any(tts_wav_paths):
+            return None
+
+        if hasattr(self, "media_player") and hasattr(self.media_player, "clear_audio"):
+            try:
+                self.media_player.clear_audio()
+            except Exception:
+                pass
+
+        from app.audio_mixer import build_voice_track_from_srt_segments
+        try:
+            build_voice_track_from_srt_segments(
+                segments=segments,
+                tts_wav_paths=tts_wav_paths,
+                output_wav_path=voice_track,
+                gain_db=0.0,
+            )
+        except PermissionError:
+            import time
+            alt_voice_track = os.path.join(tts_dir, f"voice_vi_{int(time.time() * 1000)}.wav")
+            build_voice_track_from_srt_segments(
+                segments=segments,
+                tts_wav_paths=tts_wav_paths,
+                output_wav_path=alt_voice_track,
+                gain_db=0.0,
+            )
+            voice_track = alt_voice_track
+
+        self.last_voice_vi_path = voice_track
+        if not hasattr(self, "processed_artifacts") or self.processed_artifacts is None:
+            self.processed_artifacts = {}
+        self.processed_artifacts["voice_vi"] = voice_track
+        if hasattr(self, "update_project_artifact"):
+            self.update_project_artifact("voice_vi", voice_track)
+
+        if hasattr(self, "timeline") and hasattr(self.timeline, "sync_tts_track"):
+            try:
+                self.timeline.sync_tts_track(voice_track, segments=segments)
+            except Exception as exc:
+                self.log(f"[Time Warp] Could not sync timeline TTS track: {exc}")
+
+        self._schedule_preview_audio_refresh(force=True)
+        return voice_track
+
     def extend_segment_video(self, segment_index: int, added_duration: float):
         from app.services.time_warp_service import TimeWarpService
         if not self.current_segments and not self.current_translated_segments:
@@ -11134,6 +11348,9 @@ class VideoTranslatorGUI(QMainWindow):
             dur = round(float(added_duration), 3)
             if dur <= 0:
                 return
+            target_seg = target_list[segment_index]
+            split_time = round(float(target_seg.get("end", 0.0)), 3)
+
             warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
                 self.current_segments or [], segment_index, dur, self.current_translated_segments
             )
@@ -11142,16 +11359,22 @@ class VideoTranslatorGUI(QMainWindow):
                 self.current_translated_segments = updated_trans
             if not hasattr(self, "video_time_warps") or self.video_time_warps is None:
                 self.video_time_warps = []
+            self.video_time_warps = [w for w in self.video_time_warps if w.get("segment_index") != segment_index]
             self.video_time_warps.append(warp)
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
 
-            # Also ripple shift non-subtitle timeline layers starting at or after the warp point
-            warp_split_time = float(warp.get("time", 0.0))
+            # Ripple shift non-subtitle timeline layers starting at or after the split point
             if hasattr(self, "timeline") and self.timeline._timeline:
-                TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, warp_split_time, dur)
+                TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_time, dur)
+
+            if self.current_segments and hasattr(self, "transcript_text"):
+                self.transcript_text.setText(self.format_to_srt(self.current_segments))
+            if self.current_translated_segments and hasattr(self, "translated_text"):
+                self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
 
             self.apply_segments_to_timeline()
+            self._rebuild_voice_track_for_timeline()
             self.persist_current_timeline_project_data()
             self.sync_segment_editor_rows()
             self.log(f"[Time Warp] Extended video for segment #{segment_index + 1} by +{dur:.2f}s (Warp ID {warp['id']})")
@@ -11180,11 +11403,17 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
 
-            # Also ripple shift back non-subtitle timeline layers
+            # Ripple shift back non-subtitle timeline layers
             if delta > 0 and hasattr(self, "timeline") and self.timeline._timeline:
                 TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_time, -delta)
 
+            if self.current_segments and hasattr(self, "transcript_text"):
+                self.transcript_text.setText(self.format_to_srt(self.current_segments))
+            if self.current_translated_segments and hasattr(self, "translated_text"):
+                self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
+
             self.apply_segments_to_timeline()
+            self._rebuild_voice_track_for_timeline()
             self.persist_current_timeline_project_data()
             self.sync_segment_editor_rows()
             self.log(f"[Time Warp] Restored original duration for segment #{segment_index + 1} (-{delta:.2f}s)")
@@ -11201,7 +11430,7 @@ class VideoTranslatorGUI(QMainWindow):
         # 1. Scan for segments where voice duration exceeds segment duration
         candidates = []
         for i, seg in enumerate(target_list):
-            audio_end = float(seg.get("_audio_end", 0.0) or 0.0)
+            audio_end = self._get_segment_audio_end(seg, i)
             seg_end = float(seg.get("end", 0.0) or 0.0)
             excess = round(audio_end - seg_end, 2)
             if excess > 0.05:
@@ -11235,22 +11464,31 @@ class VideoTranslatorGUI(QMainWindow):
                 self.video_time_warps = []
 
             for idx, excess, dur in candidates:
+                curr_target = (self.current_translated_segments or self.current_segments)[idx]
+                split_time = round(float(curr_target.get("end", 0.0)), 3)
+
                 warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
                     self.current_segments or [], idx, dur, self.current_translated_segments
                 )
                 self.current_segments = updated_base
                 if updated_trans is not None:
                     self.current_translated_segments = updated_trans
+                self.video_time_warps = [w for w in self.video_time_warps if w.get("segment_index") != idx]
                 self.video_time_warps.append(warp)
 
-                warp_split_time = float(warp.get("time", 0.0))
                 if hasattr(self, "timeline") and self.timeline._timeline:
-                    TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, warp_split_time, dur)
+                    TimeWarpService.ripple_shift_timeline_layers(self.timeline._timeline, split_time, dur)
 
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
 
+            if self.current_segments and hasattr(self, "transcript_text"):
+                self.transcript_text.setText(self.format_to_srt(self.current_segments))
+            if self.current_translated_segments and hasattr(self, "translated_text"):
+                self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
+
             self.apply_segments_to_timeline()
+            self._rebuild_voice_track_for_timeline()
             self.persist_current_timeline_project_data()
             self.sync_segment_editor_rows()
             self.log(f"[Time Warp] Auto-fit voice for {len(candidates)} segments (total +{total_added:.2f}s, buffer +{buffer_seconds}s)")
@@ -11315,7 +11553,13 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
 
+            if self.current_segments and hasattr(self, "transcript_text"):
+                self.transcript_text.setText(self.format_to_srt(self.current_segments))
+            if self.current_translated_segments and hasattr(self, "translated_text"):
+                self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
+
             self.apply_segments_to_timeline()
+            self._rebuild_voice_track_for_timeline()
             self.persist_current_timeline_project_data()
             self.sync_segment_editor_rows()
             self.log(f"[Time Warp] Reverted all video freeze extensions to original media duration.")
@@ -12985,12 +13229,13 @@ class VideoTranslatorGUI(QMainWindow):
 
     def apply_segments_to_timeline(self):
         segs = self.get_active_segments()
-        if segs:
-            settings = getattr(self.current_project_state, "settings", {}) or {}
-            predict_speed_ratios(
-                segs,
-                normalizer_dictionary=dict(settings.get("normalizer_dictionary", {}) or {}),
-            )
+        if segs and getattr(self, "current_translated_segments", None):
+            if any(s.get("pre_speed_ratio") is None for s in segs):
+                settings = getattr(self.current_project_state, "settings", {}) or {}
+                predict_speed_ratios(
+                    segs,
+                    normalizer_dictionary=dict(settings.get("normalizer_dictionary", {}) or {}),
+                )
         self.timeline.set_segments(segs if segs else [])
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
         # Configure the Qt subtitle overlay before showing its drag target.
@@ -13028,6 +13273,16 @@ class VideoTranslatorGUI(QMainWindow):
                             d["_audio_end"] = float(raw)
                         except (TypeError, ValueError):
                             pass
+                    raw_ext = base.get("extended_duration")
+                    if raw_ext is not None:
+                        try:
+                            d["extended_duration"] = float(raw_ext)
+                        except (TypeError, ValueError):
+                            pass
+                    if base.get("time_warp_id"):
+                        d["time_warp_id"] = str(base.get("time_warp_id"))
+                    if base.get("_wav_path"):
+                        d["_wav_path"] = str(base.get("_wav_path"))
                     out.append(d)
                 return out
 
@@ -13044,6 +13299,14 @@ class VideoTranslatorGUI(QMainWindow):
                     segment["tts_group_id"] = base.get("tts_group_id", "")
                     segment["tts_group_start"] = float(base.get("tts_group_start", base.get("start", 0.0)) or 0.0)
                     segment["tts_group_end"] = float(base.get("tts_group_end", base.get("end", 0.0)) or 0.0)
+                if base.get("extended_duration") is not None:
+                    segment["extended_duration"] = base.get("extended_duration")
+                if base.get("time_warp_id"):
+                    segment["time_warp_id"] = base.get("time_warp_id")
+                if base.get("_audio_end") is not None:
+                    segment["_audio_end"] = base.get("_audio_end")
+                if base.get("_wav_path"):
+                    segment["_wav_path"] = base.get("_wav_path")
         return parsed_segments
 
     def _uses_exact_full_block_subtitle_background(self) -> bool:
@@ -13980,7 +14243,13 @@ class VideoTranslatorGUI(QMainWindow):
         
         self.vocal_thread = VocalSeparationWorker(audio_src, target_dir)
         self.vocal_thread.finished.connect(self.on_vocal_separation_finished)
+        self.vocal_thread.progress.connect(self.on_vocal_separation_progress)
         self.vocal_thread.start()
+
+    def on_vocal_separation_progress(self, pct: int, msg: str):
+        self.vocal_sep_btn.setText(f"Separating... ({pct}%)")
+        self.progress_bar.setValue(int(35 + (pct / 100.0) * 15))
+        self.status_bar.showMessage(msg, 3000)
 
     def on_vocal_separation_finished(self, vocal, music, error):
         self.vocal_sep_btn.setEnabled(True)
@@ -15313,7 +15582,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.get_ai_dubbing_style_instruction(),
             self.get_source_language_code(),
         )
-        self.voice_thread.progress.connect(self.log)
+        self.voice_thread.progress.connect(self._on_voiceover_progress)
         self.voice_thread.finished.connect(self.on_voiceover_finished)
         self.voice_thread.start()
 
@@ -15358,6 +15627,7 @@ class VideoTranslatorGUI(QMainWindow):
                 "end": new_end,
                 "_original_end": new_original_end,
                 "_audio_end": new_audio_end,
+                "_wav_path": str((seg or {}).get("_wav_path") or ""),
             }
             if group_id:
                 grouped_updates[group_id] = payload
@@ -15385,6 +15655,8 @@ class VideoTranslatorGUI(QMainWindow):
             seg["action_taken"] = next_payload["action_taken"]
             seg["ratio"] = next_payload["ratio"]
             seg["attempt_count"] = next_payload["attempt_count"]
+            if next_payload.get("_wav_path"):
+                seg["_wav_path"] = next_payload["_wav_path"]
             # Sync start/end from the voice workflow so the SRT reflects the
             # actual TTS audio duration (see _extend_segment_ends_to_audio).
             new_start = next_payload.get("start")
@@ -15427,6 +15699,34 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self.processed_artifacts["srt_translated"] = out_path
         self.persist_translation_project_data(self.current_translated_segments, out_path)
+
+    def _on_voiceover_progress(self, message: str):
+        self.log(message)
+        m = re.search(r"\((\d+(?:\.\d+)?)%\)", str(message or ""))
+        if m:
+            try:
+                pct = float(m.group(1))
+                if hasattr(self, "progress_bar"):
+                    val = 85 + int((pct / 100.0) * 14.0)
+                    self.progress_bar.setValue(min(99, max(85, val)))
+
+                pipe_ctrl = getattr(self, "pipeline_controller", None)
+                if pipe_ctrl and getattr(pipe_ctrl, "progress_dialog", None):
+                    dlg = pipe_ctrl.progress_dialog
+                    if dlg.isVisible():
+                        if "voiceover" in dlg.steps:
+                            dlg.steps["voiceover"].status_label.setText(f"{int(pct)}%")
+                            dlg.steps["voiceover"].status_label.setStyleSheet("color: #00E5FF; font-weight: bold;")
+                        dlg.footer.setText(message)
+                        dlg.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
+                        if getattr(dlg, "step_order", None) and "voiceover" in dlg.step_order:
+                            total_stages = max(1, len(dlg.step_order))
+                            stage_slice = 100.0 / total_stages
+                            current_stage_idx = dlg.step_order.index("voiceover")
+                            overall_val = (current_stage_idx * stage_slice) + ((pct / 100.0) * stage_slice)
+                            dlg.overall_progress.setValue(min(100, max(0, int(overall_val))))
+            except Exception:
+                pass
 
     def on_voiceover_finished(self, voice_track, mixed, voice_segments, error):
         if hasattr(self, "voiceover_btn"):
@@ -16091,6 +16391,11 @@ class VideoTranslatorGUI(QMainWindow):
                 except Exception as e:
                     print(f"[Cleanup] Failed to terminate segment thread {idx}: {e}")
             threads_dict.clear()
+        try:
+            from vieneu_tts import unload_vieneu_model
+            unload_vieneu_model()
+        except Exception:
+            pass
         print("[Cleanup] Worker termination complete.")
 
     def closeEvent(self, event):
@@ -16223,32 +16528,53 @@ class VideoTranslatorGUI(QMainWindow):
 
 def _relaunch_launcher():
     from views.launcher import show_launcher, LauncherWindow
+
     video_path = show_launcher(None)
     QApplication.setQuitOnLastWindowClosed(True)
     if not video_path:
         QApplication.quit()
         return
     LauncherWindow.add_recent(None, video_path)
+
     new_window = VideoTranslatorGUI()
     new_window.prepare_initial_editor_layout()
+    new_window._current_video_path = os.path.abspath(video_path)
+
+    # Show the complete editor UI immediately so all child widgets and borders render
+    # simultaneously as one cohesive window, preventing any detached preview popup.
     new_window.show()
-    def _init():
-        new_window._current_video_path = os.path.abspath(video_path)
-        new_window.ensure_media_backend_ready()
-        new_window.video_path_edit.setText(video_path)
-        new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
-        if hasattr(new_window, "refresh_video_dimensions"):
-            new_window.refresh_video_dimensions(video_path)
-        new_window.current_project_state = new_window.ensure_current_project()
-        new_window.load_project_context(new_window.current_project_state)
-        if hasattr(new_window, "timeline") and hasattr(new_window.timeline, "set_video_source"):
-            try:
-                dur = new_window.media_player.duration() / 1000.0
-            except Exception:
-                dur = 60.0
-            new_window.timeline.set_video_source(new_window._current_video_path, dur)
-        new_window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
-    QTimer.singleShot(100, _init)
+    new_window.raise_()
+    new_window.activateWindow()
+    new_window.setFocus()
+    QApplication.processEvents()
+
+    new_window.ensure_media_backend_ready()
+    new_window.video_path_edit.setText(video_path)
+    new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
+    QApplication.processEvents()
+
+    if hasattr(new_window, "refresh_video_dimensions"):
+        new_window.refresh_video_dimensions(video_path)
+    QApplication.processEvents()
+
+    new_window.current_project_state = new_window.ensure_current_project()
+    new_window.load_project_context(new_window.current_project_state)
+    QApplication.processEvents()
+
+    if hasattr(new_window, "timeline") and hasattr(new_window.timeline, "set_video_source"):
+        try:
+            dur = new_window.media_player.duration() / 1000.0
+        except Exception:
+            dur = 60.0
+        new_window.timeline.set_video_source(new_window._current_video_path, dur)
+        ensure_tracks = getattr(new_window.timeline, "_ensure_tracks_populated", None)
+        if callable(ensure_tracks):
+            ensure_tracks()
+        redraw = getattr(new_window.timeline, "_redraw", None)
+        if callable(redraw):
+            redraw()
+    new_window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
+    QApplication.processEvents()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

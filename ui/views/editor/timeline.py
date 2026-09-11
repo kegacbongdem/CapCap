@@ -1,3 +1,4 @@
+import math
 import os
 from bisect import bisect_right
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, Signal
@@ -69,6 +70,8 @@ class EditorTimeline(QGraphicsView):
 
         self.pixels_per_second = self.DEFAULT_PPS
         self._duration = 10.0
+        self._duration_explicit = False
+        self._base_video_duration = 0.0
         self._playhead = 0.0
         self._selection_range: tuple[float, float] | None = None
         self._selection_drag = None
@@ -171,6 +174,9 @@ class EditorTimeline(QGraphicsView):
         if not self._timeline:
             self._init_default_tracks()
 
+        self._overlap_layout_cache.clear()
+        self._overlap_row_assignments.clear()
+
         seg_dicts = []
         for seg in segments:
             d = seg if isinstance(seg, dict) else (seg.to_dict() if hasattr(seg, "to_dict") else {})
@@ -205,9 +211,27 @@ class EditorTimeline(QGraphicsView):
                         seg_idx = int(getattr(layer, "z_index", 0) or 0)
                     self._segment_indices[layer.id] = seg_idx
 
-        end_times = [float(d.get("end", 0)) for d in seg_dicts]
-        if end_times:
-            self._duration = max(self._duration, max(end_times))
+        base_dur = float(getattr(self, "_base_video_duration", 0.0) or 0.0)
+        if base_dur <= 0.0 and self._timeline is not None:
+            for t in self._timeline.tracks:
+                if t.type == LayerType.VIDEO and t.layers:
+                    try:
+                        base_dur = max(base_dur, float(getattr(t.layers[0], "end", 0.0) or 0.0))
+                    except (TypeError, ValueError):
+                        pass
+        if base_dur <= 0.0:
+            base_dur = float(self._duration or 0.0)
+
+        end_times = [float(d.get("end", 0.0)) for d in seg_dicts if float(d.get("end", 0.0)) > 0]
+        max_seg_end = max(end_times) if end_times else base_dur
+        self._duration = max(base_dur, max_seg_end)
+        self._duration_explicit = True
+        if self._timeline is not None:
+            self._timeline.duration = self._duration
+            for t in self._timeline.tracks:
+                if t.type in (LayerType.VIDEO, LayerType.AUDIO):
+                    for layer in t.layers:
+                        layer.end = self._duration
 
         self._ensure_tracks_populated()
         self._redraw()
@@ -245,61 +269,65 @@ class EditorTimeline(QGraphicsView):
             elif t.name == "A1 Audio":
                 a1 = t
 
-        max_dur = self._duration
-        for t in self._timeline.tracks:
-            for l in t.layers:
-                max_dur = max(max_dur, l.end)
-        self._duration = max_dur
+        dur = self._duration
+        if not self._duration_explicit or dur <= 0.0:
+            for t in self._timeline.tracks:
+                for l in t.layers:
+                    dur = max(dur, l.end)
+            self._duration = dur
 
         if v1 and not v1.layers:
             v1.layers.append(VideoLayer(
                 name="V1 Video", source="",
-                start=0.0, end=max_dur,
+                start=0.0, end=dur,
                 transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
             ))
         elif v1 and v1.layers:
             for l in v1.layers:
-                if max_dur > l.end:
-                    l.end = max_dur
+                l.end = dur
 
         if a1 and not a1.layers:
             a1.layers.append(AudioLayer(
                 name="A1 Audio",
                 source="",
-                start=0.0, end=max_dur,
+                start=0.0, end=dur,
                 volume=1.0,
             ))
         elif a1 and a1.layers:
             for l in a1.layers:
-                if max_dur > l.end:
-                    l.end = max_dur
+                l.end = dur
 
     def set_duration_ms(self, ms: int) -> None:
         new_dur = max(0, ms / 1000.0)
         old_dur = self._duration
-        self._duration = new_dur
-        # The underlying Timeline model's `duration` is read by code that
-        # creates full-video-spanning layers (e.g. MaskLayer end fallback).
-        # Without this, the Mask track only spans the default 10s and not
-        # the actual video length (Bug 1). Also re-span any Mask track
-        # layers that were created before the real duration was known
-        # (e.g. restored from project state) so they cover the whole video.
+        content_dur = 0.0
+        if self._timeline:
+            for t in self._timeline.tracks:
+                if t.name not in ("V1 Video", "A1 Audio"):
+                    for l in t.layers:
+                        content_dur = max(content_dur, float(getattr(l, "end", 0.0) or 0.0))
+
+        if new_dur > 0:
+            self._duration = max(new_dur, content_dur)
+            self._duration_explicit = True
+        else:
+            self._duration = max(content_dur, old_dur)
+
         if self._timeline is not None:
-            self._timeline.duration = new_dur
-            if new_dur > old_dur:
-                for t in self._timeline.tracks:
-                    if t.type != LayerType.MASK:
-                        continue
+            self._timeline.duration = self._duration
+            for t in self._timeline.tracks:
+                if t.type in (LayerType.VIDEO, LayerType.AUDIO):
+                    for layer in t.layers:
+                        layer.end = self._duration
+                elif t.type == LayerType.MASK:
                     for layer in t.layers:
                         try:
                             prev_end = float(layer.end)
                         except Exception:
                             prev_end = 0.0
-                        # Only extend layers that were spanning the full
-                        # previous duration (or had no end set yet), so we
-                        # don't clobber a user-trimmed mask clip.
                         if prev_end <= 0 or abs(prev_end - old_dur) < 0.05:
-                            layer.end = new_dur
+                            layer.end = self._duration
+        self._ensure_tracks_populated()
         self._redraw()
 
     set_duration = set_duration_ms
@@ -381,10 +409,22 @@ class EditorTimeline(QGraphicsView):
             duration_s = self._probe_video_duration(path)
         if duration_s > 0:
             ensure_v1_a1_tracks(self._timeline, path, duration_s)
-            self._duration = max(self._duration, duration_s)
+            self._base_video_duration = float(duration_s)
+            content_dur = 0.0
+            if self._timeline:
+                for t in self._timeline.tracks:
+                    if t.name not in ("V1 Video", "A1 Audio"):
+                        for l in t.layers:
+                            content_dur = max(content_dur, float(getattr(l, "end", 0.0) or 0.0))
+            self._duration = max(float(duration_s), content_dur)
+            self._duration_explicit = True
             # Keep the Timeline model's duration in sync so layers that
             # span the whole video (Mask track) use the real length.
             self._timeline.duration = self._duration
+            for t in self._timeline.tracks:
+                if t.type in (LayerType.VIDEO, LayerType.AUDIO):
+                    for layer in t.layers:
+                        layer.end = self._duration
         self._redraw()
 
     @staticmethod
@@ -569,20 +609,52 @@ class EditorTimeline(QGraphicsView):
         self._voice_sync_mode = mode_key
         self._redraw()
 
+    def _effective_min_pps(self) -> float:
+        """Dynamic minimum pixels-per-second to allow fitting and zooming out on long media."""
+        if self._duration <= 0.0:
+            return float(self.MIN_PPS)
+        viewport_w = (self.viewport().width() - self.CONTENT_LEFT_PAD - 40) if self.viewport() else 800
+        viewport_w = max(200, viewport_w)
+        fit_pps = viewport_w / max(1.0, self._duration)
+        return max(0.001, min(float(self.MIN_PPS), fit_pps))
+
     def zoom_in(self) -> None:
-        self.pixels_per_second = min(self.MAX_PPS, int(self.pixels_per_second * 1.25))
+        new_pps = min(float(self.MAX_PPS), self.pixels_per_second * 1.25)
+        self.pixels_per_second = round(new_pps, 4) if new_pps < 1.0 else max(1, int(round(new_pps)))
         self._redraw()
+        self.zoomChanged.emit(self.zoom_percent())
 
     def zoom_out(self) -> None:
-        self.pixels_per_second = max(self.MIN_PPS, int(self.pixels_per_second * 0.8))
+        min_pps = self._effective_min_pps()
+        new_pps = max(min_pps, self.pixels_per_second * 0.8)
+        self.pixels_per_second = round(new_pps, 4) if new_pps < 1.0 else max(1, int(round(new_pps)))
         self._redraw()
+        self.zoomChanged.emit(self.zoom_percent())
 
     def fit_timeline(self) -> None:
-        if self._duration > 0:
-            w = self.viewport().width() - self.CONTENT_LEFT_PAD - 20 if self.viewport() else 800
-            self.pixels_per_second = int(max(self.MIN_PPS, w / self._duration))
+        if self._duration > 0.0:
+            viewport = self.viewport()
+            viewport_w = (viewport.width() - self.CONTENT_LEFT_PAD - 50) if viewport else 800
+            viewport_w = max(200, viewport_w)
+            target_pps = max(0.001, min(float(self.MAX_PPS), viewport_w / self._duration))
+            self.pixels_per_second = round(target_pps, 4) if target_pps < 1.0 else max(1, int(round(target_pps)))
+            self.horizontalScrollBar().setValue(0)
         self._redraw()
-        self.zoomChanged.emit(int(self.pixels_per_second / self.DEFAULT_PPS * 100))
+        self.zoomChanged.emit(self.zoom_percent())
+
+    def toggle_fit_or_reset_zoom(self) -> None:
+        if self._duration <= 0.0:
+            self.reset_zoom()
+            return
+        viewport = self.viewport()
+        viewport_w = (viewport.width() - self.CONTENT_LEFT_PAD - 50) if viewport else 800
+        viewport_w = max(200, viewport_w)
+        fit_pps = max(0.001, min(float(self.MAX_PPS), viewport_w / self._duration))
+        # If currently within 15% of fit PPS, toggle back to 100% default zoom
+        if abs(self.pixels_per_second - fit_pps) < 0.15 * max(0.001, fit_pps):
+            self.reset_zoom()
+        else:
+            self.fit_timeline()
 
     def reset_zoom(self) -> None:
         self.pixels_per_second = self.DEFAULT_PPS
@@ -590,7 +662,7 @@ class EditorTimeline(QGraphicsView):
         self.zoomChanged.emit(100)
 
     def zoom_percent(self) -> int:
-        return int(self.pixels_per_second / self.DEFAULT_PPS * 100)
+        return max(1, int(round(self.pixels_per_second / self.DEFAULT_PPS * 100)))
 
     def select_layer(self, layer_id: str) -> None:
         self._selected_layer_id = layer_id
@@ -604,6 +676,7 @@ class EditorTimeline(QGraphicsView):
         if not self._timeline:
             return
         self._overlap_layout_cache.clear()
+        self._overlap_row_assignments.clear()
         tl = self._timeline
         tracks = [t for t in tl.tracks if self.is_track_shown_on_timeline(t)]
         # Recompute each track's height based on its layer count so
@@ -618,7 +691,9 @@ class EditorTimeline(QGraphicsView):
         total_h = self.RULER_HEIGHT * 2 + sum(
             self._track_heights.get(t.id, self.TRACK_DEFAULT_H) for t in tracks
         )
-        scene_w = self.CONTENT_LEFT_PAD + max(self._duration * self.pixels_per_second + 200, 800)
+        content_w = int(round(self._duration * self.pixels_per_second))
+        view_w = self.viewport().width() if self.viewport() else 800
+        scene_w = max(self.CONTENT_LEFT_PAD + content_w + 50, view_w)
         self._scene.setSceneRect(0, 0, scene_w, total_h)
         self.layoutChanged.emit()
         self.viewport().update()
@@ -636,7 +711,9 @@ class EditorTimeline(QGraphicsView):
         total_h = self.RULER_HEIGHT * 2 + sum(
             self._track_heights.get(t.id, self.TRACK_DEFAULT_H) for t in tracks
         )
-        scene_w = self.CONTENT_LEFT_PAD + max(self._duration * self.pixels_per_second + 200, 800)
+        content_w = int(round(self._duration * self.pixels_per_second))
+        view_w = self.viewport().width() if self.viewport() else 800
+        scene_w = max(self.CONTENT_LEFT_PAD + content_w + 50, view_w)
         self._scene.setSceneRect(0, 0, scene_w, total_h)
         self.viewport().update()
 
@@ -644,7 +721,7 @@ class EditorTimeline(QGraphicsView):
         dur = 0.0
         for track in timeline.tracks:
             for layer in track.layers:
-                dur = max(dur, layer.end)
+                dur = max(dur, float(getattr(layer, "end", 0.0) or 0.0))
         return max(dur, 10.0)
 
     def _rebuild_track_heights(self) -> None:
@@ -743,6 +820,8 @@ class EditorTimeline(QGraphicsView):
 
         Returns (layer_rows, num_rows) where layer_rows is a list of
         row indices (0-based) in the same order as visible_layers.
+        Dynamically allocates as many rows as needed to represent true
+        concurrent overlapping segments without hardcoded limits.
         A new row is started only when a layer overlaps with every
         existing row's last segment. Used for subtitle tracks so
         overlapping Sub N layers stack vertically inside the same TS1
@@ -756,11 +835,23 @@ class EditorTimeline(QGraphicsView):
         """
         previous = self._overlap_row_assignments.get(str(track_id), {})
         row_intervals: list[list[tuple[float, float]]] = []
+        row_starts: list[list[float]] = []
         layer_rows_by_id: dict[str, int] = {}
 
         def can_use(row_index, start, end):
-            return all(end <= other_start or start >= other_end
-                       for other_start, other_end in row_intervals[row_index])
+            items = row_intervals[row_index]
+            if not items:
+                return True
+            # Fast O(1) check for sequential cues
+            if start >= items[-1][1] - 0.001:
+                return True
+            # Fallback to bisect for out-of-order/restored layers
+            idx = bisect_right(row_starts[row_index], start)
+            if idx > 0 and start < items[idx - 1][1] - 0.001:
+                return False
+            if idx < len(items) and end > items[idx][0] + 0.001:
+                return False
+            return True
 
         def assign(layer, preferred=None, *, force_preferred=False):
             try:
@@ -778,21 +869,36 @@ class EditorTimeline(QGraphicsView):
                     except (TypeError, ValueError):
                         audio_end = end
             end = max(end, audio_end)
-            if preferred is not None and preferred >= 0:
+
+            row_index = -1
+            if force_preferred and preferred is not None and preferred >= 0:
                 while len(row_intervals) <= preferred:
                     row_intervals.append([])
-                if force_preferred or can_use(preferred, start, end):
+                    row_starts.append([])
+                row_index = preferred
+            elif preferred is not None and 0 <= preferred < len(row_intervals):
+                if can_use(preferred, start, end):
                     row_index = preferred
-                else:
-                    row_index = -1
-            else:
-                row_index = -1
+
             if row_index < 0:
-                row_index = next((idx for idx, _items in enumerate(row_intervals)
-                                  if can_use(idx, start, end)), len(row_intervals))
-                if row_index == len(row_intervals):
-                    row_intervals.append([])
-            row_intervals[row_index].append((start, end))
+                for idx in range(len(row_intervals)):
+                    if can_use(idx, start, end):
+                        row_index = idx
+                        break
+
+            if row_index < 0:
+                row_index = len(row_intervals)
+                row_intervals.append([])
+                row_starts.append([])
+
+            items = row_intervals[row_index]
+            if not items or start >= items[-1][0]:
+                items.append((start, end))
+                row_starts[row_index].append(start)
+            else:
+                idx = bisect_right(row_starts[row_index], start)
+                items.insert(idx, (start, end))
+                row_starts[row_index].insert(idx, start)
             layer_rows_by_id[str(getattr(layer, "id", ""))] = row_index
 
         ordered = sorted(visible_layers, key=lambda layer: float(getattr(layer, "start", 0.0)))
@@ -807,10 +913,15 @@ class EditorTimeline(QGraphicsView):
         # Existing, non-selected layers retain their old rows first. A layer
         # being edited keeps the row it had when the drag began; collisions
         # are clamped by the drag code instead of moving it to another row.
-        stable = [layer for layer in ordered
-                  if str(getattr(layer, "id", "")) in previous
-                  and str(getattr(layer, "id", "")) != selected_id]
-        adaptive = [layer for layer in ordered if layer not in stable]
+        stable = []
+        stable_ids = set()
+        for layer in ordered:
+            lid = str(getattr(layer, "id", ""))
+            pref = previous.get(lid)
+            if pref is not None and pref >= 0 and lid != selected_id:
+                stable.append(layer)
+                stable_ids.add(lid)
+        adaptive = [layer for layer in ordered if str(getattr(layer, "id", "")) not in stable_ids]
         for layer in stable:
             assign(layer, previous.get(str(getattr(layer, "id", ""))))
         for layer in adaptive:
@@ -979,22 +1090,40 @@ class EditorTimeline(QGraphicsView):
         painter.setFont(font)
         major_interval = self._tick_interval()
 
-        t = 0.0
-        while t <= self._duration + 5:
-            x = self.CONTENT_LEFT_PAD + int(t * self.pixels_per_second) - scroll_x
-            if x > view_w:
+        pps = max(0.001, self.pixels_per_second)
+        if major_interval >= 5 and (major_interval / 5.0) * pps >= 10.0:
+            tick_step = major_interval / 5.0
+        elif major_interval >= 2 and (major_interval / 2.0) * pps >= 10.0:
+            tick_step = major_interval / 2.0
+        else:
+            tick_step = float(major_interval)
+
+        start_sec = max(0.0, (float(scroll_x) - self.CONTENT_LEFT_PAD - 20.0) / pps)
+        t = math.floor(start_sec / tick_step) * tick_step
+        max_t = self._duration + 5.0
+
+        while t <= max_t:
+            x = self.CONTENT_LEFT_PAD + int(round(t * self.pixels_per_second)) - scroll_x
+            if x > view_w + 50:
                 break
-            if x > -10:
-                if int(t) % int(max(major_interval, 1)) < 0.5:
+            if x > -40:
+                is_major = (abs(round(t / major_interval) * major_interval - t) < 1e-4)
+                if is_major:
                     painter.setPen(QColor("#35506f"))
                     painter.drawLine(x, ruler_y + self.RULER_HEIGHT - 10, x, ruler_y + self.RULER_HEIGHT)
-                    ts = f"{int(t // 60)}:{int(t % 60):02d}"
+                    if t >= 3600.0:
+                        h = int(t // 3600)
+                        m = int((t % 3600) // 60)
+                        s = int(t % 60)
+                        ts = f"{h}:{m:02d}:{s:02d}"
+                    else:
+                        ts = f"{int(t // 60)}:{int(t % 60):02d}"
                     painter.setPen(QColor("#6b8cb8"))
                     painter.drawText(int(x) + 2, ruler_y + 16, ts)
                 else:
                     painter.setPen(QColor("#1e2d42"))
                     painter.drawLine(x, ruler_y + self.RULER_HEIGHT - 5, x, ruler_y + self.RULER_HEIGHT)
-            t += 1.0
+            t += tick_step
 
     def _draw_track_header(self, painter: QPainter, track: Track,
                            y: int, h: int) -> None:
@@ -1027,16 +1156,23 @@ class EditorTimeline(QGraphicsView):
         painter.drawRect(body_rect)
 
         painter.setPen(QColor("#1e2d42"))
-        # Draw only second markers that can reach the current viewport. On a
-        # long project, iterating from 0 on every playback repaint becomes
-        # needlessly expensive after the playhead has moved far right.
-        start_second = max(1, int(scroll_x / max(1, self.pixels_per_second)) - 1)
-        for i in range(start_second, int(self._duration) + 1):
-            x = self.CONTENT_LEFT_PAD + int(i * self.pixels_per_second) - scroll_x
+        # Draw only interval markers that can reach the current viewport.
+        # Align with ruler tick interval so gridlines match time markers
+        # and don't overwhelm the viewport on long projects or zoomed-out views.
+        interval = max(1, self._tick_interval())
+        pps = max(0.001, self.pixels_per_second)
+        start_sec = max(0.0, (float(scroll_x) - self.CONTENT_LEFT_PAD) / pps)
+        first_tick = max(interval, int(math.floor(start_sec / interval)) * interval)
+
+        t = first_tick
+        duration_limit = int(self._duration) + 1
+        while t <= duration_limit:
+            x = self.CONTENT_LEFT_PAD + int(round(t * self.pixels_per_second)) - scroll_x
             if x > view_w:
                 break
             if x > 0:
                 painter.drawLine(x, y, x, y + h)
+            t += interval
 
     def _layers_intersecting_viewport(
         self,
@@ -1066,13 +1202,17 @@ class EditorTimeline(QGraphicsView):
         return sorted_layers[first:last]
 
     def _tick_interval(self) -> int:
-        if self.pixels_per_second < 40:
-            return 10
-        if self.pixels_per_second < 80:
-            return 5
-        if self.pixels_per_second < 150:
-            return 2
-        return 1
+        """Calculate optimal major tick interval in seconds based on current zoom level."""
+        pps = max(0.001, self.pixels_per_second)
+        candidate_intervals = [
+            1, 2, 5, 10, 15, 30,           # seconds
+            60, 120, 300, 600, 900, 1800,  # 1m, 2m, 5m, 10m, 15m, 30m
+            3600, 7200, 14400, 28800       # 1h, 2h, 4h, 8h
+        ]
+        for interval in candidate_intervals:
+            if interval * pps >= 60.0:
+                return interval
+        return candidate_intervals[-1]
 
     def _draw_track_layers(self, painter: QPainter, track: Track,
                            scroll_x: int, y: int, h: int) -> None:
@@ -1163,9 +1303,31 @@ class EditorTimeline(QGraphicsView):
             num_layers = max(1, len(visible_layers))
             row_h = (h - margin * 2) / num_layers if num_layers > 0 else h
         visible_row_index = 0
-        for layer in visible_layers:
-            x = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
-            w = max(int(layer.duration * self.pixels_per_second), 20)
+        pps = max(0.001, self.pixels_per_second)
+        visible_count = len(visible_layers)
+        for i, layer in enumerate(visible_layers):
+            x = self.CONTENT_LEFT_PAD + int(round(layer.start * pps)) - scroll_x
+            actual_w = max(1, int(round(layer.duration * pps)))
+            if pps < 30.0:
+                w = actual_w
+            else:
+                w = max(actual_w, 20)
+
+            # Prevent a bar from overlapping or bleeding into the next bar on the same row
+            if overlap_stack:
+                row = layer_row_by_id.get(str(getattr(layer, "id", "")), 0)
+                for j in range(i + 1, min(i + 10, visible_count)):
+                    if layer_row_by_id.get(str(getattr(visible_layers[j], "id", "")), 0) == row:
+                        next_x = self.CONTENT_LEFT_PAD + int(round(visible_layers[j].start * pps)) - scroll_x
+                        if next_x > x:
+                            max_allowed = (next_x - x - 1) if pps < 30.0 else (next_x - x)
+                            w = max(1, min(w, max_allowed))
+                        break
+            elif not uses_layer_rows and i + 1 < visible_count:
+                next_x = self.CONTENT_LEFT_PAD + int(round(visible_layers[i + 1].start * pps)) - scroll_x
+                if next_x > x:
+                    max_allowed = (next_x - x - 1) if pps < 30.0 else (next_x - x)
+                    w = max(1, min(w, max_allowed))
             overflow_w = 0
             raw_ae = None
             if isinstance(getattr(layer, "metadata", None), dict):
@@ -1174,7 +1336,7 @@ class EditorTimeline(QGraphicsView):
                 try:
                     ex = float(raw_ae) - float(getattr(layer, "end", 0.0) or 0.0)
                     if ex > 0.05 and float(getattr(layer, "extended_duration", 0.0) or 0.0) <= 0.001:
-                        overflow_w = int(round(ex * self.pixels_per_second))
+                        overflow_w = int(round(ex * pps))
                 except (TypeError, ValueError):
                     pass
             # Off-screen bars have no visual effect. Skip row assignment,
@@ -1371,11 +1533,25 @@ class EditorTimeline(QGraphicsView):
             border = fill.darker(140)
         elif is_subtitle_type or force_subtitle_color or force_subtitle_track or has_dub_marker:
             fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
-            fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
             border = QColor(141, 75, 29)  # #8d4b1d — color.darker(140) baked in
         else:
             fill = self._layer_color(layer.type)
             border = fill.darker(140)
+
+        # Fast path for low-zoom overview bars (Level of Detail)
+        if w <= 6:
+            painter.fillRect(QRectF(x, y, max(1, w), h), fill)
+            if is_selected:
+                painter.setPen(QPen(QColor("#4a8cff"), 1))
+                painter.drawRect(QRectF(x, y, max(1, w), h))
+            elif speaker and speaker == self._highlighted_speaker:
+                painter.setPen(QPen(QColor("#ffe082"), 1))
+                painter.drawRect(QRectF(x, y, max(1, w), h))
+            elif w >= 2:
+                # Distinct divider line on the right edge so adjacent bars remain visually separated
+                painter.setPen(QPen(border, 1))
+                painter.drawLine(int(x + w - 1), int(y), int(x + w - 1), int(y + h))
+            return
 
         # Check for video time-warp / freeze frame extension
         extended_duration = 0.0
@@ -1612,8 +1788,9 @@ class EditorTimeline(QGraphicsView):
         x = self.CONTENT_LEFT_PAD + int(self._playhead * self.pixels_per_second) - scroll_x
         if x < 0 or x > self.viewport().width():
             return
+        h = max(self.viewport().height() if self.viewport() else 0, int(self._scene.height()))
         painter.setPen(QPen(QColor("#e04040"), 2))
-        painter.drawLine(int(x), 0, int(x), int(self._scene.height()))
+        painter.drawLine(int(x), 0, int(x), int(h))
         painter.setBrush(QColor("#e04040"))
         painter.setPen(Qt.NoPen)
         painter.drawPolygon([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)])
@@ -1626,7 +1803,7 @@ class EditorTimeline(QGraphicsView):
         x2 = self.CONTENT_LEFT_PAD + int(end * self.pixels_per_second) - scroll_x
         if x2 < 0 or x1 > self.viewport().width():
             return
-        height = max(self.RULER_HEIGHT, int(self._scene.height()))
+        height = max(self.RULER_HEIGHT, self.viewport().height() if self.viewport() else 0, int(self._scene.height()))
         painter.fillRect(max(0, x1), 0, max(1, x2 - x1), height, QColor(74, 140, 255, 45))
         painter.setPen(QPen(QColor("#71adff"), 2))
         painter.drawLine(x1, 0, x1, height)
@@ -1660,9 +1837,13 @@ class EditorTimeline(QGraphicsView):
             overlap_stack = self._should_overlap_stack(track)
             layers_in_row = []
             if overlap_stack and num_layers > 1:
-                # Sort by start time for proper overlap detection
-                visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
-                layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted, track_id=track.id)
+                cached_layout = self._overlap_layout_cache.get(track.id)
+                if cached_layout is not None:
+                    (layer_row_by_id, num_rows, visible_layers_sorted, sorted_starts, prefix_max_ends) = cached_layout
+                else:
+                    visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
+                    layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted, track_id=track.id)
+                    layer_row_by_id = {str(getattr(l, "id", "")): r for l, r in zip(visible_layers_sorted, layer_rows)}
                 row_slots = []
                 cursor = y + margin
                 for r in range(num_rows):
@@ -1675,9 +1856,7 @@ class EditorTimeline(QGraphicsView):
                         break
                 if row < 0:
                     return None, ""
-                for visible_idx, layer in enumerate(visible_layers_sorted):
-                    if layer_rows[visible_idx] == row:
-                        layers_in_row.append(layer)
+                layers_in_row = [l for l in visible_layers_sorted if layer_row_by_id.get(str(getattr(l, "id", "")), 0) == row]
             elif uses_layer_rows and num_layers > 1:
                 row_h = (th - margin * 2) / num_layers
                 rel_y = click_y - y - margin
@@ -1685,9 +1864,12 @@ class EditorTimeline(QGraphicsView):
                 layers_in_row = [visible_layers[row]]
             else:
                 layers_in_row = [layer for layer in track.layers if layer.visible]
+
+            pps = max(0.001, self.pixels_per_second)
+            min_bar_w = 1 if pps < 30.0 else 20
             for layer in layers_in_row:
-                lx = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
-                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                lx = self.CONTENT_LEFT_PAD + int(round(layer.start * pps)) - scroll_x
+                lw = max(int(round(layer.duration * pps)), min_bar_w)
                 lw_hit = lw
                 meta = getattr(layer, "metadata", None)
                 if isinstance(meta, dict):
@@ -1696,7 +1878,7 @@ class EditorTimeline(QGraphicsView):
                         try:
                             ex = float(raw_ae) - float(getattr(layer, "end", 0.0) or 0.0)
                             if ex > 0.05 and float(getattr(layer, "extended_duration", 0.0) or 0.0) <= 0.001:
-                                lw_hit += int(round(ex * self.pixels_per_second))
+                                lw_hit += int(round(ex * pps))
                         except (TypeError, ValueError):
                             pass
                 if lx - 4 <= pos.x() <= lx + lw_hit + 4:
@@ -1838,6 +2020,17 @@ class EditorTimeline(QGraphicsView):
                 event.accept()
                 return
 
+            if not self._selection_mode and pos.x() >= self.CONTENT_LEFT_PAD:
+                t = self._pos_to_time(pos.x(), scroll_x)
+                if t >= 0:
+                    self._manual_subtitle_selection = False
+                    self.set_playhead(t)
+                    self.seekRequested.emit(t)
+                    self.seekRequestedMs.emit(int(t * 1000))
+                    self._selection_drag = {"mode": "scrub"}
+                    event.accept()
+                    return
+
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -1922,29 +2115,45 @@ class EditorTimeline(QGraphicsView):
             event.accept()
             return
 
-        if event.buttons() & Qt.LeftButton:
-            in_ruler = pos.y() < self.RULER_HEIGHT
-            if in_ruler and self._selection_drag is not None and self._selection_drag.get("mode") == "scrub":
+        if event.buttons() & Qt.LeftButton and self._selection_drag is not None:
+            mode = self._selection_drag.get("mode")
+            if mode == "scrub":
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
                     self.set_playhead(t)
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
-            elif in_ruler and self._selection_drag is not None:
-                t = self._pos_to_time(pos.x(), scroll_x)
-                if t >= 0:
-                    anchor = self._selection_drag["anchor"]
-                    mode = self._selection_drag.get("mode", "new")
-                    existing = self._selection_drag.get("initial")
-                    if mode == "start" and existing:
-                        self.set_selection_range(min(t, existing[1] - self.MIN_DUR), existing[1])
-                        self._selection_drag["changed"] = True
-                    elif mode == "end" and existing:
-                        self.set_selection_range(existing[0], max(t, existing[0] + self.MIN_DUR))
-                        self._selection_drag["changed"] = True
-                    elif abs(t - anchor) >= self.MIN_DUR:
-                        self.set_selection_range(anchor, t)
-                        self._selection_drag["changed"] = True
+                # Auto-scroll when scrubbing near viewport edges
+                viewport = self.viewport()
+                if viewport:
+                    vw = viewport.width()
+                    if pos.x() < 30 and scroll_x > 0:
+                        self.horizontalScrollBar().setValue(max(0, scroll_x - 40))
+                    elif pos.x() > vw - 30:
+                        max_scroll = self.horizontalScrollBar().maximum()
+                        self.horizontalScrollBar().setValue(min(max_scroll, scroll_x + 40))
+                self.setCursor(Qt.ArrowCursor)
+                event.accept()
+                return
+            else:
+                in_ruler = pos.y() < self.RULER_HEIGHT
+                if in_ruler:
+                    t = self._pos_to_time(pos.x(), scroll_x)
+                    if t >= 0:
+                        anchor = self._selection_drag["anchor"]
+                        existing = self._selection_drag.get("initial")
+                        if mode == "start" and existing:
+                            self.set_selection_range(min(t, existing[1] - self.MIN_DUR), existing[1])
+                            self._selection_drag["changed"] = True
+                        elif mode == "end" and existing:
+                            self.set_selection_range(existing[0], max(t, existing[0] + self.MIN_DUR))
+                            self._selection_drag["changed"] = True
+                        elif abs(t - anchor) >= self.MIN_DUR:
+                            self.set_selection_range(anchor, t)
+                            self._selection_drag["changed"] = True
+                self.setCursor(Qt.ArrowCursor)
+                event.accept()
+                return
 
         edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
         if lid and edge in ("left", "right"):
@@ -2029,13 +2238,17 @@ class EditorTimeline(QGraphicsView):
             num_layers = max(1, len(visible_layers))
             uses_layer_rows = self._uses_layer_rows(track)
             overlap_stack = self._should_overlap_stack(track)
+            pps = max(0.001, self.pixels_per_second)
+            min_bar_w = 1 if pps < 30.0 else 20
             if overlap_stack and num_layers > 1:
-                # Sort by start time for proper overlap detection
-                visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
-                layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted, track_id=track.id)
+                cached_layout = self._overlap_layout_cache.get(track.id)
+                if cached_layout is not None:
+                    (layer_row_by_id, num_rows, visible_layers_sorted, sorted_starts, prefix_max_ends) = cached_layout
+                else:
+                    visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
+                    layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted, track_id=track.id)
+                    layer_row_by_id = {str(getattr(l, "id", "")): r for l, r in zip(visible_layers_sorted, layer_rows)}
                 num_rows = max(1, num_rows)
-                # All rows are the same CHILD_TRACK_H tall. Recompute the
-                # same Y positions the painter uses.
                 row_slots: list[tuple[int, int]] = []
                 cursor = y + margin
                 for r in range(num_rows):
@@ -2048,11 +2261,11 @@ class EditorTimeline(QGraphicsView):
                         break
                 if row < 0:
                     return ""
-                for visible_idx, layer in enumerate(visible_layers_sorted):
-                    if layer_rows[visible_idx] != row:
+                for layer in visible_layers_sorted:
+                    if layer_row_by_id.get(str(getattr(layer, "id", "")), 0) != row:
                         continue
-                    lx = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
-                    lw = max(int(layer.duration * self.pixels_per_second), 20)
+                    lx = self.CONTENT_LEFT_PAD + int(round(layer.start * pps)) - scroll_x
+                    lw = max(int(round(layer.duration * pps)), min_bar_w)
                     if lx - 4 <= pos.x() <= lx + lw + 4:
                         return layer.id
                 return ""
@@ -2066,8 +2279,8 @@ class EditorTimeline(QGraphicsView):
                     if not layer.visible:
                         continue
                     if visible_count == row:
-                        lx = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
-                        lw = max(int(layer.duration * self.pixels_per_second), 20)
+                        lx = self.CONTENT_LEFT_PAD + int(round(layer.start * pps)) - scroll_x
+                        lw = max(int(round(layer.duration * pps)), min_bar_w)
                         if lx - 4 <= pos.x() <= lx + lw + 4:
                             return layer.id
                         break
@@ -2076,8 +2289,8 @@ class EditorTimeline(QGraphicsView):
             for layer in track.layers:
                 if not layer.visible:
                     continue
-                lx = self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x
-                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                lx = self.CONTENT_LEFT_PAD + int(round(layer.start * pps)) - scroll_x
+                lw = max(int(round(layer.duration * pps)), min_bar_w)
                 if lx - 4 <= pos.x() <= lx + lw + 4:
                     return layer.id
             return ""

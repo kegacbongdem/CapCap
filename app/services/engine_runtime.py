@@ -81,17 +81,17 @@ class EngineRuntime:
     def extract_audio(self, video_path: str, audio_output_path: str) -> bool:
         return self.ffmpeg.extract_audio(video_path, audio_output_path)
 
-    def separate_vocals(self, audio_path: str, output_dir: str):
-        return self.demucs.separate(audio_path, output_dir)
+    def separate_vocals(self, audio_path: str, output_dir: str, on_progress=None):
+        return self.demucs.separate(audio_path, output_dir, on_progress=on_progress)
 
-    def transcribe_audio(self, audio_path: str, model_path: str, *, language: str):
-        return self.whisper.transcribe(audio_path, model_path, language=language)
+    def transcribe_audio(self, audio_path: str, model_path: str, *, language: str, on_progress=None):
+        return self.whisper.transcribe(audio_path, model_path, language=language, on_progress=on_progress)
 
     def transcribe_video_ocr(self, video_path: str, *, region: str = "bottom", **kwargs):
         return self.ocr.transcribe(video_path, region=region, **kwargs)
 
-    def transcribe_audio_sensevoice(self, audio_path: str, model_path: str, *, language: str = "auto"):
-        return self.sensevoice.transcribe(audio_path, model_path, language=language)
+    def transcribe_audio_sensevoice(self, audio_path: str, model_path: str, *, language: str = "auto", on_progress=None):
+        return self.sensevoice.transcribe(audio_path, model_path, language=language, on_progress=on_progress)
 
     def transcribe_audio_capcut(self, audio_path: str, *, language: str = "auto", on_progress: callable = None):
         try:
@@ -144,16 +144,17 @@ class EngineRuntime:
             batch_callback=batch_callback,
         )
 
-    def rewrite_translation_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = ""):
+    def rewrite_translation_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = "", batch_callback=None):
         return self.translator.rewrite_segments(
             source_segments,
             translated_segments,
             model_path=model_path,
             src_lang=src_lang,
             style_instruction=style_instruction,
+            batch_callback=batch_callback,
         )
 
-    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None) -> bool:
+    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None, on_progress=None) -> bool:
         return self.ffmpeg.embed_subtitles(
             video_path,
             srt_path,
@@ -174,9 +175,10 @@ class EngineRuntime:
             fast=fast,
             video_quality=video_quality,
             video_time_warps=video_time_warps,
+            on_progress=on_progress,
         )
 
-    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None) -> bool:
+    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, video_quality="medium", video_time_warps=None, on_progress=None) -> bool:
         return self.ffmpeg.embed_ass_subtitles(
             video_path,
             ass_path,
@@ -197,6 +199,7 @@ class EngineRuntime:
             fast=fast,
             video_quality=video_quality,
             video_time_warps=video_time_warps,
+            on_progress=on_progress,
         )
 
     def get_video_dimensions(self, video_path: str):

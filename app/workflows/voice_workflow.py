@@ -89,6 +89,11 @@ class VoiceWorkflow:
 
     def cancel(self):
         self._cancelled = True
+        try:
+            from vieneu_tts import unload_vieneu_model
+            unload_vieneu_model()
+        except Exception:
+            pass
 
     def _load_state(self, project_state_path: str = ""):
         return self.project_service.load_project(project_state_path) if project_state_path else None
@@ -1361,6 +1366,21 @@ class VoiceWorkflow:
             manifest["by_cache_key"] = manifest_by_cache_key
             self._save_manifest(tmp_dir, manifest)
             return wavs
+        def _voice_label(vname: str) -> str:
+            raw = str(vname or "").strip()
+            if raw.startswith("vieneu_clone:"):
+                stem = raw.replace("vieneu_clone:", "").strip()
+                return f"clone voice '{stem}'"
+            if raw.startswith("vieneu:"):
+                stem = raw.replace("vieneu:", "").strip()
+                return f"voice '{stem}'"
+            if raw.startswith("capcut:"):
+                stem = raw.replace("capcut:", "").strip()
+                return f"CapCut voice '{stem}'"
+            if raw:
+                return f"voice '{raw}'"
+            return "voiceover"
+
         if pending_providers == {"capcut"} and capcut_batch_size > 1:
             from collections import defaultdict
             try:
@@ -1409,6 +1429,7 @@ class VoiceWorkflow:
                     executor.submit(_run_batch, b): b
                     for b in batches
                 }
+                completed_segments = 0
                 for future in as_completed(future_map):
                     if _is_stopped():
                         try:
@@ -1461,6 +1482,17 @@ class VoiceWorkflow:
                             }
                             manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(job["global_idx"])])
                             wavs[idx] = seg_wav
+
+                    completed_segments += len(batch)
+                    total_segments = len(segments)
+                    done = cache_hits + completed_segments
+                    pct = (done / max(1, total_segments)) * 100.0
+                    label = _voice_label(batch[0].get("voice_name", voice_name) if batch else voice_name)
+                    msg = f"Synthesizing with {label}: {done}/{total_segments} ({pct:.1f}%)..."
+                    if on_progress:
+                        on_progress(msg)
+                    elif log:
+                        print(f"[Voice Workflow] {msg}")
         else:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_map = {
@@ -1471,7 +1503,7 @@ class VoiceWorkflow:
                         voice=job["voice_name"],
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
-                        on_progress=on_progress,
+                        on_progress=None,
                         normalizer_dictionary=normalizer_dictionary,
                     ): job
                     for job in pending_jobs
@@ -1490,7 +1522,6 @@ class VoiceWorkflow:
                     seg_wav = str(job["wav_path"])
                     try:
                         future.result()
-                        completed_count += 1
                     except Exception as exc:
                         preview = " ".join(txt.split())
                         if len(preview) > 120:
@@ -1506,6 +1537,18 @@ class VoiceWorkflow:
                             f"[Voice Workflow] TTS failed at subtitle segment {idx + 1}: "
                             f"\"{preview}\". Using silence placeholder. Error: {exc}"
                         )
+
+                    completed_count += 1
+                    total_segments = len(segments)
+                    done = cache_hits + completed_count
+                    pct = (done / max(1, total_segments)) * 100.0
+                    label = _voice_label(job.get("voice_name", voice_name))
+                    msg = f"Synthesizing with {label}: {done}/{total_segments} ({pct:.1f}%)..."
+                    if on_progress:
+                        on_progress(msg)
+                    elif log:
+                        print(f"[Voice Workflow] {msg}")
+
                     manifest_segments[str(job["global_idx"])] = {
                         "cache_key": str(job["cache_key"]),
                         "wav_path": seg_wav,
@@ -1671,6 +1714,9 @@ class VoiceWorkflow:
             sync_mode=timing_sync_mode,
         )
         self._extend_segment_ends_to_audio(segments=segments, wavs=wavs)
+        for s, w in zip(segments, wavs):
+            if isinstance(s, dict):
+                s["_wav_path"] = str(w or "")
 
         synth_elapsed = time.perf_counter() - synth_started
         print(

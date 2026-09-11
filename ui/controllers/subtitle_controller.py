@@ -337,7 +337,7 @@ class SubtitleController:
             f"{action} subtitles with {provider}...\nElapsed: 00:00",
             None,
             0,
-            0,
+            100,
             self.gui,
         )
         dialog.setWindowTitle(f"{action} Subtitles")
@@ -353,12 +353,18 @@ class SubtitleController:
             "QPushButton { background: #22344c; color: #e6eef9; border: 1px solid #36516f; border-radius: 6px; padding: 5px 14px; }"
         )
         started = time.monotonic()
+        dialog._started_at = started
+        dialog._action = action
+        dialog._provider = provider
+        dialog._progress_str = ""
         timer = QTimer(dialog)
 
         def update_elapsed():
             elapsed = int(time.monotonic() - started)
+            prog_line = f"Progress: {dialog._progress_str}\n" if getattr(dialog, "_progress_str", "") else ""
             dialog.setLabelText(
                 f"{action} subtitles with {provider}...\n"
+                f"{prog_line}"
                 f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
                 "Large subtitle projects can take a few minutes."
             )
@@ -381,6 +387,83 @@ class SubtitleController:
             dialog.hide()
             dialog.deleteLater()
 
+    def _show_transcription_progress(self, *, engine_name: str = "whisper"):
+        self._close_transcription_progress()
+        engine_label = {
+            "whisper": "Whisper STT",
+            "capcut": "CapCut STT",
+            "sensevoice": "SenseVoice STT",
+        }.get(engine_name, "Speech Recognition")
+        action = "Transcribing"
+        dialog = QProgressDialog(
+            f"{action} audio with {engine_label}...\nElapsed: 00:00",
+            None,
+            0,
+            100,
+            self.gui,
+        )
+        dialog.setWindowTitle("Transcribing Audio")
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.setMinimumWidth(440)
+        dialog.setValue(0)
+        dialog.setStyleSheet(
+            "QProgressDialog { background-color: #101826; color: #e6eef9; }"
+            "QLabel { color: #e6eef9; }"
+            "QPushButton { background: #22344c; color: #e6eef9; border: 1px solid #36516f; border-radius: 6px; padding: 5px 14px; }"
+        )
+        started = time.monotonic()
+        dialog._started_at = started
+        dialog._action = action
+        dialog._engine_label = engine_label
+        dialog._progress_str = ""
+        timer = QTimer(dialog)
+
+        def update_elapsed():
+            elapsed = int(time.monotonic() - started)
+            prog_line = f"Progress: {dialog._progress_str}\n" if getattr(dialog, "_progress_str", "") else ""
+            h = elapsed // 3600
+            m = (elapsed % 3600) // 60
+            s = elapsed % 60
+            elapsed_str = f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+            dialog.setLabelText(
+                f"{action} audio with {engine_label}...\n"
+                f"{prog_line}"
+                f"Elapsed: {elapsed_str}\n"
+                "Long videos may take several minutes to transcribe."
+            )
+
+        timer.setInterval(1000)
+        timer.timeout.connect(update_elapsed)
+        timer.start()
+        self.gui._transcription_progress_dialog = dialog
+        self.gui._transcription_progress_timer = timer
+        dialog.show()
+
+    def _close_transcription_progress(self):
+        timer = getattr(self.gui, "_transcription_progress_timer", None)
+        if timer is not None:
+            timer.stop()
+        self.gui._transcription_progress_timer = None
+        dialog = getattr(self.gui, "_transcription_progress_dialog", None)
+        self.gui._transcription_progress_dialog = None
+        if dialog is not None:
+            dialog.hide()
+            dialog.deleteLater()
+
+    def on_transcription_progress(self, percent: int, message: str):
+        dialog = getattr(self.gui, "_transcription_progress_dialog", None)
+        if dialog is not None:
+            dialog.setValue(max(0, min(100, int(percent))))
+            dialog._progress_str = message
+        if hasattr(self.gui, "progress_bar"):
+            scaled_value = 40 + int(percent * 0.2)
+            self.gui.progress_bar.setValue(min(60, max(40, scaled_value)))
+        if hasattr(self.gui, "transcript_text"):
+            self.gui.transcript_text.setText(f"{message}\n\nVui lòng đợi trong giây lát...")
+
     def run_transcription(self):
         audio_src = self.gui.audio_source_edit.text()
         if not audio_src or not os.path.exists(audio_src):
@@ -396,11 +479,14 @@ class SubtitleController:
         self.gui.update_project_step("transcribe", "running")
 
         engine_name = self.gui.get_transcription_engine()
+        self._show_transcription_progress(engine_name=engine_name)
         self.gui.transcription_thread = TranscriptionWorker(audio_src, model_path, lang, engine_name=engine_name)
+        self.gui.transcription_thread.progress.connect(self.on_transcription_progress)
         self.gui.transcription_thread.finished.connect(self.gui.on_transcription_finished)
         self.gui.transcription_thread.start()
 
     def on_transcription_finished(self, segments, error=""):
+        self._close_transcription_progress()
         self.gui.transcribe_btn.setEnabled(True)
         if error or not segments:
             self.gui.update_project_step("transcribe", "failed")
@@ -554,7 +640,39 @@ class SubtitleController:
             segments=source_segments,
         )
         self.gui.translation_thread.finished.connect(self.gui.on_translation_finished)
+        self.gui.translation_thread.progress.connect(self.on_translation_progress)
+        self.gui.translation_thread.batch_ready.connect(self.on_translation_batch_ready)
         self.gui.translation_thread.start()
+
+    def on_translation_progress(self, completed: int, total: int):
+        if total <= 0:
+            return
+        pct = max(0, min(100, int(completed * 100 / total)))
+        dialog = getattr(self.gui, "_translation_progress_dialog", None)
+        if dialog is not None:
+            dialog._progress_str = f"{completed}/{total} cues ({pct}%)"
+            dialog.setValue(pct)
+            elapsed = int(time.monotonic() - getattr(dialog, "_started_at", time.monotonic()))
+            action = getattr(dialog, "_action", "Translating")
+            provider = getattr(dialog, "_provider", "AI")
+            dialog.setLabelText(
+                f"{action} subtitles with {provider}...\n"
+                f"Progress: {dialog._progress_str}\n"
+                f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
+                "Large subtitle projects can take a few minutes."
+            )
+        if hasattr(self.gui, "progress_bar"):
+            scaled = 80 + int(completed * 20 / total)
+            self.gui.progress_bar.setValue(min(99, scaled))
+
+    def on_translation_batch_ready(self, start_idx: int, batch_segments: list):
+        if not batch_segments:
+            return
+        if hasattr(self.gui, "apply_partial_translation_batch"):
+            try:
+                self.gui.apply_partial_translation_batch(start_idx, batch_segments)
+            except Exception as e:
+                print(f"[Translation] Error applying partial batch: {e}")
 
     def on_translation_finished(self, translated_srt, error, fallback_notice=""):
         self._close_translation_progress()
@@ -1223,6 +1341,8 @@ class SubtitleController:
                 style_instruction=style_instruction,
             )
             self.gui.rewrite_translation_thread.finished.connect(self.gui.on_rewrite_translation_finished)
+            self.gui.rewrite_translation_thread.progress.connect(self.on_translation_progress)
+            self.gui.rewrite_translation_thread.batch_ready.connect(self.on_translation_batch_ready)
             self.gui.rewrite_translation_thread.start()
 
         def _cleanup_dialog():
@@ -1306,21 +1426,20 @@ class SubtitleController:
             base_segments = self.gui.current_translated_segments or self.gui.current_segments
             edited_texts = self.gui.extract_subtitle_text_entries(srt_text)
             if base_segments and len(edited_texts) == len(base_segments):
-                segments = [
-                    {
+                segments = []
+                for idx, base in enumerate(base_segments):
+                    d = {
                         "start": base["start"],
                         "end": base["end"],
                         "text": edited_texts[idx],
                         "words": list(base.get("words", [])),
                         "manual_highlights": list(base.get("manual_highlights", [])),
-                        # SRT has no diarization fields.  Keep the existing
-                        # speaker assignment when applying edited/imported
-                        # translated text so timeline colors and speaker
-                        # controls remain stable.
                         "speaker": str(base.get("speaker", "") or ""),
                     }
-                    for idx, base in enumerate(base_segments)
-                ]
+                    for fld in ("tts_text", "tts_group_id", "tts_group_start", "tts_group_end", "extended_duration", "time_warp_id", "_audio_end", "_wav_path"):
+                        if fld in base:
+                            d[fld] = base[fld]
+                    segments.append(d)
         if not segments:
             segments = self.gui.parse_srt_to_segments(srt_text)
         # Imported/edited SRT files cannot carry diarization metadata.  When
@@ -1334,6 +1453,9 @@ class SubtitleController:
                     speaker = str(metadata_base[idx].get("speaker", "") or "").strip()
                     if speaker:
                         segment["speaker"] = speaker
+                    for fld in ("tts_text", "tts_group_id", "tts_group_start", "tts_group_end", "extended_duration", "time_warp_id", "_audio_end", "_wav_path"):
+                        if fld in metadata_base[idx] and fld not in segment:
+                            segment[fld] = metadata_base[idx][fld]
         if not segments:
             if show_message:
                 QMessageBox.warning(

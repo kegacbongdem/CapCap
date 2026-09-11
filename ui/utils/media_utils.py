@@ -537,8 +537,17 @@ def set_position(gui, position):
     _stop_freeze_timer(gui)
     gui._active_freeze_warp = None
 
+    media_dur = 0
+    if hasattr(gui, "media_player") and hasattr(gui.media_player, "duration"):
+        try:
+            media_dur = int(gui.media_player.duration() or 0)
+        except Exception:
+            media_dur = 0
+
     if _is_warped_preview(gui):
         media_pos = position
+        if media_dur > 0 and media_pos >= media_dur:
+            media_pos = max(0, media_dur - 100)
         if hasattr(gui.media_player, "set_time_warps"):
             gui.media_player.set_time_warps([])
         gui.media_player.setPosition(media_pos)
@@ -565,6 +574,8 @@ def set_position(gui, position):
             media_pos = int(round(media_time_s * 1000))
         else:
             media_pos = position
+        if media_dur > 0 and media_pos >= media_dur:
+            media_pos = max(0, media_dur - 100)
         if hasattr(gui.media_player, "set_time_warps"):
             gui.media_player.set_time_warps(warps)
         try:

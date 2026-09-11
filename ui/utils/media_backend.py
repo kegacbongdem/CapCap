@@ -216,6 +216,11 @@ def _realtime_color_graph(state=None) -> str:
 def _ffprobe_video_duration(video_path: str) -> float:
     """Get video duration using ffprobe as fallback."""
     try:
+        from app.video_processor import get_video_duration
+        return get_video_duration(video_path)
+    except Exception:
+        pass
+    try:
         ffprobe = os.path.join(bin_path("ffmpeg"), "ffprobe.exe")
         if not os.path.exists(ffprobe):
             return 0.0

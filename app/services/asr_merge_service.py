@@ -33,6 +33,14 @@ def _transcribe_chunk_job(audio_path: str, language: str) -> list[dict]:
     return transcribe_audio_with_model(_ASR_WORKER_MODEL, audio_path, language=language)
 
 
+def _format_time_hms(seconds: float) -> str:
+    secs = int(max(0, seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 class AsrMergeService:
     DEFAULT_MAX_WORKERS = 3
 
@@ -249,6 +257,7 @@ class AsrMergeService:
         cache_dir: str = "",
         transcription_config: dict | None = None,
         ordered_callback=None,
+        on_progress=None,
     ) -> list[dict]:
         results = []
         config_payload = dict(transcription_config or {})
@@ -274,6 +283,42 @@ class AsrMergeService:
             if not from_cache:
                 pending_items.append(result)
 
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            return []
+
+        total_duration = max((float(c.end_seconds) for c in chunks), default=0.0)
+        completed_count = sum(1 for item in results if item.get("_ready"))
+
+        def _notify_progress(completed: int, cur_chunk: AudioChunk | None = None) -> None:
+            pct = min(100, max(1, int((completed / total_chunks) * 100))) if total_chunks > 0 else 0
+            cur_time = float(cur_chunk.end_seconds) if cur_chunk else (
+                (completed / total_chunks) * total_duration if total_chunks > 0 else 0.0
+            )
+            cur_hms = _format_time_hms(cur_time)
+            tot_hms = _format_time_hms(total_duration) if total_duration > 0 else "--:--"
+            log_line = f"[ASR Progress] {completed}/{total_chunks} chunks ({pct}%) - {cur_hms} / {tot_hms}"
+            print(log_line, flush=True)
+            if on_progress is not None:
+                try:
+                    on_progress(pct, f"Transcribing audio: {completed}/{total_chunks} chunks ({pct}%)", log_line)
+                except TypeError:
+                    try:
+                        on_progress(pct, f"Transcribing audio: {completed}/{total_chunks} chunks ({pct}%)")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        if completed_count > 0:
+            pct = int((completed_count / total_chunks) * 100)
+            print(f"[ASR Progress] Reused {completed_count}/{total_chunks} chunks from cache ({pct}%)", flush=True)
+            if on_progress is not None:
+                try:
+                    on_progress(pct, f"Transcribing audio: {completed_count}/{total_chunks} chunks ({pct}%)")
+                except Exception:
+                    pass
+
         next_emit_index = 0
 
         def _drain_ready() -> None:
@@ -289,7 +334,10 @@ class AsrMergeService:
         if pending_items:
             used_parallel = False
             def _on_item_done(item: dict) -> None:
+                nonlocal completed_count
                 item["_ready"] = True
+                completed_count += 1
+                _notify_progress(completed_count, item.get("chunk"))
                 _drain_ready()
             try:
                 from whisper_processor import _detect_faster_whisper_runtime
@@ -341,6 +389,12 @@ class AsrMergeService:
         for result in results:
             result.pop("_index", None)
             result.pop("_ready", None)
+        print(f"[ASR Progress] 100% completed: all {total_chunks}/{total_chunks} chunks transcribed.", flush=True)
+        if on_progress is not None:
+            try:
+                on_progress(100, f"Transcribing audio: 100% ({total_chunks}/{total_chunks} chunks)")
+            except Exception:
+                pass
         return results
 
     def merge_chunk_results(self, chunk_results: list[dict]) -> list[dict]:

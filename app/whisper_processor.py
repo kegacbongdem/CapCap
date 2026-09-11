@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -416,7 +417,61 @@ def _get_batched_whisper_pipeline(model):
     return pipeline
 
 
-def transcribe_audio_with_model(model, audio_path, *, language="auto", task="transcribe", use_batched: bool = True):
+def _format_time_hms(seconds: float) -> str:
+    secs = int(max(0, seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _collect_segments_with_progress(segments_gen, info, audio_path: str = "", on_progress=None):
+    raw_segments = []
+    total_duration = float(getattr(info, "duration", 0.0) or 0.0)
+    if total_duration <= 0.0 and audio_path and os.path.exists(audio_path):
+        try:
+            import soundfile as sf
+            total_duration = float(sf.info(audio_path).duration)
+        except Exception:
+            pass
+
+    if on_progress:
+        dur_msg = f" ({_format_time_hms(total_duration)})" if total_duration > 0 else ""
+        on_progress(1, f"Bắt đầu nhận diện{dur_msg}...")
+
+    last_emit = 0.0
+    last_print = 0.0
+    for seg in segments_gen:
+        raw_segments.append(seg)
+        now = time.monotonic()
+        pct = min(99, max(1, int((seg.end / total_duration) * 100))) if total_duration > 0 else 50
+        c_str = _format_time_hms(seg.end)
+        t_str = _format_time_hms(total_duration) if total_duration > 0 else "--:--"
+        if now - last_print >= 2.0 or len(raw_segments) == 1:
+            last_print = now
+            print(f"[ASR Progress] {pct}% ({c_str} / {t_str}) - {len(raw_segments)} segments", flush=True)
+        if on_progress:
+            if now - last_emit >= 0.25 or len(raw_segments) == 1:
+                last_emit = now
+                on_progress(pct, f"Đang nhận diện: {pct}% ({c_str} / {t_str}) - {len(raw_segments)} câu")
+
+    t_str = _format_time_hms(total_duration) if total_duration > 0 else "--:--"
+    print(f"[ASR Progress] 100% ({t_str}) - {len(raw_segments)} segments completed", flush=True)
+    if on_progress:
+        on_progress(100, f"Hoàn tất nhận diện: {len(raw_segments)} câu ({t_str})")
+
+    return raw_segments
+
+
+def transcribe_audio_with_model(
+    model,
+    audio_path,
+    *,
+    language="auto",
+    task="transcribe",
+    use_batched: bool = True,
+    on_progress=None,
+):
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio not found at {audio_path}")
 
@@ -450,7 +505,7 @@ def transcribe_audio_with_model(model, audio_path, *, language="auto", task="tra
                         # generators. Consume while still inside this retry
                         # block so CUDA OOM is caught and the global GPU lock
                         # protects the actual inference work.
-                        raw_segments = list(segments)
+                        raw_segments = _collect_segments_with_progress(segments, _info, audio_path, on_progress)
                         break
                     except Exception as exc:
                         if not _is_cuda_memory_error(exc):
@@ -468,12 +523,12 @@ def transcribe_audio_with_model(model, audio_path, *, language="auto", task="tra
                 # Preserve the existing non-batched path as the reliable
                 # fallback for older faster-whisper builds and limited VRAM.
                 segments, _info = _transcribe_with_vad_fallback(model.transcribe, audio_path, transcribe_kwargs)
-                raw_segments = list(segments)
+                raw_segments = _collect_segments_with_progress(segments, _info, audio_path, on_progress)
         else:
             if use_batched and getattr(model, "_capcap_runtime_device", "") == "cuda":
                 print("[Whisper] Standard GPU inference (batched inference disabled).")
             segments, _info = _transcribe_with_vad_fallback(model.transcribe, audio_path, transcribe_kwargs)
-            raw_segments = list(segments)
+            raw_segments = _collect_segments_with_progress(segments, _info, audio_path, on_progress)
 
     return [
         {
@@ -497,7 +552,7 @@ def transcribe_audio_with_model(model, audio_path, *, language="auto", task="tra
     ]
 
 
-def transcribe_audio(audio_path, model_path, whisper_path=None, language="auto", task="transcribe"):
+def transcribe_audio(audio_path, model_path, whisper_path=None, language="auto", task="transcribe", on_progress=None):
     """
     Transcribes audio using faster-whisper while keeping the old compatibility API.
 
@@ -507,6 +562,7 @@ def transcribe_audio(audio_path, model_path, whisper_path=None, language="auto",
         whisper_path (str): Unused, kept for compatibility with the old whisper.cpp call sites.
         language (str): Language of the audio ('auto', 'zh', 'en', etc.).
         task (str): 'transcribe' to keep original language, 'translate' to translate to English.
+        on_progress: Optional callback function(percent: int, message: str).
     """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio not found at {audio_path}")
@@ -514,7 +570,7 @@ def transcribe_audio(audio_path, model_path, whisper_path=None, language="auto",
     model_name = _resolve_model_name(model_path)
     model = load_whisper_model(model_path)
     try:
-        return transcribe_audio_with_model(model, audio_path, language=language, task=task)
+        return transcribe_audio_with_model(model, audio_path, language=language, task=task, on_progress=on_progress)
     except RuntimeError as exc:
         message = str(exc)
         if "cublas64_12.dll" in message or "cannot be loaded" in message:
@@ -527,7 +583,7 @@ def transcribe_audio(audio_path, model_path, whisper_path=None, language="auto",
                 cpu_kwargs["download_root"] = _faster_whisper_cache_dir()
             from faster_whisper import WhisperModel
             cpu_model = WhisperModel(model_name, **cpu_kwargs)
-            return transcribe_audio_with_model(cpu_model, audio_path, language=language, task=task)
+            return transcribe_audio_with_model(cpu_model, audio_path, language=language, task=task, on_progress=on_progress)
         raise
 
 if __name__ == "__main__":

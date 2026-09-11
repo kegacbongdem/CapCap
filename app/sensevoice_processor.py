@@ -65,7 +65,15 @@ def load_model(model_dir: str, language: str = "auto"):
         _current_language = lang
 
 
-def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto") -> list[dict]:
+def _format_time_hms(seconds: float) -> str:
+    secs = int(max(0, seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto", on_progress=None) -> list[dict]:
     import sherpa_onnx
 
     load_model(model_dir, language=language)
@@ -79,9 +87,11 @@ def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto")
 
     from vad_processor import get_speech_segments
 
+    total_duration = float(len(audio)) / 16000.0
     segments = get_speech_segments(audio, 16000)
+    total_segs = len(segments)
     results = []
-    for seg in segments:
+    for idx, seg in enumerate(segments):
         start_s = int(seg["start"] * 16000)
         end_s = int(seg["end"] * 16000)
         chunk = audio[start_s:end_s]
@@ -102,6 +112,17 @@ def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto")
                 "text": text,
             })
 
+        pct = min(99, max(1, int((idx + 1) * 100 / total_segs))) if total_segs > 0 else 50
+        cur_hms = _format_time_hms(seg["end"])
+        tot_hms = _format_time_hms(total_duration) if total_duration > 0 else "--:--"
+        log_line = f"[SenseVoice Progress] {idx + 1}/{total_segs} segments ({pct}%) - {cur_hms} / {tot_hms}"
+        print(log_line, flush=True)
+        if on_progress:
+            try:
+                on_progress(pct, f"SenseVoice: {pct}% ({idx + 1}/{total_segs})", log_line)
+            except Exception:
+                pass
+
     if not results:
         stream = _recognizer.create_stream()
         stream.accept_waveform(16000, audio)
@@ -111,4 +132,11 @@ def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto")
             duration = float(len(audio)) / 16000.0
             results.append({"start": 0.0, "end": round(duration, 3), "text": text})
 
+    tot_hms = _format_time_hms(total_duration) if total_duration > 0 else "--:--"
+    print(f"[SenseVoice Progress] 100% ({tot_hms}) - {len(results)} segments completed", flush=True)
+    if on_progress:
+        try:
+            on_progress(100, f"SenseVoice completed: {len(results)} segments")
+        except Exception:
+            pass
     return results

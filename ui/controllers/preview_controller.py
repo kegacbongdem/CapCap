@@ -575,6 +575,8 @@ class PreviewController:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
@@ -612,7 +614,7 @@ class PreviewController:
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             result = subprocess.run(
                 [ffprobe_path, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
                 startupinfo=startupinfo, creationflags=creationflags,
                 check=False,
             )

@@ -141,7 +141,7 @@ class PrepareWorkflow:
         self.project_service.save_project(project_state)
         return str(profile["path"] or source)
 
-    def _transcribe_long_audio_chunked(self, *, audio_path: str, project_state, model_path: str, language: str, on_chunk_ready=None):
+    def _transcribe_long_audio_chunked(self, *, audio_path: str, project_state, model_path: str, language: str, on_chunk_ready=None, on_progress=None):
         overall_started = time.perf_counter()
         chunk_dir = self.project_service.build_path(project_state, "audio", "chunks")
         chunk_cache_dir = self.project_service.build_path(project_state, "analysis", "chunk_results")
@@ -195,6 +195,7 @@ class PrepareWorkflow:
             cache_dir=chunk_cache_dir,
             transcription_config=transcription_config,
             ordered_callback=on_chunk_ready,
+            on_progress=on_progress,
         )
         asr_elapsed = time.perf_counter() - asr_started
         cache_hits = sum(1 for result in chunk_results if result.get("from_cache"))
@@ -213,6 +214,12 @@ class PrepareWorkflow:
                 for result in chunk_results
             ],
         )
+        if on_progress:
+            try:
+                on_progress(100, "Merging transcription segments...")
+            except Exception:
+                pass
+        print(f"[ASR] Merging {len(chunk_results)} chunk results...", flush=True)
         merge_started = time.perf_counter()
         merged_segments = asr_merge_service.merge_chunk_results(chunk_results)
         merge_elapsed = time.perf_counter() - merge_started
@@ -326,7 +333,24 @@ class PrepareWorkflow:
         step_callback=None,
     ) -> str:
         optimize_subtitles = False
-        if step_callback: step_callback("prepare")
+
+        def _report_step(step_id, message="", percent=None):
+            if not step_callback:
+                return
+            try:
+                step_callback(step_id, message, percent)
+            except TypeError:
+                try:
+                    step_callback(step_id, message)
+                except TypeError:
+                    try:
+                        step_callback(step_id)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        _report_step("prepare")
         workflow_started = time.perf_counter()
         is_ocr = transcription_engine == "ocr"
         speaker_diarization = bool(speaker_diarization and not is_ocr)
@@ -398,7 +422,7 @@ class PrepareWorkflow:
 
         if is_ocr:
             print("--- Step 1: Extracting background audio ---")
-            if step_callback: step_callback("extract_audio")
+            _report_step("extract_audio")
             project_state.set_step_status("extract_audio", "running")
             self.project_service.save_project(project_state)
 
@@ -406,7 +430,7 @@ class PrepareWorkflow:
             os.makedirs(os.path.dirname(audio_output_path), exist_ok=True)
             ffmpeg_bin = os.path.join(bin_path(), "ffmpeg", "ffmpeg.exe")
             subprocess.run(
-                [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+                [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-af", "aresample=async=1", "-acodec", "pcm_s16le",
                  "-ar", "16000", "-ac", "1", audio_output_path],
                 capture_output=True, **subprocess_hidden_kwargs(),
             )
@@ -415,7 +439,7 @@ class PrepareWorkflow:
             self.project_service.save_project(project_state)
 
             print("--- Step 2: Extracting subtitles via OCR ---")
-            if step_callback: step_callback("transcription")
+            _report_step("transcription")
             transcribe_started = time.perf_counter()
             project_state.set_step_status("extract_audio", "skipped")
             project_state.set_step_status("transcribe", "running")
@@ -440,7 +464,10 @@ class PrepareWorkflow:
                     raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
                 print("[Prepare Workflow] Reusing cached OCR transcript. Generate did not scan the video again.")
             else:
-                raw_segments = self.engine_runtime.transcribe_video_ocr(video_path, region=ocr_region)
+                def _on_ocr_progress(pct: int, msg: str = "", detail: str = ""):
+                    _report_step("transcription", detail or msg, pct)
+
+                raw_segments = self.engine_runtime.transcribe_video_ocr(video_path, region=ocr_region, on_progress=_on_ocr_progress)
                 if not raw_segments:
                     project_state.set_step_status("transcribe", "failed")
                     self.project_service.save_project(project_state)
@@ -486,7 +513,7 @@ class PrepareWorkflow:
             cached_extracted_audio = project_state.artifacts.get("extracted_audio", "")
 
             print("--- Step 1: Extracting audio ---")
-            if step_callback: step_callback("extraction")
+            _report_step("extraction")
             extract_started = time.perf_counter()
             project_state.set_step_status("extract_audio", "running")
             self.project_service.save_project(project_state)
@@ -516,7 +543,7 @@ class PrepareWorkflow:
             print(f"[Audio Handling] Selected mode: {audio_mode_key}")
             if mode in ("voice", "both") and audio_mode_key == "clean":
                 print("\n--- Step 1.5: Separating vocals/background ---")
-                if step_callback: step_callback("separation")
+                _report_step("separation")
                 print("[Audio Handling] Clean Voice enabled: running Demucs stem separation before transcription.")
                 separation_started = time.perf_counter()
                 project_state.set_step_status("separate_audio", "running")
@@ -540,7 +567,7 @@ class PrepareWorkflow:
                     print("[Prepare Workflow] Reusing cached separated stems.")
                 else:
                     try:
-                        vocal_path, music_path = self.engine_runtime.separate_vocals(audio_output_path, separated_root)
+                        vocal_path, music_path = self.engine_runtime.separate_vocals(audio_output_path, separated_root, on_progress=lambda pct, msg: _report_step("separation", msg, pct))
                     except Exception as exc:
                         project_state.set_step_status("separate_audio", "failed")
                         self.project_service.save_project(project_state)
@@ -688,7 +715,7 @@ class PrepareWorkflow:
             print(f"\n--- Step 2: Transcribing audio ({engine_name}) ---")
             if not is_sensevoice and not is_capcut:
                 print(f"[Whisper] Requested model: {whisper_model}")
-            if step_callback: step_callback("transcription")
+            _report_step("transcription")
             transcribe_started = time.perf_counter()
             project_state.set_step_status("transcribe", "running")
             self.project_service.save_project(project_state)
@@ -731,17 +758,24 @@ class PrepareWorkflow:
                         import sherpa_onnx
                     except ImportError:
                         raise RuntimeError("sherpa-onnx is not installed. Run: pip install sherpa-onnx")
+                    def _on_sensevoice_progress(pct: int, msg: str = "", detail: str = ""):
+                        _report_step("transcription", detail or msg, pct)
+
                     raw_segments = self.engine_runtime.transcribe_audio_sensevoice(
                         working_audio_path,
                         sensevoice_model_dir,
                         language=source_language,
+                        on_progress=_on_sensevoice_progress,
                     )
                 elif is_capcut:
                     print("[ASR] Using CapCut Online Speech-to-Text API (Beta).")
+                    def _on_capcut_progress(pct: int, msg: str = "", detail: str = ""):
+                        _report_step("transcription", detail or msg, pct)
+
                     raw_segments = self.engine_runtime.transcribe_audio_capcut(
                         working_audio_path,
                         language=source_language,
-                        on_progress=step_callback,
+                        on_progress=_on_capcut_progress,
                     )
                 elif is_remote_profile():
                     print("[ASR] Remote API mode: using single-pass transcription and sending full working audio to the PC server.")
@@ -816,12 +850,16 @@ class PrepareWorkflow:
                             _flush_pending_stream_segments(force=False)
                     else:
                         _on_chunk_ready = None
+                    def _on_asr_chunk_progress(pct: int, msg: str = "", detail: str = ""):
+                        _report_step("transcription", detail or msg, pct)
+
                     raw_segments = self._transcribe_long_audio_chunked(
                         audio_path=working_audio_path,
                         project_state=project_state,
                         model_path=whisper_model,
                         language=source_language,
                         on_chunk_ready=_on_chunk_ready if streamed_translation_enabled else None,
+                        on_progress=_on_asr_chunk_progress,
                     )
                     if streamed_translation_enabled:
                         remaining_segments = raw_segments[emitted_stable_count:]
@@ -830,10 +868,14 @@ class PrepareWorkflow:
                         _flush_pending_stream_segments(force=True)
                 else:
                     print("[ASR] Using standard single-pass transcription for short audio.")
+                    def _on_single_pass_progress(pct: int, msg: str = ""):
+                        _report_step("transcription", msg, pct)
+
                     raw_segments = self.engine_runtime.transcribe_audio(
                         working_audio_path,
                         whisper_model,
                         language=source_language,
+                        on_progress=_on_single_pass_progress,
                     )
                 if not raw_segments:
                     project_state.set_step_status("transcribe", "failed")
@@ -920,7 +962,7 @@ class PrepareWorkflow:
         else:
             print(f"\n--- Step 4: Translating to {target_language} ---")
 
-            if step_callback: step_callback("translation")
+            _report_step("translation")
             translate_started = time.perf_counter()
             project_state.set_step_status("translate_raw", "running")
             self.project_service.save_project(project_state)

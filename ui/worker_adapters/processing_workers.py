@@ -28,6 +28,7 @@ def _normalizer_signature(dictionary) -> str:
 
 class VocalSeparationWorker(QThread):
     finished = Signal(str, str, str)
+    progress = Signal(int, str)
 
     def __init__(self, audio_path, output_dir):
         super().__init__()
@@ -36,8 +37,13 @@ class VocalSeparationWorker(QThread):
 
     def run(self):
         try:
+            def _on_progress(pct: int, msg: str):
+                self.progress.emit(pct, msg)
+
             engine = EngineRuntime()
-            vocal_path, music_path = engine.separate_vocals(self.audio_path, self.output_dir)
+            vocal_path, music_path = engine.separate_vocals(
+                self.audio_path, self.output_dir, on_progress=_on_progress
+            )
             if vocal_path and music_path:
                 self.finished.emit(vocal_path, music_path, "")
             else:
@@ -67,6 +73,7 @@ class ExtractionWorker(QThread):
 
 class TranscriptionWorker(QThread):
     finished = Signal(list, str)
+    progress = Signal(int, str)
 
     def __init__(self, audio_path, model_path, language, engine_name: str = "whisper"):
         super().__init__()
@@ -77,15 +84,18 @@ class TranscriptionWorker(QThread):
 
     def run(self):
         try:
+            def _on_progress(percent: int, message: str):
+                self.progress.emit(int(percent), str(message))
+
             engine = EngineRuntime()
             if self.engine_name == "capcut":
-                segments = engine.transcribe_audio_capcut(self.audio_path, language=self.language)
+                segments = engine.transcribe_audio_capcut(self.audio_path, language=self.language, on_progress=_on_progress)
             elif self.engine_name == "sensevoice":
                 from runtime_paths import models_path
                 sensevoice_model_dir = models_path("sensevoice")
                 segments = engine.transcribe_audio_sensevoice(self.audio_path, sensevoice_model_dir, language=self.language)
             else:
-                segments = engine.transcribe_audio(self.audio_path, self.model_path, language=self.language)
+                segments = engine.transcribe_audio(self.audio_path, self.model_path, language=self.language, on_progress=_on_progress)
             self.finished.emit(segments if segments else [], "")
         except Exception as exc:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
@@ -166,6 +176,8 @@ class AlternateRangeTranscriptionWorker(QThread):
 
 class TranslationWorker(QThread):
     finished = Signal(str, str, str)
+    batch_ready = Signal(int, list)
+    progress = Signal(int, int)
 
     def __init__(
         self,
@@ -208,6 +220,19 @@ class TranslationWorker(QThread):
                     translate_kwargs["polish_batch_size"] = self.batch_size
                 if self.custom_prompt:
                     translate_kwargs["custom_system_prompt"] = self.custom_prompt
+
+                total_cues = len(self.segments) if self.segments else 0
+                if not total_cues and self.srt_text:
+                    from translation.srt_utils import parse_srt
+                    total_cues = len(parse_srt(self.srt_text))
+
+                def on_batch(start_idx, batch_segments):
+                    self.batch_ready.emit(int(start_idx), list(batch_segments or []))
+                    if total_cues > 0:
+                        completed = min(total_cues, int(start_idx) + len(batch_segments or []))
+                        self.progress.emit(completed, total_cues)
+
+                translate_kwargs["batch_callback"] = on_batch
 
                 if self.segments:
                     result = orch.translate_segments(
@@ -319,6 +344,8 @@ class OcrTranslatorTranslationWorker(QThread):
 
 class RewriteTranslationWorker(QThread):
     finished = Signal(str, str)
+    batch_ready = Signal(int, list)
+    progress = Signal(int, int)
 
     def __init__(self, source_segments, translated_segments, src_lang, style_instruction=""):
         super().__init__()
@@ -337,11 +364,21 @@ class RewriteTranslationWorker(QThread):
                 print(f"[Rewrite] Using AI: {orch._describe_ai_provider(provider_type)}")
             except Exception:
                 pass
+
+            total_cues = len(self.source_segments) if self.source_segments else 0
+
+            def on_batch(start_idx, batch_segments):
+                self.batch_ready.emit(int(start_idx), list(batch_segments or []))
+                if total_cues > 0:
+                    completed = min(total_cues, int(start_idx) + len(batch_segments or []))
+                    self.progress.emit(completed, total_cues)
+
             rewritten_segments = engine.rewrite_translation_segments(
                 self.source_segments,
                 self.translated_segments,
                 src_lang=self.src_lang,
                 style_instruction=self.style_instruction,
+                batch_callback=on_batch,
             )
             from translation.srt_utils import to_srt
 
@@ -439,15 +476,21 @@ class ResourceDownloadWorker(QThread):
 class TimelineWaveformWorker(QThread):
     finished = Signal(object, object, float, str)
 
-    def __init__(self, request_signature, video_path, audio_path, temp_audio_path):
+    def __init__(self, request_signature, video_path, audio_path, temp_audio_path, duration_s: float = 0.0):
         super().__init__()
         self.request_signature = request_signature
         self.video_path = str(video_path or "").strip()
         self.audio_path = str(audio_path or "").strip()
         self.temp_audio_path = str(temp_audio_path or "").strip()
+        self.duration_s = max(0.0, float(duration_s or 0.0))
 
     def run(self):
         try:
+            max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
+            if self.duration_s > max_visual_dur:
+                self.finished.emit(self.request_signature, [], self.duration_s, "")
+                return
+
             audio_path = self.audio_path if self.audio_path and os.path.exists(self.audio_path) else ""
             if not audio_path and self.video_path and os.path.exists(self.video_path):
                 temp_audio = self.temp_audio_path
@@ -463,6 +506,8 @@ class TimelineWaveformWorker(QThread):
                             "-i",
                             self.video_path,
                             "-vn",
+                            "-af",
+                            "aresample=async=1",
                             "-acodec",
                             "pcm_s16le",
                             "-ar",
@@ -472,7 +517,7 @@ class TimelineWaveformWorker(QThread):
                             temp_audio,
                         ],
                         check=True,
-                        timeout=60,
+                        timeout=300,
                         **subprocess_hidden_kwargs(),
                     )
                 if temp_audio and os.path.exists(temp_audio):
@@ -489,8 +534,12 @@ class TimelineWaveformWorker(QThread):
             import numpy as np
 
             audio = AudioSegment.from_file(audio_path).set_channels(1)
-            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
             duration_s = max(0.0, len(audio) / 1000.0)
+            if duration_s > max_visual_dur:
+                self.finished.emit(self.request_signature, [], duration_s, "")
+                return
+
+            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
 
             if not samples.size:
                 self.finished.emit(self.request_signature, [], duration_s, "")
@@ -541,6 +590,11 @@ class TimelineThumbnailWorker(QThread):
 
     def run(self):
         try:
+            max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
+            if self.duration_s > max_visual_dur:
+                self.finished.emit(self.request_signature, [], "")
+                return
+
             if not self.video_path or not os.path.exists(self.video_path) or self.duration_s <= 0.0:
                 self.finished.emit(self.request_signature, [], "")
                 return
@@ -633,6 +687,7 @@ class TimelineThumbnailWorker(QThread):
 class PrepareWorkflowWorker(QThread):
     finished = Signal(str, str)
     step_started = Signal(str)
+    progress = Signal(int, str)
 
     def __init__(
         self,
@@ -741,7 +796,10 @@ class PrepareWorkflowWorker(QThread):
                     skip_translation=self.skip_translation,
                     prefetch_voice_name=self.prefetch_voice_name,
                     prefetch_voice_speed=self.prefetch_voice_speed,
-                    step_callback=self.step_started.emit,
+                    step_callback=lambda s, m="", p=None: (
+                        self.step_started.emit(str(s)),
+                        self.progress.emit(int(p), str(m)) if p is not None else None
+                    ),
                 )
                 state_path = os.path.join(project_state.project_root, "project.json")
                 self.finished.emit(state_path, "")
@@ -909,7 +967,7 @@ class FinalExportWorker(QThread):
                         "project_temp_dir": self.project_temp_dir,
                         "video_quality": self.video_quality,
                     },
-                    timeout=3600,
+                    timeout=18000,
                 )
                 self.progress.emit(100, "Export complete.")
                 self.finished.emit(str(response.get("output_path", "")), "")

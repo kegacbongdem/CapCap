@@ -47,20 +47,26 @@ class TimeWarpService:
 
         target_seg = segments[segment_index]
         orig_end = float(target_seg.get("end", 0.0))
-        warp_time = orig_end
         delta = round(float(added_duration), 3)
         if delta <= 0:
             raise ValueError(f"Added duration must be positive, got {delta}")
 
+        prev_ext = float(target_seg.get("extended_duration", 0.0) or 0.0)
+        total_ext = round(prev_ext + delta, 3)
+        prior_shift = sum(
+            float(segments[i].get("extended_duration", 0.0) or 0.0)
+            for i in range(segment_index)
+        ) + prev_ext
+        warp_time = round(max(0.0, orig_end - prior_shift), 3)
+
         warp = TimeWarpService.create_time_warp(
             time=warp_time,
-            duration=delta,
+            duration=total_ext,
             warp_type="freeze",
             segment_index=segment_index,
         )
 
-        prev_ext = float(target_seg.get("extended_duration", 0.0) or 0.0)
-        target_seg["extended_duration"] = round(prev_ext + delta, 3)
+        target_seg["extended_duration"] = total_ext
         target_seg["end"] = round(float(target_seg["end"]) + delta, 3)
         target_seg["time_warp_id"] = warp["id"]
 
@@ -69,6 +75,11 @@ class TimeWarpService:
             segments[i]["end"] = round(float(segments[i]["end"]) + delta, 3)
             if "_audio_end" in segments[i] and segments[i]["_audio_end"] is not None:
                 segments[i]["_audio_end"] = round(float(segments[i]["_audio_end"]) + delta, 3)
+            if isinstance(segments[i].get("metadata"), dict) and "_audio_end" in segments[i]["metadata"]:
+                try:
+                    segments[i]["metadata"]["_audio_end"] = round(float(segments[i]["metadata"]["_audio_end"]) + delta, 3)
+                except (TypeError, ValueError):
+                    pass
 
         if translated_segments and 0 <= segment_index < len(translated_segments):
             t_seg = translated_segments[segment_index]
@@ -82,6 +93,11 @@ class TimeWarpService:
                 translated_segments[i]["end"] = round(float(translated_segments[i]["end"]) + delta, 3)
                 if "_audio_end" in translated_segments[i] and translated_segments[i]["_audio_end"] is not None:
                     translated_segments[i]["_audio_end"] = round(float(translated_segments[i]["_audio_end"]) + delta, 3)
+                if isinstance(translated_segments[i].get("metadata"), dict) and "_audio_end" in translated_segments[i]["metadata"]:
+                    try:
+                        translated_segments[i]["metadata"]["_audio_end"] = round(float(translated_segments[i]["metadata"]["_audio_end"]) + delta, 3)
+                    except (TypeError, ValueError):
+                        pass
 
         return warp, segments, translated_segments
 
@@ -104,21 +120,37 @@ class TimeWarpService:
         if segment_index < 0 or segment_index >= len(segments):
             raise IndexError(f"Segment index {segment_index} out of range [0, {len(segments)})")
 
-        target_seg = segments[segment_index]
+        target_seg = segments[segment_index] if (segments and 0 <= segment_index < len(segments)) else {}
         delta = float(target_seg.get("extended_duration", 0.0) or 0.0)
+        if delta <= 0 and translated_segments and 0 <= segment_index < len(translated_segments):
+            delta = float(translated_segments[segment_index].get("extended_duration", 0.0) or 0.0)
+        if delta <= 0:
+            for w in (warps or []):
+                if w.get("segment_index") == segment_index:
+                    delta = float(w.get("duration", 0.0) or 0.0)
+                    break
         if delta <= 0:
             return 0.0, segments, translated_segments, warps or []
 
         warp_id = target_seg.get("time_warp_id", "")
-        target_seg["end"] = round(float(target_seg["end"]) - delta, 3)
-        target_seg["extended_duration"] = 0.0
-        target_seg.pop("time_warp_id", None)
+        if not warp_id and translated_segments and 0 <= segment_index < len(translated_segments):
+            warp_id = translated_segments[segment_index].get("time_warp_id", "")
 
-        for i in range(segment_index + 1, len(segments)):
-            segments[i]["start"] = round(max(0.0, float(segments[i]["start"]) - delta), 3)
-            segments[i]["end"] = round(max(0.0, float(segments[i]["end"]) - delta), 3)
-            if "_audio_end" in segments[i] and segments[i]["_audio_end"] is not None:
-                segments[i]["_audio_end"] = round(max(0.0, float(segments[i]["_audio_end"]) - delta), 3)
+        if segments and 0 <= segment_index < len(segments):
+            segments[segment_index]["end"] = round(float(segments[segment_index]["end"]) - delta, 3)
+            segments[segment_index]["extended_duration"] = 0.0
+            segments[segment_index].pop("time_warp_id", None)
+
+            for i in range(segment_index + 1, len(segments)):
+                segments[i]["start"] = round(max(0.0, float(segments[i]["start"]) - delta), 3)
+                segments[i]["end"] = round(max(0.0, float(segments[i]["end"]) - delta), 3)
+                if "_audio_end" in segments[i] and segments[i]["_audio_end"] is not None:
+                    segments[i]["_audio_end"] = round(max(0.0, float(segments[i]["_audio_end"]) - delta), 3)
+                if isinstance(segments[i].get("metadata"), dict) and "_audio_end" in segments[i]["metadata"]:
+                    try:
+                        segments[i]["metadata"]["_audio_end"] = round(max(0.0, float(segments[i]["metadata"]["_audio_end"]) - delta), 3)
+                    except (TypeError, ValueError):
+                        pass
 
         if translated_segments and 0 <= segment_index < len(translated_segments):
             t_seg = translated_segments[segment_index]
@@ -131,10 +163,15 @@ class TimeWarpService:
                 translated_segments[i]["end"] = round(max(0.0, float(translated_segments[i]["end"]) - delta), 3)
                 if "_audio_end" in translated_segments[i] and translated_segments[i]["_audio_end"] is not None:
                     translated_segments[i]["_audio_end"] = round(max(0.0, float(translated_segments[i]["_audio_end"]) - delta), 3)
+                if isinstance(translated_segments[i].get("metadata"), dict) and "_audio_end" in translated_segments[i]["metadata"]:
+                    try:
+                        translated_segments[i]["metadata"]["_audio_end"] = round(max(0.0, float(translated_segments[i]["metadata"]["_audio_end"]) - delta), 3)
+                    except (TypeError, ValueError):
+                        pass
 
         updated_warps = [
             w for w in (warps or [])
-            if w.get("id") != warp_id and w.get("segment_index") != segment_index
+            if (not warp_id or w.get("id") != warp_id) and w.get("segment_index") != segment_index
         ]
 
         return delta, segments, translated_segments, updated_warps

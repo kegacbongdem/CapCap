@@ -10,6 +10,6 @@ class OcrAdapter:
     def load_model(self, model_path: str = ""):
         return _load_ocr_engine()
 
-    def transcribe_with_model(self, model, video_path: str, *, language: str = "auto", task: str = "transcribe", region: str = "bottom"):
+    def transcribe_with_model(self, model, video_path: str, *, language: str = "auto", task: str = "transcribe", region: str = "bottom", **kwargs):
         with GPUStageScheduler.stage("ocr"):
-            return transcribe_video_ocr(video_path, region=region, ocr_engine=model)
+            return transcribe_video_ocr(video_path, region=region, ocr_engine=model, **kwargs)

@@ -48,6 +48,16 @@ class Segment:
                 metadata["_audio_end"] = float(raw_ae)
             except (TypeError, ValueError):
                 pass
+        raw_ext = data.get("extended_duration")
+        if raw_ext is not None and "extended_duration" not in metadata:
+            try:
+                metadata["extended_duration"] = float(raw_ext)
+            except (TypeError, ValueError):
+                pass
+        if "time_warp_id" in data and "time_warp_id" not in metadata:
+            metadata["time_warp_id"] = str(data.get("time_warp_id") or "")
+        if "_wav_path" in data and "_wav_path" not in metadata:
+            metadata["_wav_path"] = str(data.get("_wav_path") or "")
         return cls(
             id=int(segment_id or 0),
             start=float(data.get("start", 0.0) or 0.0),
@@ -69,6 +79,14 @@ class Segment:
         speaker = str(data.get("speaker", "") or "").strip()
         if speaker:
             metadata["speaker"] = speaker
+        raw_ext = data.get("extended_duration")
+        if raw_ext is not None:
+            try:
+                metadata["extended_duration"] = float(raw_ext)
+            except (TypeError, ValueError):
+                pass
+        if data.get("time_warp_id"):
+            metadata["time_warp_id"] = str(data.get("time_warp_id"))
         return cls(
             id=segment_id,
             start=float(data.get("start", 0.0) or 0.0),
@@ -140,6 +158,16 @@ class Segment:
                 payload["_audio_end"] = float(raw_ae)
             except (TypeError, ValueError):
                 pass
+        raw_ext = self.metadata.get("extended_duration")
+        if raw_ext is not None:
+            try:
+                payload["extended_duration"] = float(raw_ext)
+            except (TypeError, ValueError):
+                pass
+        if self.metadata.get("time_warp_id"):
+            payload["time_warp_id"] = str(self.metadata.get("time_warp_id"))
+        if self.metadata.get("_wav_path"):
+            payload["_wav_path"] = str(self.metadata.get("_wav_path"))
         return payload
 
     def to_original_subtitle_dict(self) -> dict[str, Any]:
@@ -153,6 +181,14 @@ class Segment:
             payload["words"] = list(self.metadata.get("words") or [])
         if self.metadata.get("speaker"):
             payload["speaker"] = str(self.metadata.get("speaker"))
+        raw_ext = self.metadata.get("extended_duration")
+        if raw_ext is not None:
+            try:
+                payload["extended_duration"] = float(raw_ext)
+            except (TypeError, ValueError):
+                pass
+        if self.metadata.get("time_warp_id"):
+            payload["time_warp_id"] = str(self.metadata.get("time_warp_id"))
         return payload
 
 

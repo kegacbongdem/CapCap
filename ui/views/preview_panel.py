@@ -166,14 +166,23 @@ class OcrRegionOverlay(QWidget):
         super().hideEvent(event)
 
     def eventFilter(self, obj, event):
-        if obj is self._main_window:
-            if event.type() == QtCore.QEvent.WindowDeactivate:
-                self.hide()
-            elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
-                if self._is_requested_visible():
-                    self.sync_to_view()
-                else:
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if self._main_window is not None and obj is self._main_window:
+                if event.type() == QtCore.QEvent.WindowDeactivate:
                     self.hide()
+                elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
+                    if self._is_requested_visible():
+                        self.sync_to_view()
+                    else:
+                        self.hide()
+        except (RuntimeError, ReferenceError):
+            return False
         return False
 
     def sync_to_view(self):
@@ -418,12 +427,21 @@ class OcrTranslatorOverlay(QWidget):
         self._set_rect(self._selection_rect(), emit=False)
 
     def eventFilter(self, obj, event):
-        if obj is self._main_window:
-            if event.type() == QtCore.QEvent.WindowDeactivate:
-                self.hide()
-            elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
-                if bool(getattr(self._main_window, "_ocr_translator_active", False)):
-                    self.sync_to_view()
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:
+            pass
+        try:
+            if self._main_window is not None and obj is self._main_window:
+                if event.type() == QtCore.QEvent.WindowDeactivate:
+                    self.hide()
+                elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
+                    if bool(getattr(self._main_window, "_ocr_translator_active", False)):
+                        self.sync_to_view()
+        except (RuntimeError, ReferenceError):
+            return False
         return False
 
     def sync_to_view(self):
@@ -1008,10 +1026,7 @@ def build_preview_panel(gui):
     timeline_copy_layout.setSpacing(1)
     timeline_title = QLabel("Timeline")
     timeline_title.setObjectName("statusHeadline")
-    timeline_meta = QLabel("Editor-first layout with dedicated video, audio, and subtitle lanes.")
-    timeline_meta.setObjectName("helperLabel")
     timeline_copy_layout.addWidget(timeline_title)
-    timeline_copy_layout.addWidget(timeline_meta)
     timeline_header_layout.addLayout(timeline_copy_layout, 0)
     gui.timeline_undo_btn = QPushButton("Undo")
     gui.timeline_undo_btn.setFixedWidth(58)
@@ -1083,8 +1098,15 @@ def build_preview_panel(gui):
         )
     gui.timeline.selectionModeChanged.connect(_on_selection_mode_changed)
     gui.timeline_layers_btn = QPushButton("Layers")
-    gui.timeline_layers_btn.setFixedWidth(76)
+    gui.timeline_layers_btn.setFixedWidth(98)
     gui.timeline_layers_btn.setToolTip("Show or hide layers on the timeline only")
+    gui.timeline_layers_btn.setStyleSheet(
+        "QPushButton { background: #213248; color: #ffffff; border: 1px solid #304b69; "
+        "border-radius: 10px; padding: 8px 10px; font-weight: bold; font-size: 11px; }"
+        "QPushButton:hover { background: #2d4665; border-color: #4575a8; }"
+        "QPushButton:pressed { background: #182a3d; border-color: #6ee7d6; }"
+        "QPushButton:disabled { background: #182636; color: #8ea3bb; border-color: #29405d; }"
+    )
     gui.timeline_layers_menu = QMenu(gui.timeline_layers_btn)
     gui.timeline_layers_menu.setStyleSheet(
         "QMenu { background: #142030; color: #dbe5f3; border: 1px solid #2f4868; padding: 5px; }"
@@ -1099,20 +1121,38 @@ def build_preview_panel(gui):
         lambda: gui.populate_timeline_layers_menu() if hasattr(gui, "populate_timeline_layers_menu") else None
     )
     gui.timeline_layers_btn.setMenu(gui.timeline_layers_menu)
+    zoom_btn_style = (
+        "QPushButton { background: #213248; color: #ffffff; border: 1px solid #304b69; "
+        "border-radius: 8px; padding: 5px 6px; font-weight: bold; font-size: 11px; }"
+        "QPushButton:hover { background: #2d4665; border-color: #4575a8; }"
+        "QPushButton:pressed { background: #182a3d; border-color: #6ee7d6; }"
+        "QPushButton:disabled { background: #182636; color: #8ea3bb; border-color: #29405d; }"
+    )
     gui.timeline_zoom_out_btn = QPushButton("-")
-    gui.timeline_zoom_out_btn.setFixedWidth(34)
+    gui.timeline_zoom_out_btn.setFixedWidth(30)
+    gui.timeline_zoom_out_btn.setToolTip("Zoom Out Timeline")
+    gui.timeline_zoom_out_btn.setStyleSheet(zoom_btn_style)
+
     gui.timeline_zoom_label = QLabel(f"{gui.timeline.zoom_percent()}%")
     gui.timeline_zoom_label.setObjectName("helperLabel")
     gui.timeline_zoom_label.setAlignment(Qt.AlignCenter)
-    gui.timeline_zoom_label.setFixedWidth(48)
+    gui.timeline_zoom_label.setFixedWidth(44)
     gui.timeline_zoom_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    gui.timeline_zoom_label.setStyleSheet("color: #a0aec0; font-size: 11px; font-weight: 600;")
+
     gui.timeline_zoom_in_btn = QPushButton("+")
-    gui.timeline_zoom_in_btn.setFixedWidth(34)
+    gui.timeline_zoom_in_btn.setFixedWidth(30)
+    gui.timeline_zoom_in_btn.setToolTip("Zoom In Timeline")
+    gui.timeline_zoom_in_btn.setStyleSheet(zoom_btn_style)
+
     gui.timeline_zoom_reset_btn = QPushButton("Fit")
-    gui.timeline_zoom_reset_btn.setFixedWidth(52)
+    gui.timeline_zoom_reset_btn.setFixedWidth(46)
+    gui.timeline_zoom_reset_btn.setToolTip("Fit Timeline to Window / Toggle 100%")
+    gui.timeline_zoom_reset_btn.setStyleSheet(zoom_btn_style)
+
     gui.timeline_zoom_out_btn.clicked.connect(gui.timeline.zoom_out)
     gui.timeline_zoom_in_btn.clicked.connect(gui.timeline.zoom_in)
-    gui.timeline_zoom_reset_btn.clicked.connect(gui.timeline.reset_zoom)
+    gui.timeline_zoom_reset_btn.clicked.connect(gui.timeline.toggle_fit_or_reset_zoom)
 
     edit_group = QHBoxLayout()
     edit_group.setSpacing(4)
@@ -1130,7 +1170,7 @@ def build_preview_panel(gui):
     edit_group.addWidget(gui.timeline_layers_btn)
 
     gui.add_layer_btn = QPushButton("+ Layer")
-    gui.add_layer_btn.setFixedWidth(82)
+    gui.add_layer_btn.setFixedWidth(98)
     gui.add_layer_btn.setToolTip("Add a new layer")
     # Keep this menu button visually consistent with the dark timeline toolbar.
     # QMenu buttons can otherwise fall back to the platform's light palette.
@@ -1159,6 +1199,11 @@ def build_preview_panel(gui):
     gui.add_layer_btn.setMenu(gui._layer_menu)
     edit_group.addWidget(_make_sep())
     edit_group.addWidget(gui.add_layer_btn)
+    edit_group.addWidget(_make_sep())
+    edit_group.addWidget(gui.timeline_zoom_out_btn)
+    edit_group.addWidget(gui.timeline_zoom_label)
+    edit_group.addWidget(gui.timeline_zoom_in_btn)
+    edit_group.addWidget(gui.timeline_zoom_reset_btn)
 
     timeline_header_layout.addStretch(1)
     timeline_header_layout.addLayout(edit_group)

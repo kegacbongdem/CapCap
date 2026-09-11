@@ -7,7 +7,7 @@ import shutil
 import hashlib
 import re
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -100,15 +101,8 @@ def _ffmpeg_path():
 
 def _get_video_duration(video_path: str) -> float:
     try:
-        import subprocess
-        ffprobe = _ffmpeg_path().replace("ffmpeg.exe", "ffprobe.exe")
-        result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", video_path],
-            capture_output=True, text=True, timeout=30, **subprocess_hidden_kwargs(),
-        )
-        if result.returncode == 0:
-            return float(result.stdout.strip() or 0)
+        from app.video_processor import get_video_duration
+        return float(get_video_duration(video_path) or 0.0)
     except Exception:
         pass
     return 0.0
@@ -204,7 +198,7 @@ def _extract_waveform_audio(video_path: str, temp_root: str) -> str:
     try:
         subprocess.run(
             [_ffmpeg_path(), "-y", "-loglevel", "error", "-i", video_path,
-             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path],
+             "-vn", "-af", "aresample=async=1", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path],
             check=True, timeout=60, **subprocess_hidden_kwargs(),
         )
         print(f"[Launcher] Waveform audio extracted: {audio_path}")
@@ -214,7 +208,7 @@ def _extract_waveform_audio(video_path: str, temp_root: str) -> str:
     return audio_path if os.path.exists(audio_path) else ""
 
 
-def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
+def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=None) -> None:
     """Build the editor's static V1/A1 cache before opening the editor."""
     try:
         import numpy as np
@@ -229,6 +223,9 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
         manifest_path = os.path.join(cache_dir, f"{digest}.json")
         os.makedirs(cache_dir, exist_ok=True)
 
+        if callable(progress_cb):
+            progress_cb("Đang kiểm tra bộ đệm dự án...", 20)
+
         try:
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 existing = json.load(handle)
@@ -242,11 +239,37 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
                 and all(os.path.exists(path) for _time, path in existing.get("thumbnails", []))
             ):
                 print("[Launcher] Timeline visuals loaded from cache")
+                if callable(progress_cb):
+                    progress_cb("Bộ đệm dự án đã sẵn sàng!", 100)
                 return
         except (OSError, ValueError, TypeError):
             pass
 
         duration_s = _get_video_duration(source)
+        max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
+        if duration_s > max_visual_dur:
+            print(f"[Launcher] Video duration ({duration_s:.1f}s > {max_visual_dur:.0f}s): skipping precomputed visual cache.")
+            manifest = {
+                "visual_version": 4,
+                "source": source,
+                "size": int(stat.st_size),
+                "mtime_ns": int(getattr(stat, "st_mtime_ns", 0)),
+                "duration_s": duration_s,
+                "waveform": [],
+                "thumbnails": [],
+            }
+            try:
+                with open(manifest_path, "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle, indent=2)
+            except OSError:
+                pass
+            if callable(progress_cb):
+                progress_cb("Sẵn sàng mở dự án!", 100)
+            return
+
+        if callable(progress_cb):
+            progress_cb("Đang trích xuất waveform và khung hình timeline...", 45)
+
         if duration_s <= 60.0:
             interval_s = max(2.0, duration_s / 12.0)
         elif duration_s <= 300.0:
@@ -325,8 +348,30 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
                 "duration_s": float(duration_s), "waveform": waveform, "thumbnails": thumbnails,
             }, handle)
         print(f"[Launcher] Timeline visuals prepared: waveform={len(waveform)}, thumbnails={len(thumbnails)}")
+        if callable(progress_cb):
+            progress_cb("Sẵn sàng mở dự án!", 100)
     except Exception as exc:
         print(f"[Launcher] Timeline visual preparation skipped: {exc}")
+
+
+class VisualCacheWorker(QThread):
+    progress = Signal(str, int)
+    finished_prep = Signal()
+
+    def __init__(self, target_video: str, temp_root: str, parent=None):
+        super().__init__(parent)
+        self.target_video = str(target_video or "")
+        self.temp_root = str(temp_root or "")
+
+    def run(self):
+        def _on_progress(status, pct):
+            self.progress.emit(str(status), int(pct))
+        try:
+            _prepare_timeline_visual_cache(self.target_video, self.temp_root, progress_cb=_on_progress)
+        except Exception as exc:
+            print(f"[Launcher] Visual cache preparation error: {exc}")
+        self.progress.emit("Sẵn sàng mở dự án!", 100)
+        self.finished_prep.emit()
 
 
 class LauncherWindow(QDialog):
@@ -573,10 +618,10 @@ class LauncherWindow(QDialog):
         self.section_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #8ad7ff;")
         root.addWidget(self.section_label)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         self.grid_widget = QWidget()
         self.grid = QGridLayout(self.grid_widget)
@@ -584,8 +629,8 @@ class LauncherWindow(QDialog):
         self.grid.setSpacing(12)
         self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
-        scroll.setWidget(self.grid_widget)
-        root.addWidget(scroll, 1)
+        self.scroll.setWidget(self.grid_widget)
+        root.addWidget(self.scroll, 1)
 
         self.empty_label = QLabel("No recent projects. Click \"+ New Project\" to start.")
         self.empty_label.setAlignment(Qt.AlignCenter)
@@ -593,11 +638,100 @@ class LauncherWindow(QDialog):
         self.empty_label.hide()
         root.addWidget(self.empty_label)
 
-        self.loading_label = QLabel("Preparing video...")
-        self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.setStyleSheet("color: #4ecdc4; font-size: 16px; font-weight: 700; padding: 20px;")
-        self.loading_label.hide()
-        root.addWidget(self.loading_label)
+        # Smooth Loading Overlay Panel
+        self.loading_panel = QFrame(self)
+        self.loading_panel.setObjectName("loadingPanel")
+        self.loading_panel.setMinimumWidth(720)
+        self.loading_panel.setMaximumWidth(900)
+        self.loading_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.loading_panel.setStyleSheet("""
+            #loadingPanel {
+                background-color: #0c1524;
+                border: 1px solid #1c334d;
+                border-radius: 16px;
+            }
+        """)
+        panel_layout = QVBoxLayout(self.loading_panel)
+        panel_layout.setContentsMargins(36, 32, 36, 32)
+        panel_layout.setSpacing(16)
+
+        self.loading_title = QLabel("Opening Project...")
+        self.loading_title.setStyleSheet("font-size: 20px; font-weight: 700; color: #ffffff;")
+        panel_layout.addWidget(self.loading_title)
+
+        self.loading_file_label = QLabel("")
+        self.loading_file_label.setStyleSheet("font-size: 14px; color: #8ad7ff; font-weight: 600;")
+        self.loading_file_label.setWordWrap(True)
+        panel_layout.addWidget(self.loading_file_label)
+
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setFixedHeight(10)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setRange(0, 100)
+        self.loading_bar.setValue(10)
+        self.loading_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #060a12;
+                border: 1px solid #162638;
+                border-radius: 5px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4ecdc4, stop:1 #6ee7d6);
+                border-radius: 4px;
+            }
+        """)
+        panel_layout.addWidget(self.loading_bar)
+
+        self.loading_status_label = QLabel("Preparing workspace...")
+        self.loading_status_label.setStyleSheet("font-size: 13px; color: #6ee7d6; font-weight: 600;")
+        panel_layout.addWidget(self.loading_status_label)
+
+        self.loading_container = QWidget(self)
+        loading_center_layout = QVBoxLayout(self.loading_container)
+        loading_center_layout.setContentsMargins(24, 0, 24, 0)
+        loading_center_layout.addStretch(1)
+        loading_center_layout.addWidget(self.loading_panel, 0, Qt.AlignCenter)
+        loading_center_layout.addStretch(1)
+        self.loading_container.hide()
+        root.addWidget(self.loading_container, 1)
+
+    def set_project_loader(self, loader):
+        self._project_loader = loader
+
+    def show_loading(self, video_path: str):
+        if hasattr(self, "scroll"):
+            self.scroll.hide()
+        if hasattr(self, "section_label"):
+            self.section_label.hide()
+        if hasattr(self, "empty_label"):
+            self.empty_label.hide()
+        for btn in (
+            getattr(self, "new_btn", None),
+            getattr(self, "split_btn", None),
+            getattr(self, "resource_btn", None),
+            getattr(self, "clean_video_btn", None),
+            getattr(self, "open_project_btn", None),
+            getattr(self, "about_btn", None),
+            getattr(self, "cpu_btn", None),
+            getattr(self, "gpu_btn", None),
+        ):
+            if btn is not None:
+                btn.setEnabled(False)
+        self.loading_file_label.setText(os.path.basename(video_path))
+        self.loading_bar.setValue(10)
+        self.loading_status_label.setText("Preparing environment and hardware...")
+        self.loading_container.show()
+        self.loading_panel.show()
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+    def update_loading_progress(self, status: str, value: int):
+        if hasattr(self, "loading_status_label"):
+            self.loading_status_label.setText(status)
+        if hasattr(self, "loading_bar"):
+            self.loading_bar.setValue(max(0, min(100, int(value))))
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
 
     def accept(self):
         if not self.selected_video or not os.path.exists(self.selected_video):
@@ -628,60 +762,45 @@ class LauncherWindow(QDialog):
         except Exception as exc:
             print(f"[Launcher] Resource validation failed: {exc}")
 
-        duration = _get_video_duration(self.selected_video)
-        MAX_DURATION = 7200
-        if duration > MAX_DURATION:
-            h = int(duration // 3600)
-            m = int((duration % 3600) // 60)
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.warning(
-                self, "Video Too Long",
-                f"This video is {h}h {m}m long.\nCapCap works best with videos under 2 hours.\n\n"
-                "Use 'Split Video' to cut it into 2-hour segments first.",
-                QMessageBox.Ok,
-            )
-            reply.setStyleSheet(MSG_STYLE)
-            return
-
         self._set_selected_device(self.selected_device)
-        self.loading_label.show()
-        self.loading_label.setText("Preparing thumbnails and waveform...\nLarge videos may continue preparing in the editor.")
-        self.new_btn.setEnabled(False)
-        self._extraction_done = False
-        self._preprocess_started_at = time.monotonic()
-        self._preprocess_continued_in_background = False
-        import threading
-        def _preprocess():
-            from runtime_paths import workspace_root
-            temp_root = os.path.join(workspace_root(), "temp")
-            _prepare_timeline_visual_cache(self.selected_video, temp_root)
-            self._extraction_done = True
-        threading.Thread(target=_preprocess, daemon=True).start()
-        self._loader_timer = QTimer()
-        self._loader_timer.timeout.connect(self._on_loader_tick)
-        self._loader_timer.start(200)
+        self._save_device_env()
+        self.show_loading(self.selected_video)
 
-    def _on_loader_tick(self):
-        if not getattr(self, "_extraction_done", False):
-            # Do not hold the launcher hostage while a long video is being
-            # sampled.  The cache worker is filesystem-only and can safely
-            # finish after the editor opens; the editor has its own cache
-            # consumers/fallback workers for any assets not ready yet.
-            started = float(getattr(self, "_preprocess_started_at", 0.0) or 0.0)
-            if started and time.monotonic() - started >= 12.0:
-                self._preprocess_continued_in_background = True
-                print("[Launcher] Timeline visual cache is still preparing; continuing in background.")
-                self._loader_timer.stop()
-                self._finish_accept()
-            return
-        self._loader_timer.stop()
+        from runtime_paths import workspace_root
+        temp_root = os.path.join(workspace_root(), "temp")
+
+        self._cache_worker = VisualCacheWorker(self.selected_video, temp_root, self)
+        self._cache_worker.progress.connect(self.update_loading_progress)
+
+        self._prep_timeout_timer = QTimer(self)
+        self._prep_timeout_timer.setSingleShot(True)
+        self._prep_timeout_timer.timeout.connect(self._on_prep_timeout)
+        self._prep_timeout_timer.start(15000)
+
+        self._cache_worker.finished_prep.connect(self._on_visual_cache_done)
+        self._cache_worker.start()
+
+    def _on_visual_cache_done(self):
+        if hasattr(self, "_prep_timeout_timer"):
+            self._prep_timeout_timer.stop()
+        QTimer.singleShot(150, self._finish_accept)
+
+    def _on_prep_timeout(self):
+        print("[Launcher] Visual cache preparation timed out; continuing to editor.")
         self._finish_accept()
 
     def _finish_accept(self):
-        self.loading_label.hide()
-        self.new_btn.setEnabled(True)
-        self._save_device_env()
         super().accept()
+
+    def closeEvent(self, event):
+        worker = getattr(self, "_cache_worker", None)
+        if worker is not None and worker.isRunning():
+            try:
+                worker.terminate()
+                worker.wait(500)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     @staticmethod
     def _save_device_env():
@@ -1078,9 +1197,9 @@ class LauncherWindow(QDialog):
             return
 
         duration = _get_video_duration(path)
-        if duration <= 7200:
-            mb = QMessageBox(QMessageBox.Information, "No Split Needed",
-                "This video is under 2 hours. You can open it directly with '+ New Project'.",
+        if duration <= 0:
+            mb = QMessageBox(QMessageBox.Warning, "Invalid Video",
+                "Could not determine video duration.",
                 QMessageBox.Ok, self)
             mb.setStyleSheet(MSG_STYLE)
             mb.exec()
@@ -1208,9 +1327,20 @@ def _thumbnail_name(video_path: str) -> str:
     return f"{h}.jpg"
 
 
-def show_launcher(settings_or_none) -> str:
+def show_launcher(settings_or_none, project_loader=None):
     """Show launcher, return selected video path or empty string."""
     w = LauncherWindow()
-    if w.exec() == QDialog.Accepted:
-        return w.selected_video
+    result = w.exec()
+    selected_video = str(getattr(w, "selected_video", "") or "")
+    try:
+        w.close()
+        w.deleteLater()
+    except Exception:
+        pass
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QApplication.processEvents()
+    if result == QDialog.Accepted:
+        return selected_video
     return ""

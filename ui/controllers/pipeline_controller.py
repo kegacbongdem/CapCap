@@ -111,7 +111,7 @@ class PipelineController:
         self._stop_prepare_status_polling()
         self.prepare_status_phase = ""
         timer = QTimer(self.gui)
-        timer.setInterval(800)
+        timer.setInterval(400)
         timer.timeout.connect(self._poll_prepare_status)
         self.prepare_status_timer = timer
         timer.start()
@@ -139,9 +139,13 @@ class PipelineController:
                 data = json.loads(response.read().decode("utf-8", errors="replace"))
             phase = str(data.get("phase", "") or "").strip()
             message = str(data.get("message", "") or "").strip()
+            progress = data.get("progress", None)
+            detail = str(data.get("detail", "") or "").strip()
             if phase and phase != self.prepare_status_phase:
                 self.prepare_status_phase = phase
                 self._on_prepare_step_started(phase, message)
+            if progress is not None or detail:
+                self._on_prepare_step_progress(phase, progress, message, detail)
         except Exception:
             pass
 
@@ -225,6 +229,22 @@ class PipelineController:
                         self.gui.log(text)
                     else:
                         self.gui.log(f"[Worker] {text}")
+                    if any(tag in text for tag in (
+                        "[ASR Progress]",
+                        "[OCR Progress]",
+                        "[SenseVoice Progress]",
+                        "[CapCut STT Progress]",
+                        "[Vocal Separation Progress]",
+                    )):
+                        import re
+                        m = re.search(r'(\d+)%', text)
+                        if m:
+                            try:
+                                parsed_pct = int(m.group(1))
+                                step = "separation" if "[Vocal Separation" in text else "transcription"
+                                QTimer.singleShot(0, lambda p=parsed_pct, t=text, s=step: self._on_prepare_step_progress(s, p, detail=t))
+                            except Exception:
+                                pass
             except Exception:
                 pass
             finally:
@@ -287,6 +307,11 @@ class PipelineController:
             except Exception:
                 pass
             self.gui.voice_thread = None
+        try:
+            from vieneu_tts import unload_vieneu_model
+            unload_vieneu_model()
+        except Exception:
+            pass
 
         current_step = getattr(self.gui, "_pipeline_step", "prepare")
         self.gui._pipeline_active = False
@@ -465,6 +490,10 @@ class PipelineController:
         
         # Connect signals
         self.gui.prepare_workflow_thread.step_started.connect(self._on_prepare_step_started)
+        if hasattr(self.gui.prepare_workflow_thread, "progress"):
+            self.gui.prepare_workflow_thread.progress.connect(
+                lambda pct, msg: self._on_prepare_step_progress("transcription", pct, detail=msg)
+            )
         self.gui.prepare_workflow_thread.finished.connect(
             lambda project_state_path, error, run_id=prepare_run_id: self.on_prepare_workflow_finished(
                 project_state_path,
@@ -503,6 +532,39 @@ class PipelineController:
                 self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
         if step_id == "transcription":
             self._hide_whisper_download_dialog()
+
+    def _on_prepare_step_progress(self, phase: str, progress, message: str = "", detail: str = ""):
+        if not getattr(self.gui, "_pipeline_active", False):
+            return
+        pct = None
+        if progress is not None:
+            try:
+                pct = max(0, min(100, int(progress)))
+            except (ValueError, TypeError):
+                pass
+
+        disp_text = detail or message
+        if not disp_text:
+            disp_text = f"Transcribing audio ({pct}%)" if pct is not None else "Processing..."
+
+        # Update PipelineProgressDialog
+        if self.progress_dialog:
+            self.progress_dialog.footer.setText(f"Prepare: {disp_text}")
+            self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
+            if pct is not None and "ai_process" in self.progress_dialog.steps:
+                self.progress_dialog.steps["ai_process"].status_label.setText(f"{pct}%")
+                self.progress_dialog.steps["ai_process"].status_label.setStyleSheet("color: #00E5FF; font-weight: bold;")
+                total_stages = max(1, len(self.progress_dialog.step_order))
+                stage_slice = 100.0 / total_stages
+                overall_val = int((pct / 100.0) * stage_slice)
+                self.progress_dialog.overall_progress.setValue(min(int(stage_slice), max(0, overall_val)))
+
+        # Update Main Window progress bar and status bar
+        if pct is not None and hasattr(self.gui, "progress_bar"):
+            scaled = 35 + int((pct / 100.0) * 30)
+            self.gui.progress_bar.setValue(min(65, max(35, scaled)))
+        if hasattr(self.gui, "status_bar") and disp_text:
+            self.gui.status_bar.showMessage(f"{disp_text}", 2000)
 
     def on_prepare_workflow_finished(self, project_state_path, error, run_id=None):
         """Callback when the background PrepareWorkflow finishes completely."""

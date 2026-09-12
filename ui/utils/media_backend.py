@@ -718,10 +718,12 @@ class MpvMediaPlayerBackend(QObject):
                 self._dubbed_player.stop()
             except Exception:
                 pass
+            self._last_tracks_snapshot = None
             if self._native_audio_engine is not None:
                 try:
                     self._native_audio_engine.stop()
                     self._native_audio_engine.seek(0)
+                    self._native_audio_engine.set_tracks([])
                 except Exception:
                     pass
             self._source_path = ""
@@ -733,10 +735,12 @@ class MpvMediaPlayerBackend(QObject):
         self._state = QMediaPlayer.PausedState
         self._player.pause = True
         self._player.command("loadfile", source_path, "replace")
+        self._last_tracks_snapshot = None
         if self._native_audio_engine is not None:
             try:
                 self._native_audio_engine.stop()
                 self._native_audio_engine.seek(0)
+                self._native_audio_engine.set_tracks([])
             except Exception:
                 pass
         
@@ -956,9 +960,10 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_audio_tracks_snapshot(self, tracks, warps=None):
         """Send tracks snapshot to native PCM audio engine."""
-        self._last_tracks_snapshot = (list(tracks), warps or getattr(self, "_video_time_warps", []))
+        effective_warps = list(warps) if warps is not None else list(getattr(self, "_video_time_warps", []))
+        self._last_tracks_snapshot = (list(tracks), effective_warps)
         if self._native_audio_active and self._native_audio_engine is not None:
-            self._native_audio_engine.set_tracks(tracks, warps or self._video_time_warps)
+            self._native_audio_engine.set_tracks(tracks, effective_warps)
 
     def set_track_gain(self, track_id: str, gain: float, muted: bool = False):
         """Update track volume without regenerating media files."""
@@ -1014,6 +1019,11 @@ class MpvMediaPlayerBackend(QObject):
             self._poll_timer.stop()
         if hasattr(self, "_sync_timer") and self._sync_timer.isActive():
             self._sync_timer.stop()
+        try:
+            self._original_player.stop()
+            self._dubbed_player.stop()
+        except Exception:
+            pass
         self.close_native_audio()
         try:
             self._player.terminate()

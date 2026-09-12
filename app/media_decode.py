@@ -330,15 +330,28 @@ class AudioReader:
                 pts_val = (frame.pts - start_pts) if frame.pts is not None else int(round(target_time_sec / stream_tb))
                 pts_s = float(pts_val * stream_tb)
                 dur_s = float(frame.samples) / float(frame.sample_rate)
+                frame_start_sample = int(round(pts_s * self.sample_rate))
+
                 if self._av_buffer_start is None:
                     if pts_s + dur_s < target_time_sec - 0.05:
                         continue
-                    self._av_buffer_start = int(round(pts_s * self.sample_rate))
+                    self._av_buffer_start = frame_start_sample
 
+                # Resample frame to self.sample_rate mono
+                resampled_parts = []
                 for rf in self._av_resampler.resample(frame):
                     arr = rf.to_ndarray()
                     mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
-                    self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
+                    resampled_parts.append(mono)
+
+                if resampled_parts:
+                    frame_mono = np.concatenate(resampled_parts) if len(resampled_parts) > 1 else resampled_parts[0]
+                    current_end = self._av_buffer_start + len(self._av_buffer)
+                    gap_samples = frame_start_sample - current_end
+                    if gap_samples > 0:
+                        silence = np.zeros(gap_samples, dtype=np.float32)
+                        self._av_buffer = np.concatenate([self._av_buffer, silence]) if len(self._av_buffer) else silence
+                    self._av_buffer = np.concatenate([self._av_buffer, frame_mono]) if len(self._av_buffer) else frame_mono
 
                 if self._av_buffer_start is not None and self._av_buffer_start + len(self._av_buffer) >= needed_end:
                     break
@@ -352,7 +365,7 @@ class AudioReader:
                             self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
                     except Exception:
                         pass
-        except (EOFError, Exception):
+        except (EOFError, StopIteration, av.EOFError):
             pass
 
         if self._av_buffer_start is None:

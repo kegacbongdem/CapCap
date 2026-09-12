@@ -484,6 +484,95 @@ class SubprocessAuditor:
         self._active = False
 
 
+class IoWriteAuditor:
+    """Audit context manager intercepting file open in write mode and soundfile writes."""
+
+    def __init__(self):
+        self.files_opened_for_write: List[str] = []
+        self.disk_writes_count: int = 0
+        self.total_bytes_written: int = 0
+        self._orig_open = None
+        self._orig_sf_write = None
+
+    def __enter__(self):
+        import builtins
+        self._orig_open = builtins.open
+        auditor = self
+
+        class AuditedFileWrapper:
+            def __init__(self, f, path):
+                self._f = f
+                self._path = path
+
+            def write(self, data):
+                n = self._f.write(data)
+                auditor.disk_writes_count += 1
+                written = n if isinstance(n, int) else len(data)
+                auditor.total_bytes_written += written
+                return n
+
+            def writelines(self, lines):
+                for line in lines:
+                    self.write(line)
+
+            def __enter__(self):
+                self._f.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._f.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+        def hooked_open(file, mode="r", *args, **kwargs):
+            f = auditor._orig_open(file, mode, *args, **kwargs)
+            if any(m in mode for m in ("w", "a", "x", "+")):
+                file_str = str(file)
+                if file_str not in auditor.files_opened_for_write:
+                    auditor.files_opened_for_write.append(file_str)
+                return AuditedFileWrapper(f, file_str)
+            return f
+
+        builtins.open = hooked_open
+
+        try:
+            import soundfile as sf
+            self._orig_sf_write = sf.write
+
+            def hooked_sf_write(file, data, samplerate, *args, **kwargs):
+                file_str = str(file)
+                if file_str not in auditor.files_opened_for_write:
+                    auditor.files_opened_for_write.append(file_str)
+                auditor.disk_writes_count += 1
+                try:
+                    import numpy as np
+                    if isinstance(data, np.ndarray):
+                        auditor.total_bytes_written += data.nbytes
+                    else:
+                        auditor.total_bytes_written += len(data)
+                except Exception:
+                    pass
+                return auditor._orig_sf_write(file, data, samplerate, *args, **kwargs)
+
+            sf.write = hooked_sf_write
+        except Exception:
+            self._orig_sf_write = None
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        import builtins
+        if self._orig_open is not None:
+            builtins.open = self._orig_open
+        if self._orig_sf_write is not None:
+            try:
+                import soundfile as sf
+                sf.write = self._orig_sf_write
+            except Exception:
+                pass
+
+
 def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     """Execute baseline measurements of the legacy audio mixing and conversion path.
 
@@ -508,15 +597,10 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
 
     print("[Benchmark] Measuring legacy volume adjustments with UI debounce & overwrite (100 iterations)...")
     volume_latencies_ms: List[float] = []
-    files_created: List[str] = []
-    subprocesses_spawned: List[str] = []
     out_wav = os.path.join(temp_dir, "preview_mix_active.wav")
-    disk_writes_count = 0
-    cumulative_bytes_written = 0
 
-    auditor = SubprocessAuditor()
     last_processed_time = 0.0
-    with auditor:
+    with SubprocessAuditor() as leg_subproc, IoWriteAuditor() as leg_io:
         for i in range(100):
             tts_vol = float(10 + (i % 90))
             music_vol = float(100 - (i % 70))
@@ -531,51 +615,74 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
                 ]
                 mix_audio_tracks(tracks=tracks, output_wav_path=out_wav, total_duration_ms=10000)
                 last_processed_time = simulated_tick_time
-                disk_writes_count += 1
-                if os.path.exists(out_wav):
-                    cumulative_bytes_written += os.path.getsize(out_wav)
-                    if out_wav not in files_created:
-                        files_created.append(out_wav)
 
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             volume_latencies_ms.append(elapsed_ms)
 
-    subprocesses_spawned = auditor.spawned
+    legacy_subprocesses = leg_subproc.spawned
+    legacy_files_created = list(leg_io.files_opened_for_write)
+    legacy_disk_writes = leg_io.disk_writes_count
+    legacy_bytes_written = leg_io.total_bytes_written
 
     # Clean up generated mix files
-    for f in files_created:
+    for f in legacy_files_created:
         try:
-            os.remove(f)
+            if os.path.exists(f):
+                os.remove(f)
         except OSError:
             pass
 
-    # Benchmark native in-memory volume path using PreviewAudioEngine
-    print("[Benchmark] Measuring native in-memory volume adjustments (100 iterations)...")
+    # Benchmark full native preview audio loop (volume adjustment + timer tick audio processing)
+    print("[Benchmark] Measuring native in-memory volume adjustments + audio ticks (100 iterations)...")
     native_latencies_ms: List[float] = []
     native_subprocesses: List[str] = []
+    native_disk_writes = 0
+    native_bytes_written = 0
+    native_files_created: List[str] = []
+
     try:
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
-        from ui.utils.preview_audio import PreviewAudioEngine
-        engine = PreviewAudioEngine()
-        engine.set_tracks([
+        from ui.utils.preview_audio import _PreviewAudioWorker
+
+        class _MockSink:
+            def bytesFree(self):
+                return 65536
+
+        class _MockIoDevice:
+            def __init__(self):
+                self.bytes_written = 0
+
+            def write(self, data):
+                self.bytes_written += len(data)
+                return len(data)
+
+        worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+        worker._sink_sr = 48000
+        worker._sink_channels = 2
+        worker._sink_is_float = True
+        worker._is_playing = True
+        worker._sink = _MockSink()
+        worker._io_device = _MockIoDevice()
+        worker.set_tracks([
             {"id": "voice", "path": voice_path, "start": 0.0, "end": 10.0, "volume": 100.0, "muted": False},
             {"id": "music", "path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": 100.0, "muted": False},
         ])
-        app.processEvents()
 
-        with SubprocessAuditor() as nat_auditor:
+        with SubprocessAuditor() as nat_subproc, IoWriteAuditor() as nat_io:
             for i in range(100):
                 tts_vol = float(10 + (i % 90))
                 music_vol = float(100 - (i % 70))
                 t0 = time.perf_counter()
-                engine.set_track_gain("voice", tts_vol / 100.0)
-                engine.set_track_gain("music", music_vol / 100.0)
-                app.processEvents()
+                worker.set_track_gain("voice", tts_vol / 100.0, False)
+                worker.set_track_gain("music", music_vol / 100.0, False)
+                worker._on_timer_tick()
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 native_latencies_ms.append(elapsed_ms)
-        native_subprocesses = nat_auditor.spawned
-        engine.close()
+
+        native_subprocesses = nat_subproc.spawned
+        native_disk_writes = nat_io.disk_writes_count
+        native_bytes_written = nat_io.total_bytes_written
+        native_files_created = list(nat_io.files_opened_for_write)
+        worker.close()
     except Exception as exc:
         print(f"[Benchmark] Native volume benchmark skipped: {exc}")
 
@@ -586,10 +693,10 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
             "p95_ms": round(percentile95(volume_latencies_ms), 2),
             "max_ms": round(max(volume_latencies_ms), 2),
             "total_time_s": round(sum(volume_latencies_ms) / 1000.0, 2),
-            "subprocesses_spawned_count": len(subprocesses_spawned),
-            "disk_writes_count": disk_writes_count,
-            "files_created_count": len(files_created),
-            "total_bytes_written": cumulative_bytes_written,
+            "subprocesses_spawned_count": len(legacy_subprocesses),
+            "disk_writes_count": legacy_disk_writes,
+            "files_created_count": len(legacy_files_created),
+            "total_bytes_written": legacy_bytes_written,
         }
     }
     if native_latencies_ms:
@@ -600,9 +707,9 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
             "max_ms": round(max(native_latencies_ms), 2),
             "total_time_s": round(sum(native_latencies_ms) / 1000.0, 2),
             "subprocesses_spawned_count": len(native_subprocesses),
-            "disk_writes_count": 0,
-            "files_created_count": 0,
-            "total_bytes_written": 0,
+            "disk_writes_count": native_disk_writes,
+            "files_created_count": len(native_files_created),
+            "total_bytes_written": native_bytes_written,
         }
     return res
 

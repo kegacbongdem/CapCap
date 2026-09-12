@@ -459,6 +459,7 @@ class TestPreviewTransport(unittest.TestCase):
         backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
         mock_engine = MagicMock()
         backend._native_audio_engine = mock_engine
+        backend._last_tracks_snapshot = ([{"id": "t1"}], [])
         backend._player = MagicMock()
         backend._original_player = MagicMock()
         backend._dubbed_player = MagicMock()
@@ -473,14 +474,19 @@ class TestPreviewTransport(unittest.TestCase):
         backend.setSource("")
         mock_engine.stop.assert_called_once()
         mock_engine.seek.assert_called_once_with(0)
+        mock_engine.set_tracks.assert_called_once_with([])
+        self.assertIsNone(backend._last_tracks_snapshot)
 
         # Load new source
         mock_engine.reset_mock()
+        backend._last_tracks_snapshot = ([{"id": "t1"}], [])
         backend._normalize_source = lambda s: "sample.mp4"
         backend.durationChanged = MagicMock()
         backend.setSource("sample.mp4")
         mock_engine.stop.assert_called_once()
         mock_engine.seek.assert_called_once_with(0)
+        mock_engine.set_tracks.assert_called_once_with([])
+        self.assertIsNone(backend._last_tracks_snapshot)
 
     def test_on_native_audio_position_changed_emits_position_changed(self):
         """Verify _on_native_audio_position_changed updates position and emits positionChanged."""
@@ -524,6 +530,47 @@ class TestPreviewTransport(unittest.TestCase):
 
         VideoTranslatorGUI._terminate_workers(gui)
         gui.media_player.close.assert_called_once()
+
+    def test_set_audio_tracks_snapshot_preserves_empty_warps(self):
+        """Verify set_audio_tracks_snapshot preserves an explicitly empty warps list."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+        backend._native_audio_active = True
+        backend._video_time_warps = [{"start": 1.0, "end": 2.0, "speed": 0.5}]
+
+        tracks = [{"id": "t1", "path": "test.wav"}]
+        backend.set_audio_tracks_snapshot(tracks, warps=[])
+
+        self.assertEqual(backend._last_tracks_snapshot, (tracks, []))
+        mock_engine.set_tracks.assert_called_once_with(tracks, [])
+
+    def test_close_stops_sidecars_and_native_engine(self):
+        """Verify close() stops sidecar players and releases native engine."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+        backend._native_audio_active = True
+        backend._player = MagicMock()
+        backend._original_player = MagicMock()
+        backend._dubbed_player = MagicMock()
+        backend._poll_timer = MagicMock()
+        backend._poll_timer.isActive.return_value = True
+        backend._sync_timer = MagicMock()
+        backend._sync_timer.isActive.return_value = True
+
+        backend.close()
+
+        backend._poll_timer.stop.assert_called_once()
+        backend._sync_timer.stop.assert_called_once()
+        backend._original_player.stop.assert_called_once()
+        backend._dubbed_player.stop.assert_called_once()
+        mock_engine.close.assert_called_once()
+        backend._player.terminate.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -787,6 +787,121 @@ class TestPreviewAudioEngine(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_pyav_audio_reader_preserves_pts_gap_silence(self):
+        """Ensure AudioReader inserts silence on PTS gaps instead of gluing disjoint frames."""
+        import av
+        import fractions
+
+        mkv_path = os.path.join(self.temp_dir, "test_pts_gap.mkv")
+        container = av.open(mkv_path, mode="w", format="matroska")
+        stream = container.add_stream("pcm_s16le", rate=16000, layout="mono")
+        stream.time_base = fractions.Fraction(1, 16000)
+
+        # Frame 1: 1600 samples at PTS 0
+        f1_data = np.full((1, 1600), 10000, dtype=np.int16)
+        f1 = av.AudioFrame.from_ndarray(f1_data, format="s16", layout="mono")
+        f1.sample_rate = 16000
+        f1.time_base = fractions.Fraction(1, 16000)
+        f1.pts = 0
+        for p in stream.encode(f1):
+            container.mux(p)
+
+        # Frame 2: 1600 samples at PTS 4800 (leaving 3200 samples gap)
+        f2_data = np.full((1, 1600), 20000, dtype=np.int16)
+        f2 = av.AudioFrame.from_ndarray(f2_data, format="s16", layout="mono")
+        f2.sample_rate = 16000
+        f2.time_base = fractions.Fraction(1, 16000)
+        f2.pts = 4800
+        for p in stream.encode(f2):
+            container.mux(p)
+
+        for p in stream.encode(None):
+            container.mux(p)
+        container.close()
+
+        try:
+            with AudioReader(mkv_path, sample_rate=16000) as reader:
+                block = reader.read(0, 6400)
+                self.assertEqual(len(block), 6400)
+                # Frame 1 check
+                np.testing.assert_allclose(block[:1600], 10000.0 / 32768.0, atol=1e-3)
+                # Gap check: exactly 3200 samples of silence (1600 to 4800)
+                np.testing.assert_array_equal(block[1600:4800], np.zeros(3200, dtype=np.float32))
+                # Frame 2 check
+                np.testing.assert_allclose(block[4800:6400], 20000.0 / 32768.0, atol=1e-3)
+        finally:
+            if os.path.exists(mkv_path):
+                try:
+                    os.remove(mkv_path)
+                except OSError:
+                    pass
+
+    def test_tts_in_process_bytes_conversion(self):
+        """Ensure TTS audio converter functions accept in-memory bytes/BytesIO and produce valid 16k mono WAV."""
+        import io
+        import av
+        import soundfile as sf
+        from app.tts_processor import convert_audio_data_to_wav_16k_mono
+        from app.capcut.tts import _convert_mp3_to_wav_16k_mono
+
+        mp3_bio = io.BytesIO()
+        container = av.open(mp3_bio, mode="w", format="mp3")
+        stream = container.add_stream("mp3", rate=44100)
+        tone = (np.sin(2 * np.pi * 440 * np.arange(8820) / 44100) * 16000).astype(np.int16)
+        frame = av.AudioFrame.from_ndarray(tone.reshape(1, -1), format="s16p", layout="mono")
+        frame.sample_rate = 44100
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+        container.close()
+
+        mp3_bytes = mp3_bio.getvalue()
+        self.assertGreater(len(mp3_bytes), 0)
+
+        out_wav_1 = os.path.join(self.temp_dir, "test_tts_edge.wav")
+        try:
+            res_path = convert_audio_data_to_wav_16k_mono(mp3_bytes, out_wav_1)
+            self.assertEqual(res_path, out_wav_1)
+            self.assertTrue(os.path.exists(out_wav_1))
+            data, sr = sf.read(out_wav_1)
+            self.assertEqual(sr, 16000)
+            self.assertEqual(data.ndim, 1)
+            self.assertGreater(len(data), 0)
+        finally:
+            if os.path.exists(out_wav_1):
+                os.remove(out_wav_1)
+
+        out_wav_2 = os.path.join(self.temp_dir, "test_tts_capcut.wav")
+        try:
+            res_path = _convert_mp3_to_wav_16k_mono(io.BytesIO(mp3_bytes), out_wav_2)
+            self.assertEqual(res_path, out_wav_2)
+            self.assertTrue(os.path.exists(out_wav_2))
+            data, sr = sf.read(out_wav_2)
+            self.assertEqual(sr, 16000)
+            self.assertEqual(data.ndim, 1)
+            self.assertGreater(len(data), 0)
+        finally:
+            if os.path.exists(out_wav_2):
+                os.remove(out_wav_2)
+
+    def test_io_write_auditor_intercepts_writes(self):
+        """Ensure IoWriteAuditor intercepts both regular file writes and soundfile writes."""
+        from scripts.benchmark_preview import IoWriteAuditor
+        import soundfile as sf
+
+        test_txt = os.path.join(self.temp_dir, "test_audit.txt")
+        test_wav = os.path.join(self.temp_dir, "test_audit.wav")
+
+        with IoWriteAuditor() as auditor:
+            with open(test_txt, "w") as f:
+                f.write("hello world\n")
+            sf.write(test_wav, np.zeros(160, dtype=np.float32), 16000)
+
+        self.assertEqual(auditor.disk_writes_count, 2)
+        self.assertGreater(auditor.total_bytes_written, 0)
+        self.assertEqual(len(auditor.files_opened_for_write), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import secrets
@@ -11,6 +12,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 import requests
@@ -291,47 +293,33 @@ def synthesize_capcut_tts_wav_16k_mono(
         raise RuntimeError("CapCut TTS returned no audio url")
 
     audio_url = results[0]["speech_url"]
-    temp_dir = tmp_dir or os.path.join(os.path.dirname(wav_path) or ".", "capcut_tmp")
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_mp3 = os.path.join(temp_dir, f"capcut_{uuid.uuid4().hex[:8]}.mp3")
-
     try:
         if is_cancelled and is_cancelled():
             return ""
-        # Download MP3
-        resp = session.get(audio_url, stream=True, timeout=60)
+        # Download MP3 directly in memory
+        resp = session.get(audio_url, timeout=60)
         resp.raise_for_status()
-        with open(temp_mp3, "wb") as f:
-            for chunk in resp.iter_content(64 * 1024):
-                if is_cancelled and is_cancelled():
-                    break
-                if chunk:
-                    f.write(chunk)
 
         if is_cancelled and is_cancelled():
             return ""
-        # Convert MP3 to 16kHz mono WAV
-        _convert_mp3_to_wav_16k_mono(temp_mp3, wav_path)
+        # Convert MP3 to 16kHz mono WAV in-process
+        _convert_mp3_to_wav_16k_mono(resp.content, wav_path)
         return wav_path
 
     finally:
         session.close()
-        if os.path.exists(temp_mp3):
-            try:
-                os.remove(temp_mp3)
-            except OSError:
-                pass
 
 
-def _convert_mp3_to_wav_16k_mono(mp3_path: str, wav_path: str) -> str:
-    """Convert an audio file (typically MP3) to 16kHz mono 16-bit PCM WAV."""
+def _convert_mp3_to_wav_16k_mono(source: Any, wav_path: str) -> str:
+    """Convert MP3 bytes or file to 16kHz mono 16-bit PCM WAV."""
     os.makedirs(os.path.dirname(os.path.abspath(wav_path)), exist_ok=True)
     try:
         import av
         import soundfile as sf
         import numpy as np
 
-        container = av.open(mp3_path)
+        bio = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+        container = av.open(bio)
         if container.streams.audio:
             stream = container.streams.audio[0]
             resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
@@ -346,26 +334,48 @@ def _convert_mp3_to_wav_16k_mono(mp3_path: str, wav_path: str) -> str:
                 out_pcm = np.concatenate(parts)
                 sf.write(wav_path, out_pcm, 16000, subtype="PCM_16")
                 return wav_path
+    except (ImportError, ModuleNotFoundError):
+        pass
+    except (av.error.FFmpegError, av.error.InvalidDataError):
+        pass
     except Exception:
         pass
 
+    # Fallback to FFmpeg CLI only if PyAV is missing or failed
     ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
     if not ffmpeg or not os.path.exists(ffmpeg):
         import shutil
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
 
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-loglevel", "error",
-        "-i", mp3_path,
-        "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-c:a", "pcm_s16le",
-        wav_path,
-    ]
-    subprocess.run(cmd, check=True, capture_output=True, **subprocess_hidden_kwargs())
+    temp_created = False
+    if isinstance(source, (bytes, bytearray, io.BytesIO)):
+        import tempfile
+        temp_input = tempfile.mktemp(suffix=".mp3")
+        with open(temp_input, "wb") as f:
+            f.write(source if isinstance(source, (bytes, bytearray)) else source.getvalue())
+        temp_created = True
+    else:
+        temp_input = source
+
+    try:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-loglevel", "error",
+            "-i", temp_input,
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            wav_path,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, **subprocess_hidden_kwargs())
+    finally:
+        if temp_created and os.path.exists(temp_input):
+            try:
+                os.remove(temp_input)
+            except OSError:
+                pass
     return wav_path
 
 
@@ -427,28 +437,17 @@ def synthesize_capcut_tts_batch(
                 if not audio_url:
                     raise RuntimeError(f"CapCut TTS item missing speech_url for '{job.get('text', '')[:30]}'")
 
-                job_temp_dir = tmp_dir or os.path.join(os.path.dirname(job["wav_path"]) or ".", "capcut_tmp")
-                os.makedirs(job_temp_dir, exist_ok=True)
-                temp_mp3 = os.path.join(job_temp_dir, f"capcut_{uuid.uuid4().hex[:8]}.mp3")
                 try:
-                    resp = session.get(audio_url, stream=True, timeout=60)
+                    resp = session.get(audio_url, timeout=60)
                     resp.raise_for_status()
-                    with open(temp_mp3, "wb") as f:
-                        for chunk in resp.iter_content(64 * 1024):
-                            if is_cancelled and is_cancelled():
-                                return False
-                            if chunk:
-                                f.write(chunk)
                     if not (is_cancelled and is_cancelled()):
-                        _convert_mp3_to_wav_16k_mono(temp_mp3, job["wav_path"])
+                        _convert_mp3_to_wav_16k_mono(resp.content, job["wav_path"])
                         return True
                     return False
-                finally:
-                    if os.path.exists(temp_mp3):
-                        try:
-                            os.remove(temp_mp3)
-                        except OSError:
-                            pass
+                except Exception as e:
+                    if is_cancelled and is_cancelled():
+                        return False
+                    raise e
 
             pairs = list(zip(valid_jobs, results))
             dl_workers = max(1, min(8, len(pairs)))

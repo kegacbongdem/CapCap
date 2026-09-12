@@ -1,13 +1,16 @@
 import asyncio
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import threading
 import time
+import uuid
 import wave
 from pathlib import Path
+from typing import Union
 
 from dotenv import load_dotenv
 from runtime_paths import app_path, bin_path, models_path, temp_path, subprocess_text_kwargs
@@ -454,7 +457,7 @@ def piper_tts_to_wav_16k_mono(
     return wav_path
 
 
-async def _edge_tts_to_mp3_async(text: str, mp3_path: str, voice: str, rate: str, volume: str):
+async def _edge_tts_stream_mp3_bytes_async(text: str, voice: str, rate: str, volume: str) -> bytes:
     try:
         import edge_tts
     except Exception as e:
@@ -466,53 +469,32 @@ async def _edge_tts_to_mp3_async(text: str, mp3_path: str, voice: str, rate: str
         ) from e
 
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, volume=volume)
-    await communicate.save(mp3_path)
+    chunks = []
+    async for chunk in communicate.stream():
+        if chunk.get("type") == "audio" and "data" in chunk:
+            chunks.append(chunk["data"])
+    if not chunks:
+        raise RuntimeError(f"Edge TTS returned no audio data for: '{text[:40]}'")
+    return b"".join(chunks)
 
 
-def edge_tts_to_wav_16k_mono(
-    *,
-    text: str,
+def convert_audio_data_to_wav_16k_mono(
+    source: Union[bytes, bytearray, io.BytesIO, str],
     wav_path: str,
-    voice: str = "vi-VN-HoaiMyNeural",
-    rate: str = "+0%",
-    volume: str = "+0%",
     tmp_dir: str | None = None,
 ) -> str:
+    """Convert audio data (bytes, BytesIO, or file path) to 16kHz mono WAV.
+    Decodes in-process using PyAV + SoundFile.
+    Only falls back to FFmpeg CLI if PyAV is not installed or codec genuinely fails.
     """
-    Synthesize text to WAV (16kHz, mono) using Edge TTS.
-    Edge TTS outputs mp3, then we convert to wav using ffmpeg.
-    Returns wav_path.
-    """
-    if tmp_dir is None:
-        tmp_dir = temp_path()
-    os.makedirs(os.path.dirname(wav_path) or ".", exist_ok=True)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    base = _sanitize_filename(os.path.splitext(os.path.basename(wav_path))[0] or "tts")
-    mp3_path = os.path.join(tmp_dir, f"{base}.mp3")
-
-    # Run async edge-tts safely in sync context with a few retries for transient empty-audio failures.
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            asyncio.run(_edge_tts_to_mp3_async(text, mp3_path, voice, rate, volume))
-            last_error = None
-            break
-        except Exception as exc:
-            last_error = exc
-            if attempt >= 3:
-                raise
-            time.sleep(0.6 * attempt)
-    if last_error is not None:
-        raise last_error
-
-    # Convert mp3 to 16kHz mono wav in-process via PyAV, fallback to ffmpeg
+    os.makedirs(os.path.dirname(os.path.abspath(wav_path)) or ".", exist_ok=True)
     try:
         import av
         import soundfile as sf
         import numpy as np
 
-        container = av.open(mp3_path)
+        bio = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+        container = av.open(bio)
         if container.streams.audio:
             stream = container.streams.audio[0]
             resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
@@ -527,28 +509,86 @@ def edge_tts_to_wav_16k_mono(
                 out_pcm = np.concatenate(parts)
                 sf.write(wav_path, out_pcm, 16000, subtype="PCM_16")
                 return wav_path
+    except (ImportError, ModuleNotFoundError):
+        pass
+    except (av.error.FFmpegError, av.error.InvalidDataError) as exc:
+        pass
     except Exception:
         pass
 
+    # Fallback to FFmpeg CLI only if PyAV is missing or failed
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        mp3_path,
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        wav_path,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg conversion failed:\n{proc.stderr or proc.stdout}")
+    temp_created = False
+    if isinstance(source, (bytes, bytearray, io.BytesIO)):
+        if tmp_dir is None:
+            tmp_dir = temp_path()
+        os.makedirs(tmp_dir, exist_ok=True)
+        temp_input = os.path.join(tmp_dir, f"tts_input_{uuid.uuid4().hex[:8]}.mp3")
+        with open(temp_input, "wb") as f:
+            f.write(source if isinstance(source, (bytes, bytearray)) else source.getvalue())
+        temp_created = True
+    else:
+        temp_input = source
+
+    try:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            temp_input,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            wav_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
+        if proc.returncode != 0:
+            raise RuntimeError(f"FFmpeg conversion failed:\n{proc.stderr or proc.stdout}")
+    finally:
+        if temp_created and os.path.exists(temp_input):
+            try:
+                os.remove(temp_input)
+            except OSError:
+                pass
     return wav_path
+
+
+def edge_tts_to_wav_16k_mono(
+    *,
+    text: str,
+    wav_path: str,
+    voice: str = "vi-VN-HoaiMyNeural",
+    rate: str = "+0%",
+    volume: str = "+0%",
+    tmp_dir: str | None = None,
+) -> str:
+    """
+    Synthesize text to WAV (16kHz, mono) using Edge TTS.
+    Streams MP3 bytes in memory without disk writes and converts directly to WAV in-process.
+    Returns wav_path.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(wav_path)) or ".", exist_ok=True)
+
+    last_error = None
+    mp3_bytes = b""
+    for attempt in range(1, 4):
+        try:
+            mp3_bytes = asyncio.run(_edge_tts_stream_mp3_bytes_async(text, voice, rate, volume))
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt >= 3:
+                raise
+            time.sleep(0.6 * attempt)
+    if last_error is not None:
+        raise last_error
+
+    return convert_audio_data_to_wav_16k_mono(mp3_bytes, wav_path, tmp_dir=tmp_dir)
 
 
 def preload_tts_voice(voice: str, on_progress: callable = None) -> bool:

@@ -2892,7 +2892,9 @@ class VideoTranslatorGUI(QMainWindow):
                     continue
                 start = max(0.0, float(getattr(layer, "start", 0.0) or 0.0))
                 end = max(start, float(getattr(layer, "end", 0.0) or 0.0))
+                layer_id = str(getattr(layer, "id", "") or f"music_layer_{len(tracks)}")
                 tracks.append({
+                    "id": layer_id,
                     "path": source,
                     "start": start,
                     "end": end,
@@ -3337,9 +3339,12 @@ class VideoTranslatorGUI(QMainWindow):
         # dubbed sidecar only when the current output mode actually selects
         # it; otherwise a subtitle-only/original preview would needlessly
         # attempt a TTS+Music mix and report "No active audio tracks".
+        is_native_audio = bool(getattr(self.media_player, "_native_audio_active", False))
         preferred_mode = self._preferred_preview_audio_track_mode()
         selected_mode = str(getattr(self, "_preview_audio_track_mode", "") or preferred_mode).strip().lower()
-        if selected_mode == "dubbed":
+        if is_native_audio:
+            dubbed_audio_kind, dubbed_audio = "native", ""
+        elif selected_mode == "dubbed":
             dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
         else:
             dubbed_audio_kind, dubbed_audio = "original", ""
@@ -3445,7 +3450,7 @@ class VideoTranslatorGUI(QMainWindow):
                     })
                 for m in self._music_audio_tracks():
                     m_copy = dict(m)
-                    m_copy.setdefault("id", str(m.get("path", "")))
+                    m_copy.setdefault("id", str(m.get("id") or m.get("path", "")))
                     m_copy["is_original_video"] = False
                     tracks_snapshot.append(m_copy)
 
@@ -8778,8 +8783,7 @@ class VideoTranslatorGUI(QMainWindow):
                 elif track_name == "A2 Music":
                     for m_track in self._music_audio_tracks():
                         m_id = str(m_track.get("id") or m_track.get("path", "A2 Music"))
-                        m_vol = float(m_track.get("volume", 100.0)) / 100.0
-                        self.media_player.set_track_gain(m_id, m_vol * linear_gain, muted)
+                        self.media_player.set_track_gain(m_id, linear_gain, muted)
                 return
             except Exception:
                 pass
@@ -16539,6 +16543,17 @@ class VideoTranslatorGUI(QMainWindow):
             unload_vieneu_model()
         except Exception:
             pass
+        if hasattr(self, "media_player") and self.media_player is not None:
+            if hasattr(self.media_player, "close_native_audio"):
+                try:
+                    self.media_player.close_native_audio()
+                except Exception:
+                    pass
+            elif hasattr(self.media_player, "close"):
+                try:
+                    self.media_player.close()
+                except Exception:
+                    pass
         print("[Cleanup] Worker termination complete.")
 
     def closeEvent(self, event):
@@ -16595,8 +16610,8 @@ class VideoTranslatorGUI(QMainWindow):
         duration_changed_impl(self, duration)
         self.schedule_timeline_visual_refresh(waveform=False, thumbnails=True)
 
-    def set_position(self, position):
-        set_position_impl(self, position)
+    def set_position(self, position, *, exact: bool = True):
+        set_position_impl(self, position, exact=exact)
 
     def update_duration_label(self, current, total):
         update_duration_label_impl(self, current, total)

@@ -36,6 +36,13 @@ from PySide6.QtMultimedia import (
 
 from app.audio_mixer import mix_pcm_block
 from app.media_decode import AudioReader
+from app.services.time_warp_service import TimeWarpService
+
+try:
+    import av
+    import av.filter
+except ImportError:
+    av = None
 
 
 class _LRUPcmCache:
@@ -79,6 +86,7 @@ class _PreviewAudioWorker(QObject):
     positionChanged = Signal(int)
     stateChanged = Signal(int)  # 0: Stopped, 1: Playing, 2: Paused
     errorOccurred = Signal(str)
+    sinkReady = Signal(bool)
 
     def __init__(self, sample_rate: int = 16000, block_size: int = 160):
         super().__init__()
@@ -101,17 +109,20 @@ class _PreviewAudioWorker(QObject):
         self._is_playing: bool = False
         self._playback_rate: float = 1.0
         self._generation_id: int = 0
+        self._tempo_graph: Any = None
 
         # Resampling state for output sink
         self._sink_sr: int = 48000
         self._sink_channels: int = 2
         self._sink_is_float: bool = True
+        self._sink_resampler: Any = None
 
     def init_sink(self) -> None:
         """Initialize QAudioSink with default audio output device format."""
         try:
             device = QMediaDevices.defaultAudioOutput()
             if device.isNull():
+                self.sinkReady.emit(False)
                 self.errorOccurred.emit("No default audio output device available")
                 return
 
@@ -142,7 +153,10 @@ class _PreviewAudioWorker(QObject):
             self._timer = QTimer(self)
             self._timer.setInterval(self.block_duration_ms)
             self._timer.timeout.connect(self._on_timer_tick)
+            self._sink_resampler = None
+            self.sinkReady.emit(True)
         except Exception as exc:
+            self.sinkReady.emit(False)
             self.errorOccurred.emit(f"Failed to initialize audio sink: {exc}")
 
     @Slot(list, list)
@@ -257,15 +271,20 @@ class _PreviewAudioWorker(QObject):
     @Slot(float)
     def set_rate(self, rate: float) -> None:
         """Set playback rate (e.g. 1.0, 1.25)."""
-        self._playback_rate = max(0.25, min(4.0, float(rate)))
+        new_rate = max(0.25, min(4.0, float(rate)))
+        if abs(new_rate - self._playback_rate) > 1e-3:
+            self._playback_rate = new_rate
+            self._tempo_graph = None
 
     def _is_time_frozen(self, t_sec: float) -> bool:
         """Return True if timestamp t_sec falls within a freeze frame warp."""
-        for w in self._warps:
-            wt = float(w.get("time", 0.0))
-            wd = float(w.get("duration", 0.0))
-            if wt <= t_sec < (wt + wd):
+        accum = 0.0
+        for w in sorted(self._warps, key=lambda x: float(x.get("time", 0.0))):
+            start = float(w.get("time", 0.0)) + accum
+            dur = float(w.get("duration", 0.0))
+            if start <= t_sec < (start + dur):
                 return True
+            accum += dur
         return False
 
     def _on_timer_tick(self) -> None:
@@ -276,7 +295,10 @@ class _PreviewAudioWorker(QObject):
         free_bytes = self._sink.bytesFree()
         # Compute output block byte size
         bytes_per_sample = 4 if self._sink_is_float else 2
-        out_samples_per_block = int(round(self.block_size * (self._sink_sr / self.internal_sr)))
+        gcd = math.gcd(self.internal_sr, self._sink_sr)
+        up = self._sink_sr // gcd
+        down = self.internal_sr // gcd
+        out_samples_per_block = int(round(self.block_size * up / down))
         out_bytes_per_block = out_samples_per_block * self._sink_channels * bytes_per_sample
 
         # If sink buffer has insufficient room, wait for next tick
@@ -309,14 +331,29 @@ class _PreviewAudioWorker(QObject):
                 continue
 
             # Compute track-relative sample offset
-            offset_ms = self._timeline_pos_ms - start_ms + track["source_start_ms"]
+            if track["is_original_video"]:
+                media_time_s = TimeWarpService.timeline_to_media_time(cur_t_sec, self._warps)
+                offset_ms = int(round(media_time_s * 1000.0)) + track["source_start_ms"]
+            else:
+                offset_ms = self._timeline_pos_ms - start_ms + track["source_start_ms"]
+
             track_sample = int(offset_ms * self.internal_sr / 1000.0)
 
             # Check LRU cache
             cache_key = (track["path"], track_sample, self.block_size, self._generation_id)
             block = self._pcm_cache.get(cache_key)
             if block is None:
-                block = reader.read(track_sample, self.block_size)
+                if track.get("loop", False) and reader.total_samples > 0:
+                    sample_in_loop = track_sample % reader.total_samples
+                    if sample_in_loop + self.block_size > reader.total_samples:
+                        first_len = reader.total_samples - sample_in_loop
+                        p1 = reader.read(sample_in_loop, first_len)
+                        p2 = reader.read(0, self.block_size - first_len)
+                        block = np.concatenate([p1, p2])
+                    else:
+                        block = reader.read(sample_in_loop, self.block_size)
+                else:
+                    block = reader.read(track_sample, self.block_size)
                 self._pcm_cache.put(cache_key, block)
 
             # Apply smooth 5ms ramp toward target gain
@@ -345,11 +382,55 @@ class _PreviewAudioWorker(QObject):
         else:
             mixed_16k = np.zeros(self.block_size, dtype=np.float32)
 
-        # Resample to output sink sample rate (e.g. 16k -> 48k)
+        # Time-stretch if playback rate != 1.0 using PyAV atempo filter
+        if abs(self._playback_rate - 1.0) > 0.01 and av is not None:
+            try:
+                if getattr(self, "_tempo_graph", None) is None:
+                    g = av.filter.Graph()
+                    src = g.add_abuffer(format='flt', sample_rate=self.internal_sr, layout='mono', time_base=f'1/{self.internal_sr}')
+                    tempo = g.add('atempo', f'{self._playback_rate:.4f}')
+                    sink = g.add('abuffersink')
+                    src.link_to(tempo)
+                    tempo.link_to(sink)
+                    g.configure()
+                    self._tempo_graph = (g, src, sink)
+                _, t_src, t_sink = self._tempo_graph
+                f = av.AudioFrame(format='flt', layout='mono', samples=len(mixed_16k))
+                f.sample_rate = self.internal_sr
+                f.pts = cur_sample
+                f.planes[0].update(mixed_16k.astype(np.float32).tobytes())
+                t_src.push(f)
+                out_tempo_parts = []
+                while True:
+                    try:
+                        of = t_sink.pull()
+                        out_tempo_parts.append(of.to_ndarray().flatten())
+                    except Exception:
+                        break
+                if out_tempo_parts:
+                    mixed_16k = np.concatenate(out_tempo_parts)
+            except Exception:
+                pass
+
+        # Resample to output sink sample rate preserving filter continuity across blocks
         if self._sink_sr == self.internal_sr:
             out_mono = mixed_16k
+        elif av is not None:
+            if getattr(self, "_sink_resampler", None) is None:
+                self._sink_resampler = av.AudioResampler(format="flt", layout="mono", rate=self._sink_sr)
+            f = av.AudioFrame(format="flt", layout="mono", samples=len(mixed_16k))
+            f.sample_rate = self.internal_sr
+            f.planes[0].update(mixed_16k.astype(np.float32).tobytes())
+            out_frames = self._sink_resampler.resample(f)
+            if out_frames:
+                out_mono = np.concatenate([of.to_ndarray().flatten() for of in out_frames])
+            else:
+                out_mono = np.empty(0, dtype=np.float32)
         else:
-            out_mono = scipy.signal.resample_poly(mixed_16k, self._sink_sr // 1000, self.internal_sr // 1000).astype(np.float32)
+            out_mono = scipy.signal.resample_poly(mixed_16k, up, down).astype(np.float32)
+
+        if len(out_mono) == 0:
+            return
 
         # Expand channels (mono -> stereo if needed)
         if self._sink_channels == 2:
@@ -363,12 +444,15 @@ class _PreviewAudioWorker(QObject):
         else:
             data_bytes = (out_audio * 32767.0).clip(-32768.0, 32767.0).astype(np.int16).tobytes()
 
-        # Push to sink
-        self._io_device.write(data_bytes)
-
-        # Advance timeline position
-        self._timeline_pos_ms += int(round(self.block_duration_ms * self._playback_rate))
-        self.positionChanged.emit(self._timeline_pos_ms)
+        # Push to sink and advance clock only by actual written bytes
+        bytes_written = self._io_device.write(data_bytes)
+        if bytes_written > 0:
+            bytes_per_sample = 4 if self._sink_is_float else 2
+            bytes_per_frame = bytes_per_sample * self._sink_channels
+            frames_written = bytes_written // bytes_per_frame
+            ms_written = frames_written * 1000.0 / self._sink_sr
+            self._timeline_pos_ms += int(round(ms_written * self._playback_rate))
+            self.positionChanged.emit(self._timeline_pos_ms)
 
     @Slot()
     def close(self) -> None:
@@ -386,6 +470,9 @@ class _PreviewAudioWorker(QObject):
             self._sink = None
             self._io_device = None
 
+        self._tempo_graph = None
+        self._sink_resampler = None
+
         for reader in self._readers.values():
             try:
                 reader.close()
@@ -401,6 +488,7 @@ class PreviewAudioEngine(QObject):
     timelinePositionChanged = Signal(int)
     stateChanged = Signal(int)
     error = Signal(str)
+    sinkReady = Signal(bool)
 
     # Internal signals for safe cross-thread queued dispatching to worker
     _sig_set_tracks = Signal(list, list)
@@ -421,6 +509,8 @@ class PreviewAudioEngine(QObject):
         self._worker.positionChanged.connect(self.timelinePositionChanged)
         self._worker.stateChanged.connect(self.stateChanged)
         self._worker.errorOccurred.connect(self.error)
+        self._is_ready: bool = False
+        self._worker.sinkReady.connect(self._on_sink_ready)
 
         # Connect internal control signals
         self._sig_set_tracks.connect(self._worker.set_tracks)
@@ -437,6 +527,16 @@ class PreviewAudioEngine(QObject):
 
         self._cached_position_ms: int = 0
         self.timelinePositionChanged.connect(self._update_cached_pos)
+
+    def _on_sink_ready(self, ready: bool) -> None:
+        self._is_ready = bool(ready)
+        self.sinkReady.emit(self._is_ready)
+
+    def is_ready(self) -> bool:
+        return self._is_ready
+
+    def is_playing(self) -> bool:
+        return bool(getattr(self._worker, "_is_playing", False))
 
     def _update_cached_pos(self, pos_ms: int) -> None:
         self._cached_position_ms = pos_ms

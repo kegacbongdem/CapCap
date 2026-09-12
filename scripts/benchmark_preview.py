@@ -294,7 +294,10 @@ def _run_mpv_probe_worker() -> None:
         prepare_mpv_bundle()
         import mpv
 
-        player = mpv.MPV(vo="null", ao="null")
+        try:
+            player = mpv.MPV(vo="gpu-next,gpu,null", ao="null")
+        except Exception:
+            player = mpv.MPV(vo="null", ao="null")
         result["dll_loaded"] = True
         result["mpv_version"] = getattr(player, "mpv_version", "unknown")
         result["hwdec"] = list(player.hwdec) if hasattr(player, "hwdec") else None
@@ -305,8 +308,19 @@ def _run_mpv_probe_worker() -> None:
             result["hwdec_current"] = None
 
         try:
-            shaders = player["glsl-shaders"]
-            result["glsl_shaders_supported"] = isinstance(shaders, list)
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".glsl", delete=False) as tf:
+                tf.write("//!HOOK MAIN\n//!BIND HOOKED\nvec4 hook() { return HOOKED; }\n")
+                dummy_shader = tf.name
+            try:
+                player["glsl-shaders"] = [dummy_shader]
+                active_shaders = player["glsl-shaders"]
+                result["glsl_shaders_supported"] = isinstance(active_shaders, list) and len(active_shaders) > 0
+            finally:
+                try:
+                    os.remove(dummy_shader)
+                except Exception:
+                    pass
         except Exception:
             result["glsl_shaders_supported"] = False
 
@@ -492,33 +506,36 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     sf.write(voice_path, voice_data, sr, format="WAV", subtype="PCM_16")
     sf.write(music_path, music_data, sr, format="WAV", subtype="PCM_16")
 
-    print("[Benchmark] Measuring legacy volume adjustments (100 iterations)...")
+    print("[Benchmark] Measuring legacy volume adjustments with UI debounce & overwrite (100 iterations)...")
     volume_latencies_ms: List[float] = []
     files_created: List[str] = []
     subprocesses_spawned: List[str] = []
+    out_wav = os.path.join(temp_dir, "preview_mix_active.wav")
 
     auditor = SubprocessAuditor()
+    last_processed_time = 0.0
     with auditor:
         for i in range(100):
-            # Vary volume between 10% and 100%
             tts_vol = float(10 + (i % 90))
             music_vol = float(100 - (i % 70))
-            out_wav = os.path.join(temp_dir, f"mix_iter_{i:03d}.wav")
+            simulated_tick_time = i * 0.015
 
             t0 = time.perf_counter()
-            tracks = [
-                {"path": voice_path, "start": 0.0, "end": 10.0, "volume": tts_vol, "muted": False},
-                {"path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": music_vol, "muted": False},
-            ]
-            mix_audio_tracks(tracks=tracks, output_wav_path=out_wav, total_duration_ms=10000)
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            # 30ms debounce simulation or final tick
+            if (simulated_tick_time - last_processed_time >= 0.030) or (i == 99):
+                tracks = [
+                    {"path": voice_path, "start": 0.0, "end": 10.0, "volume": tts_vol, "muted": False},
+                    {"path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": music_vol, "muted": False},
+                ]
+                mix_audio_tracks(tracks=tracks, output_wav_path=out_wav, total_duration_ms=10000)
+                last_processed_time = simulated_tick_time
+                if os.path.exists(out_wav) and out_wav not in files_created:
+                    files_created.append(out_wav)
 
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
             volume_latencies_ms.append(elapsed_ms)
-            if os.path.exists(out_wav):
-                files_created.append(out_wav)
 
     subprocesses_spawned = auditor.spawned
-
     total_bytes_written = sum(os.path.getsize(p) for p in files_created if os.path.exists(p))
 
     # Clean up generated mix files

@@ -99,6 +99,46 @@ class TestMediaAudioDecode(unittest.TestCase):
         self.assertTrue(len(pcm) >= 7900)  # codec padding / delay allowance
         self.assertEqual(pcm.dtype, np.float32)
 
+    def test_decode_packed_integer_pcm16_matroska(self):
+        """Ensure decode_audio decodes packed integer s16 stereo Matroska to float32 mono."""
+        import av
+        import fractions
+
+        mkv_path = os.path.join(PROJECT_ROOT, "temp", "test_s16_decode.mkv")
+        os.makedirs(os.path.dirname(mkv_path), exist_ok=True)
+        container = av.open(mkv_path, mode="w", format="matroska")
+        stream = container.add_stream("pcm_s16le", rate=16000)
+        stream.time_base = fractions.Fraction(1, 16000)
+
+        left = np.full(1600, 0.25 * 32767, dtype=np.int16)
+        right = np.full(1600, 0.25 * 32767, dtype=np.int16)
+        interleaved = np.empty(3200, dtype=np.int16)
+        interleaved[0::2] = left
+        interleaved[1::2] = right
+        frame = av.AudioFrame.from_ndarray(interleaved.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = 16000
+        frame.time_base = stream.time_base
+        for p in stream.encode(frame):
+            container.mux(p)
+        for p in stream.encode(None):
+            container.mux(p)
+        container.close()
+
+        try:
+            with open(mkv_path, "rb") as f:
+                raw_bytes = f.read()
+            pcm, rate = decode_audio(raw_bytes, sample_rate=16000)
+            self.assertEqual(rate, 16000)
+            self.assertEqual(len(pcm), 1600)
+            self.assertEqual(pcm.dtype, np.float32)
+            np.testing.assert_allclose(pcm, 0.25, atol=1e-3)
+        finally:
+            if os.path.exists(mkv_path):
+                try:
+                    os.remove(mkv_path)
+                except OSError:
+                    pass
+
 
 class TestAudioReader(unittest.TestCase):
     """Test bounded windowed AudioReader."""
@@ -216,6 +256,105 @@ class TestAudioReader(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_audio_reader_packed_integer_pcm16_matroska(self):
+        """Ensure AudioReader decodes packed s16 stereo Matroska accurately."""
+        import av
+        import fractions
+
+        mkv_path = os.path.join(self.temp_dir, "test_s16_reader.mkv")
+        container = av.open(mkv_path, mode="w", format="matroska")
+        stream = container.add_stream("pcm_s16le", rate=self.sr)
+        stream.time_base = fractions.Fraction(1, self.sr)
+
+        left = np.full(1600, 0.25 * 32767, dtype=np.int16)
+        right = np.full(1600, 0.25 * 32767, dtype=np.int16)
+        interleaved = np.empty(3200, dtype=np.int16)
+        interleaved[0::2] = left
+        interleaved[1::2] = right
+        frame = av.AudioFrame.from_ndarray(interleaved.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.sr
+        frame.time_base = stream.time_base
+        for p in stream.encode(frame):
+            container.mux(p)
+        for p in stream.encode(None):
+            container.mux(p)
+        container.close()
+
+        try:
+            with AudioReader(mkv_path, sample_rate=self.sr) as reader:
+                block = reader.read(0, 1600)
+                self.assertEqual(len(block), 1600)
+                self.assertEqual(block.dtype, np.float32)
+                np.testing.assert_allclose(block, 0.25, atol=1e-3)
+        finally:
+            if os.path.exists(mkv_path):
+                try:
+                    os.remove(mkv_path)
+                except OSError:
+                    pass
+
+    def test_pyav_audio_reader_seek_pts_alignment(self):
+        """Ensure seeking in PyAV container precisely aligns PTS timestamps with samples."""
+        import av
+        import fractions
+
+        mkv_path = os.path.join(self.temp_dir, "test_pts_alignment.mkv")
+        container = av.open(mkv_path, mode="w", format="matroska")
+        stream = container.add_stream("pcm_s16le", rate=16000, layout="mono")
+        full_pcm = np.linspace(0, 1.0, 16000, dtype=np.float32)
+        frame_size = 1000
+        for i in range(16):
+            chunk = full_pcm[i * frame_size : (i + 1) * frame_size]
+            int_chunk = (chunk * 32767).astype(np.int16)
+            frame = av.AudioFrame.from_ndarray(int_chunk.reshape(1, -1), format="s16", layout="mono")
+            frame.sample_rate = 16000
+            frame.pts = i * frame_size
+            frame.time_base = fractions.Fraction(1, 16000)
+            for p in stream.encode(frame):
+                container.mux(p)
+        for p in stream.encode(None):
+            container.mux(p)
+        container.close()
+
+        try:
+            with AudioReader(mkv_path, sample_rate=16000) as reader:
+                block = reader.read(4800, 160)
+                expected = full_pcm[4800:4960]
+                self.assertEqual(len(block), 160)
+                np.testing.assert_allclose(block, expected, atol=1e-3)
+        finally:
+            if os.path.exists(mkv_path):
+                try:
+                    os.remove(mkv_path)
+                except OSError:
+                    pass
+
+    def test_resample_continuous_dc_window(self):
+        """Ensure reading 10ms windows across sample rates preserves filter continuity without edge drop."""
+        wav_44k = os.path.join(self.temp_dir, "test_dc_44k.wav")
+        dc_val = 0.5
+        samples_44k = np.full(44100, dc_val, dtype=np.float32)
+        sf.write(wav_44k, samples_44k, 44100, format="WAV", subtype="FLOAT")
+
+        try:
+            with AudioReader(wav_44k, sample_rate=16000) as reader:
+                block_size = 160  # 10ms at 16kHz
+                blocks = []
+                # Read consecutive windows across 100ms to 400ms
+                for i in range(10, 40):
+                    b = reader.read(i * block_size, block_size)
+                    blocks.append(b)
+                concatenated = np.concatenate(blocks)
+                # Max difference from 0.5 must be < 0.01 (Issue 5)
+                max_diff = float(np.max(np.abs(concatenated - dc_val)))
+                self.assertLess(max_diff, 0.01)
+        finally:
+            if os.path.exists(wav_44k):
+                try:
+                    os.remove(wav_44k)
+                except OSError:
+                    pass
+
 
 class TestAudioMixerPCM(unittest.TestCase):
     """Test block-based PCM mixing and linear gain clipping."""
@@ -312,6 +451,113 @@ class TestPreviewAudioEngine(unittest.TestCase):
             self.assertEqual(engine.timeline_position_ms(), 0)
         finally:
             engine.close()
+
+    def test_music_clip_seamless_looping(self):
+        """Ensure looping music track wraps seamlessly across reader boundaries."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        ramp_wav = os.path.join(self.temp_dir, "test_ramp.wav")
+        ramp_samples = (np.linspace(0.0, 1.0, 1000, endpoint=False)).astype(np.float32)
+        sf.write(ramp_wav, ramp_samples, 16000, format="WAV", subtype="FLOAT")
+
+        worker = _PreviewAudioWorker()
+        try:
+            worker.block_size = 320
+            worker._sink_sr = 16000
+            worker._sink_channels = 1
+            worker._sink_is_float = True
+            worker._is_playing = True
+            worker._tracks = [
+                {
+                    "id": "loop_music",
+                    "path": ramp_wav,
+                    "start_ms": 0,
+                    "end_ms": 10000,
+                    "source_start_ms": 0,
+                    "volume": 100.0,
+                    "muted": False,
+                    "target_gain": 1.0,
+                    "current_gain": 1.0,
+                    "loop": True,
+                    "is_original_video": False,
+                }
+            ]
+            worker._readers = {ramp_wav: AudioReader(ramp_wav, sample_rate=16000)}
+            mock_io = MagicMock()
+            mock_io.write.return_value = 1280
+            mock_sink = MagicMock()
+            mock_sink.bytesFree.return_value = 100000
+            worker._sink = mock_sink
+            worker._io_device = mock_io
+
+            # Set timeline position near loop boundary (sample 960 -> 960/16 = 60ms exactly)
+            # Sample 960..1280 spans across boundary: 960..999 is [960:1000] (40 samples), 1000..1279 is [0:280] (280 samples)
+            worker._timeline_pos_ms = 60
+            worker._on_timer_tick()
+
+            self.assertTrue(mock_io.write.called)
+            written_bytes = mock_io.write.call_args[0][0]
+            written_samples = np.frombuffer(written_bytes, dtype=np.float32)
+            self.assertEqual(len(written_samples), 320)
+            # Verify continuity: first 40 samples match ramp[960:], next 280 match ramp[:280]
+            np.testing.assert_allclose(written_samples[:40], ramp_samples[960:1000], atol=1e-4)
+            np.testing.assert_allclose(written_samples[40:], ramp_samples[:280], atol=1e-4)
+        finally:
+            worker.close()
+            if os.path.exists(ramp_wav):
+                try:
+                    os.remove(ramp_wav)
+                except OSError:
+                    pass
+
+    def test_audio_worker_clock_advances_only_on_written_bytes(self):
+        """Ensure audio clock does not advance when io_device.write returns 0."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        worker = _PreviewAudioWorker()
+        try:
+            worker.block_size = 320
+            worker._sink_sr = 16000
+            worker._sink_channels = 1
+            worker._sink_is_float = True
+            worker._is_playing = True
+            worker._timeline_pos_ms = 500
+            worker._tracks = []
+            mock_sink = MagicMock()
+            mock_sink.bytesFree.return_value = 100000
+            mock_io = MagicMock()
+            # Simulate sink buffer full: 0 bytes written
+            mock_io.write.return_value = 0
+            worker._sink = mock_sink
+            worker._io_device = mock_io
+
+            worker._on_timer_tick()
+            # Clock should remain at 500
+            self.assertEqual(worker._timeline_pos_ms, 500)
+
+            # Now simulate successful write of 320 float32 samples (1280 bytes)
+            mock_io.write.return_value = 1280
+            worker._on_timer_tick()
+            # 320 samples @ 16kHz = 20ms -> 500 + 20 = 520ms
+            self.assertEqual(worker._timeline_pos_ms, 520)
+        finally:
+            worker.close()
+
+    def test_atempo_playback_rate(self):
+        """Ensure set_rate configures tempo filter on worker."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+
+        worker = _PreviewAudioWorker()
+        try:
+            worker.set_rate(1.5)
+            self.assertEqual(worker._playback_rate, 1.5)
+            # Setting close to 1.0 resets tempo graph
+            worker.set_rate(1.0)
+            self.assertEqual(worker._playback_rate, 1.0)
+        finally:
+            worker.close()
 
 
 if __name__ == "__main__":

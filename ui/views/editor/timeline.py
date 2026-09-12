@@ -2043,7 +2043,7 @@ class EditorTimeline(QGraphicsView):
             drag = self._selection_drag
             self._selection_drag = None
             if drag.get("mode") == "scrub":
-                self.scrubFinished.emit(int(self._playhead_time * 1000))
+                self.scrubFinished.emit(int(self._playhead * 1000))
                 event.accept()
                 return
             if not drag.get("changed", False) and drag.get("mode") == "new":

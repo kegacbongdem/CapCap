@@ -605,7 +605,11 @@ class MpvMediaPlayerBackend(QObject):
             try:
                 from .preview_audio import PreviewAudioEngine
                 self._native_audio_engine = PreviewAudioEngine(self)
-                self._native_audio_active = True
+                self._native_audio_engine.sinkReady.connect(self._on_native_audio_sink_ready)
+                self._native_audio_engine.error.connect(self._on_native_audio_error)
+                self._native_audio_engine.timelinePositionChanged.connect(self._on_native_audio_position_changed)
+                if self._native_audio_engine.is_ready():
+                    self._native_audio_active = True
                 self.log("[Preview] Native PCM PreviewAudioEngine enabled (opt-in)")
             except Exception as exc:
                 self.log(f"[Preview] Native audio initialization failed, using legacy sidecars: {exc}")
@@ -936,7 +940,22 @@ class MpvMediaPlayerBackend(QObject):
         if self._native_audio_active and self._native_audio_engine is not None:
             self._native_audio_engine.set_track_gain(track_id, gain, muted)
 
-    def close(self):
+    def _on_native_audio_sink_ready(self, ready: bool):
+        self._native_audio_active = bool(ready)
+        if ready:
+            self.log("[Preview] Native PCM PreviewAudioEngine sink ready and active")
+        else:
+            self.log("[Preview] Native PCM sink initialization failed, falling back to sidecars")
+
+    def _on_native_audio_error(self, err_msg: str):
+        self.log(f"[Preview] Native audio engine error: {err_msg}; falling back to legacy sidecars")
+        self._native_audio_active = False
+
+    def _on_native_audio_position_changed(self, pos_ms: int):
+        if self._native_audio_active:
+            self._dubbed_position_ms = pos_ms
+
+    def close_native_audio(self):
         """Release native audio engine and workers cleanly."""
         if self._native_audio_engine is not None:
             try:
@@ -944,6 +963,19 @@ class MpvMediaPlayerBackend(QObject):
             except Exception:
                 pass
             self._native_audio_engine = None
+        self._native_audio_active = False
+
+    def close(self):
+        """Release backend resources cleanly."""
+        if hasattr(self, "_poll_timer") and self._poll_timer.isActive():
+            self._poll_timer.stop()
+        if hasattr(self, "_sync_timer") and self._sync_timer.isActive():
+            self._sync_timer.stop()
+        self.close_native_audio()
+        try:
+            self._player.terminate()
+        except Exception:
+            pass
 
     def position(self):
         return self._position_ms
@@ -1431,6 +1463,30 @@ class MpvMediaPlayerBackend(QObject):
             v_paused = bool(self._player.pause)
         except Exception:
             return
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            if self._original_loaded_path:
+                try:
+                    if self._original_player.playbackState() == QMediaPlayer.PlayingState:
+                        self._original_player.pause()
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    if self._dubbed_player.playbackState() == QMediaPlayer.PlayingState:
+                        self._dubbed_player.pause()
+                except Exception:
+                    pass
+
+            if v_paused:
+                self._native_audio_engine.pause()
+            else:
+                self._native_audio_engine.play()
+
+            a_pos = self._native_audio_engine.timeline_position_ms()
+            if abs(v_pos_ms - a_pos) > 100:
+                self._native_audio_engine.seek(v_pos_ms)
+            return
+
         if self._original_loaded_path:
             try:
                 a_state = self._original_player.playbackState()
@@ -1639,6 +1695,11 @@ class MpvMediaPlayerBackend(QObject):
             self._player.speed = float(rate)
         except Exception:
             pass
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            try:
+                self._native_audio_engine.set_rate(float(rate))
+            except Exception:
+                pass
 
     def playback_rate(self):
         try:

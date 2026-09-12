@@ -3,7 +3,7 @@ import os
 import os
 
 from PySide6 import QtCore
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -808,19 +808,50 @@ def build_preview_panel(gui):
     if hasattr(gui, "voice_timing_sync_combo"):
         gui.timeline.set_voice_sync_mode(current_source_text(gui.voice_timing_sync_combo))
 
+    gui._scrub_pending_pos_ms = None
+    gui._scrub_was_playing = False
+    gui._scrub_throttle_timer = QTimer(gui)
+    gui._scrub_throttle_timer.setSingleShot(True)
+    gui._scrub_throttle_timer.setInterval(33)
+
+    def _flush_scrub_seek():
+        if getattr(gui, "_scrub_pending_pos_ms", None) is not None:
+            pos = gui._scrub_pending_pos_ms
+            gui._scrub_pending_pos_ms = None
+            gui.set_position(pos, exact=False)
+
+    gui._scrub_throttle_timer.timeout.connect(_flush_scrub_seek)
+
     def _on_scrub_started():
         gui._is_scrubbing = True
+        gui._scrub_was_playing = False
+        try:
+            if hasattr(gui, "media_player"):
+                gui._scrub_was_playing = bool(gui.media_player.is_playing())
+        except Exception:
+            pass
         if hasattr(gui, "media_player") and getattr(gui.media_player, "_native_audio_active", False):
             if hasattr(gui.media_player, "_native_audio_engine") and gui.media_player._native_audio_engine:
                 gui.media_player._native_audio_engine.pause()
 
     def _on_scrub_seek(pos_ms):
-        is_scrubbing = getattr(gui, "_is_scrubbing", False)
-        gui.set_position(pos_ms, exact=not is_scrubbing)
+        gui._scrub_pending_pos_ms = pos_ms
+        if not gui._scrub_throttle_timer.isActive():
+            gui._scrub_throttle_timer.start()
 
     def _on_scrub_finished(final_pos_ms):
         gui._is_scrubbing = False
+        if gui._scrub_throttle_timer.isActive():
+            gui._scrub_throttle_timer.stop()
+        gui._scrub_pending_pos_ms = None
         gui.set_position(final_pos_ms, exact=True)
+        if getattr(gui, "_scrub_was_playing", False):
+            gui._scrub_was_playing = False
+            try:
+                if hasattr(gui, "media_player"):
+                    gui.media_player.play()
+            except Exception:
+                pass
 
     gui.timeline.scrubStarted.connect(_on_scrub_started)
     gui.timeline.scrubFinished.connect(_on_scrub_finished)

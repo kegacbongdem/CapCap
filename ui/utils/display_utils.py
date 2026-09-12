@@ -5,6 +5,11 @@ import sys
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QLabel, QMessageBox, QDialog, QScrollArea, QVBoxLayout
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 def log_message(gui, message: str):
     if not message:
@@ -42,14 +47,14 @@ def clear_log(gui):
 def show_error(gui, title: str, short_msg: str, details: str = ""):
     if details:
         print(f"[{title}] {details}")
-        QMessageBox.critical(gui, title, short_msg)
+        QMessageBox.critical(gui, t(title), t(short_msg))
     else:
-        QMessageBox.critical(gui, title, short_msg)
+        QMessageBox.critical(gui, t(title), t(short_msg))
 
 
 def show_frame_preview_dialog(gui, image_path: str, qpixmap_cls, qt):
     dialog = QDialog(gui)
-    dialog.setWindowTitle("Large Frame Preview")
+    dialog.setWindowTitle(t("Large Frame Preview"))
     dialog.resize(720, 820)
 
     layout = QVBoxLayout(dialog)
@@ -73,12 +78,12 @@ def show_frame_preview_dialog(gui, image_path: str, qpixmap_cls, qt):
 def show_processed_files(gui):
     def fmt(label, path):
         if not path:
-            return f"- {label}: (none)"
-        status = "OK" if os.path.exists(path) else "MISSING"
-        return f"- {label}: [{status}]\n  {path}"
+            return f"- {t(label)}: ({t('None')})"
+        status = t("OK") if os.path.exists(path) else t("MISSING")
+        return f"- {t(label)}: [{status}]\n  {path}"
 
     lines = []
-    lines.append("Generated / Selected Files:\n")
+    lines.append(t("Generated / Selected Files:\n"))
     lines.append(fmt("Video", gui.video_path_edit.text()))
     lines.append(fmt("Extracted Audio", gui.processed_artifacts.get("audio_extracted") or gui.last_extracted_audio))
     lines.append(fmt("Vocals", gui.processed_artifacts.get("vocals") or gui.last_vocals_path))
@@ -90,7 +95,7 @@ def show_processed_files(gui):
     lines.append(fmt("Preview Video (temp)", gui.processed_artifacts.get("preview_video") or gui.last_preview_video_path))
     lines.append(fmt("Final Exported Video", gui.processed_artifacts.get("final_video") or gui.last_exported_video_path))
 
-    QMessageBox.information(gui, "Processed Files", "\n\n".join(lines))
+    QMessageBox.information(gui, t("Processed Files"), "\n\n".join(lines))
 
 
 def cleanup_temp_preview_files(gui):

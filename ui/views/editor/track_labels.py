@@ -9,6 +9,11 @@ try:
 except ImportError:  # pragma: no cover - source-tree fallback
     asset_path = None
 
+try:
+    from i18n import t
+except ImportError:  # pragma: no cover - source-tree fallback
+    from ui.i18n import t
+
 
 _ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
 _ICON_CACHE = {}
@@ -373,13 +378,13 @@ class TrackLabelBar(QFrame):
             is_clickable = bool(prefix)
         x = event.position().x()
         if is_clickable and x >= self.TRACK_HEADER_W - 84 and not self._controls_enabled:
-            self.setToolTip("Pause playback to edit layer controls")
+            self.setToolTip(t("Pause playback to edit layer controls"))
             self.setCursor(Qt.ForbiddenCursor)
             return
         if is_clickable and x >= self.TRACK_HEADER_W - 28:
-            self.setToolTip("Unlock layer" if self._track_locked[idx] else "Lock layer")
+            self.setToolTip(t("Unlock layer") if self._track_locked[idx] else t("Lock layer"))
         elif is_clickable and x >= self.TRACK_HEADER_W - 56 and prefix in SUBTITLE_PREFIXES:
-            self.setToolTip("Hide subtitle track" if self._track_subtitle_shown[idx] else "Show subtitle track")
+            self.setToolTip(t("Hide subtitle track") if self._track_subtitle_shown[idx] else t("Show subtitle track"))
         elif is_clickable and x >= self.TRACK_HEADER_W - 56 and (prefix in BLUR_PREFIXES or prefix in LOGO_PREFIXES or prefix in MASK_PREFIXES or prefix in TEXT_PREFIXES):
             hidden = False
             if prefix in BLUR_PREFIXES:
@@ -390,9 +395,9 @@ class TrackLabelBar(QFrame):
                 hidden = not self._track_mask_shown[idx]
             elif prefix in TEXT_PREFIXES:
                 hidden = not self._track_text_shown[idx]
-            self.setToolTip("Show layer" if hidden else "Hide layer")
+            self.setToolTip(t("Show layer") if hidden else t("Hide layer"))
         elif is_clickable and x >= self.TRACK_HEADER_W - 84 and prefix in MUTE_PREFIXES:
-            self.setToolTip("Unmute track" if self._track_muted[idx] else "Mute track")
+            self.setToolTip(t("Unmute track") if self._track_muted[idx] else t("Mute track"))
             self.setCursor(Qt.PointingHandCursor)
             return
         if is_clickable and x >= self.TRACK_HEADER_W - 84:
@@ -400,7 +405,7 @@ class TrackLabelBar(QFrame):
             self.setCursor(Qt.PointingHandCursor)
             return
         if is_clickable and event.position().x() >= self.TRACK_HEADER_W - 32:
-            self.setToolTip("Unlock layer" if self._track_locked[idx] else "Lock layer")
+            self.setToolTip(t("Unlock layer") if self._track_locked[idx] else t("Lock layer"))
         else:
             self.setToolTip("")
         self.setCursor(Qt.PointingHandCursor if is_clickable else Qt.ArrowCursor)

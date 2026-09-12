@@ -20,6 +20,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 def _timecode(seconds: float) -> str:
     total_ms = max(0, int(round(float(seconds or 0.0) * 1000)))
@@ -104,7 +109,9 @@ class SubtitleEditorDialog(QDialog):
         root.addLayout(replace_row)
 
         self.table = QTableWidget(len(self._original_segments), 6, self)
-        self.table.setHorizontalHeaderLabels(["#", "Start", "End", "Original", "Translated text", "Delete"])
+        self.table.setHorizontalHeaderLabels([
+            "#", t("Start"), t("End"), t("Original"), t("Translated text"), t("Delete"),
+        ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -206,7 +213,7 @@ class SubtitleEditorDialog(QDialog):
                     break
                 self._matches.append((row, found, len(needle)))
                 start = found + max(1, len(needle))
-        self.match_label.setText(f"{len(self._matches)} match{'es' if len(self._matches) != 1 else ''}")
+        self.match_label.setText(t("{count} match{suffix}", count=len(self._matches), suffix="es" if len(self._matches) != 1 else ""))
         if self._matches:
             self._select_match(1)
 
@@ -218,7 +225,7 @@ class SubtitleEditorDialog(QDialog):
         item = self.table.item(row, self._TEXT_COLUMN)
         self.table.setCurrentCell(row, self._TEXT_COLUMN)
         self.table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-        self.match_label.setText(f"{self._match_index + 1} / {len(self._matches)} matches")
+        self.match_label.setText(t("{current} / {total} matches", current=self._match_index + 1, total=len(self._matches)))
 
     def _replace_current(self):
         if not self._matches:
@@ -247,7 +254,7 @@ class SubtitleEditorDialog(QDialog):
                 item.setText(value)
                 replaced += count
         self._refresh_matches()
-        self.match_label.setText(f"Replaced {replaced} occurrence{'s' if replaced != 1 else ''}")
+        self.match_label.setText(t("Replaced {count} occurrence{suffix}", count=replaced, suffix="s" if replaced != 1 else ""))
 
     def _open_rewrite(self):
         if self._on_rewrite is None:
@@ -267,7 +274,7 @@ class SubtitleEditorDialog(QDialog):
             })
         if all(row["deleted"] for row in rows):
             answer = QMessageBox.question(
-                self, "Delete All Subtitles", "This removes every translated subtitle. Continue?",
+                self, t("Delete All Subtitles"), t("This removes every translated subtitle. Continue?"),
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if answer != QMessageBox.Yes:

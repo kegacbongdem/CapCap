@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
 from runtime_paths import bin_path
 from worker_adapters import ExactFramePreviewWorker, FinalExportWorker, PreviewMuxWorker, QuickPreviewWorker
 
+try:
+    from i18n import current_source_text, t
+except ImportError:
+    from ui.i18n import current_source_text, t
+
 
 
 class ExportSummaryDialog(QDialog):
@@ -110,7 +115,7 @@ class ExportSummaryDialog(QDialog):
         quality = self.quality_combo.currentData() or "medium"
         self.selected_quality = str(quality).strip().lower()
         desc = self.QUALITY_DESCRIPTIONS.get(self.selected_quality, "")
-        self.hint_label.setText(desc)
+        self.hint_label.setText(t(desc))
 
     def _on_start(self):
         settings = QSettings("CapCap", "CapCap")
@@ -802,7 +807,7 @@ class PreviewController:
             audio_mode = "Original + Dubbed"
 
         language_code = str(self.gui.get_target_language_code() if hasattr(self.gui, "get_target_language_code") else "").lower()
-        language_label = {"vi": "Vietnamese", "en": "English"}.get(language_code, language_code.upper() or "Output language")
+        language_label = t({"vi": "Vietnamese", "en": "English"}.get(language_code, language_code.upper() or "Output language"))
         quality_key = str(output_quality or "").strip().lower()
         quality_label = {
             "": "Source", "source": "Source", "same": "Source", "original": "Source", "auto": "Source",
@@ -819,36 +824,37 @@ class PreviewController:
         )
         filters_on = bool(self.gui.has_active_video_filters()) if hasattr(self.gui, "has_active_video_filters") else False
 
+        mode_label = t(mode_label)
         summary_lines = [
-            f"Name: {os.path.basename(output_path)}",
-            f"Folder: {os.path.dirname(output_path)}",
-            f"Mode: {mode_label}",
-            f"Duration: {self._format_duration_ms(duration_ms)}",
+            f"{t('Name')}: {os.path.basename(output_path)}",
+            f"{t('Folder')}: {os.path.dirname(output_path)}",
+            f"{t('Mode')}: {mode_label}",
+            f"{t('Duration')}: {self._format_duration_ms(duration_ms)}",
             "",
-            "VIDEO",
-            f"Resolution: {self._resolve_export_resolution_label(video_path, output_quality)}",
-            f"Frame Rate: {fps_label}",
-            f"Quality: {quality_label}",
-            f"Ratio: {ratio_label}",
-            f"Canvas: {canvas_label}",
-            f"Framing: {int(round(focus_x * 100))}% x / {int(round(focus_y * 100))}% y" if self.gui.get_output_scale_mode_key() == "fill" else "Framing: Center",
-            f"Video Filters: {'On' if filters_on else 'Off'}",
+            t("VIDEO"),
+            f"{t('Resolution')}: {self._resolve_export_resolution_label(video_path, output_quality)}",
+            f"{t('Frame Rate')}: {fps_label}",
+            f"{t('Quality')}: {t(quality_label)}",
+            f"{t('Ratio')}: {t(ratio_label)}",
+            f"{t('Canvas')}: {t(canvas_label)}",
+            f"{t('Framing')}: {int(round(focus_x * 100))}% x / {int(round(focus_y * 100))}% y" if self.gui.get_output_scale_mode_key() == "fill" else f"{t('Framing')}: {t('Center')}",
+            f"{t('Video Filters')}: {t('On') if filters_on else t('Off')}",
             "",
-            "AUDIO & LANGUAGE",
-            f"Language: {language_label}",
-            f"Audio Mode: {audio_mode}",
+            t("AUDIO & LANGUAGE"),
+            f"{t('Language')}: {language_label}",
+            f"{t('Audio Mode')}: {t(audio_mode)}",
         ]
         if mode_key in {"voice", "both"} and audio_mode != "No Audio":
             processing = str(self.gui.get_audio_handling_mode() if hasattr(self.gui, "get_audio_handling_mode") else "").strip().lower()
             processing_label = {"fast": "Fast", "clean": "Cleaner"}.get(processing, processing.capitalize() or "Standard")
-            summary_lines.append(f"Audio Processing: {processing_label}")
+            summary_lines.append(f"{t('Audio Processing')}: {t(processing_label)}")
         if mode_key in {"voice", "both"} and "Dubbed" in audio_mode:
-            summary_lines.append(f"Voice: {self._export_voice_summary()}")
+            summary_lines.append(f"{t('Voice')}: {self._export_voice_summary()}")
         summary_lines.extend([
             "",
-            "CONTENT",
-            f"Subtitles: {'Yes' if has_subtitles else 'No'}",
-            f"Layers: {self._active_export_layer_summary()}",
+            t("CONTENT"),
+            f"{t('Subtitles')}: {t('Yes') if has_subtitles else t('No')}",
+            f"{t('Layers')}: {self._active_export_layer_summary()}",
         ])
 
         dialog = ExportSummaryDialog(self.gui, "\n".join(summary_lines))
@@ -1085,7 +1091,7 @@ class PreviewController:
     def export_final_video(self):
         video_path = self.gui.video_path_edit.text().strip()
         if not video_path or not os.path.exists(video_path):
-            QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Please choose a video first."))
             return
 
         mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
@@ -1124,14 +1130,14 @@ class PreviewController:
                 translated_ass_path = ""
 
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
-            QMessageBox.warning(self.gui, "Error", "Translated subtitle file not found. Translate or import an SRT first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Translated subtitle file not found. Translate or import an SRT first."))
             return
 
         if mode in ("voice", "both") and (not chosen_audio or not os.path.exists(chosen_audio)):
             QMessageBox.warning(
                 self.gui,
-                "Error",
-                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
+                t("Error"),
+                t("No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes."),
             )
             return
 
@@ -1147,9 +1153,9 @@ class PreviewController:
         default_path = os.path.join(default_dir, suggested_name)
         output_path, _ = QFileDialog.getSaveFileName(
             self.gui,
-            "Export Final Video",
+            t("Export Final Video"),
             default_path,
-            "Video Files (*.mp4)",
+            t("Video Files (*.mp4)"),
         )
         if not output_path:
             return
@@ -1174,11 +1180,11 @@ class PreviewController:
             self.gui.persist_current_timeline_project_data()
 
         self.gui.export_btn.setEnabled(False)
-        self.gui.export_btn.setText("Exporting...")
+        self.gui.export_btn.setText(t("Exporting..."))
         self.gui.progress_bar.setValue(96)
         self.gui.update_project_step("export", "running")
-        self.gui._export_progress_messages = ["Preparing final export..."]
-        self.gui.on_export_progress(5, "Preparing final export...")
+        self.gui._export_progress_messages = [t("Preparing final export...")]
+        self.gui.on_export_progress(5, t("Preparing final export..."))
 
         project_state_path = self.gui.project_service.project_file(self.gui.current_project_state.project_root) if self.gui.current_project_state else ""
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
@@ -1218,7 +1224,7 @@ class PreviewController:
             self.gui.ensure_media_backend_ready()
         video_path = self.gui.video_path_edit.text().strip()
         if not video_path or not os.path.exists(video_path):
-            QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Please choose a video first."))
             return
 
         mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
@@ -1226,7 +1232,7 @@ class PreviewController:
         default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
         out_dir = QFileDialog.getExistingDirectory(
             self.gui,
-            "Choose Fast Preview Output Folder",
+            t("Choose Fast Preview Output Folder"),
             default_dir,
         )
         if not out_dir:
@@ -1245,14 +1251,14 @@ class PreviewController:
         if mode in ("subtitle", "both"):
             translated_srt_path = self._prepare_current_export_srt()
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
-            QMessageBox.warning(self.gui, "Error", "Translated subtitle file not found. Translate or import an SRT first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Translated subtitle file not found. Translate or import an SRT first."))
             return
 
         if mode in ("voice", "both") and (not chosen_audio or not os.path.exists(chosen_audio)):
             QMessageBox.warning(
                 self.gui,
-                "Error",
-                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
+                t("Error"),
+                t("No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes."),
             )
             return
 
@@ -1282,12 +1288,12 @@ class PreviewController:
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_subtitle_preview_srt(start_seconds, duration_seconds)
             if not preview_srt_path:
-                QMessageBox.warning(self.gui, "Error", "Could not build the 5-second subtitle preview clip.")
+                QMessageBox.warning(self.gui, t("Error"), t("Could not build the 5-second subtitle preview clip."))
                 return
             preview_ass_path = self._build_fast_preview_subtitle_ass(start_seconds, duration_seconds)
 
         self.gui.preview_5s_btn.setEnabled(False)
-        self.gui.preview_5s_btn.setText("Rendering...")
+        self.gui.preview_5s_btn.setText(t("Rendering..."))
         self.gui.progress_bar.setValue(92)
 
         try:
@@ -1332,7 +1338,7 @@ class PreviewController:
         video_path = self.gui.video_path_edit.text().strip()
         if not video_path or not os.path.exists(video_path):
             if show_dialog:
-                QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
+                QMessageBox.warning(self.gui, t("Error"), t("Please choose a video first."))
             return
 
         mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
@@ -1343,7 +1349,7 @@ class PreviewController:
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
         if mode in ("subtitle", "both") and not preview_srt_path and not has_active_video_filters:
             if show_dialog:
-                QMessageBox.warning(self.gui, "Error", "No active subtitle track is available for frame preview.")
+                QMessageBox.warning(self.gui, t("Error"), t("No active subtitle track is available for frame preview."))
             return
 
         if self.gui._frame_preview_running:
@@ -1360,9 +1366,9 @@ class PreviewController:
         self.gui._frame_preview_running = True
         self.gui._show_dialog_on_frame_preview = show_dialog
         self.gui.preview_frame_btn.setEnabled(False)
-        self.gui.preview_frame_btn.setText("Rendering frame...")
+        self.gui.preview_frame_btn.setText(t("Rendering frame..."))
         self.gui.progress_bar.setValue(90)
-        self.gui.frame_preview_status_label.setText("Rendering exact frame preview...")
+        self.gui.frame_preview_status_label.setText(t("Rendering exact frame preview..."))
         # For live filter thumbnail preview, render the source frame directly and let the UI
         # provide the black background. This keeps the actual video content larger.
         use_output_canvas = bool(show_dialog)
@@ -1393,13 +1399,13 @@ class PreviewController:
     def on_exact_frame_ready(self, output_path, error):
         self.gui._frame_preview_running = False
         self.gui.preview_frame_btn.setEnabled(True)
-        self.gui.preview_frame_btn.setText("Open Large Frame Preview")
+        self.gui.preview_frame_btn.setText(t("Open Large Frame Preview"))
         self.gui.progress_bar.setValue(100)
 
         if error:
-            self.gui.frame_preview_status_label.setText("Frame preview could not be rendered.")
+            self.gui.frame_preview_status_label.setText(t("Frame preview could not be rendered."))
             if self.gui._show_dialog_on_frame_preview:
-                self.gui.show_error("Error", "Frame preview failed.", str(error))
+                self.gui.show_error(t("Error"), t("Frame preview failed."), str(error))
             else:
                 self.gui.log(f"[Frame Preview] skipped: {error}")
             self.gui._show_dialog_on_frame_preview = False
@@ -1482,12 +1488,12 @@ class PreviewController:
     def on_export_finished(self, output_path, error):
         self.gui._close_export_progress_dialog()
         self.gui.export_btn.setEnabled(True)
-        self.gui.on_output_mode_changed(self.gui.output_mode_combo.currentText())
+        self.gui.on_output_mode_changed(current_source_text(self.gui.output_mode_combo))
         self.gui.progress_bar.setValue(100)
 
         if error:
             self.gui.update_project_step("export", "failed")
-            self.gui.show_error("Error", "Final export failed.", error)
+            self.gui.show_error(t("Error"), t("Final export failed."), error)
             return
 
         if output_path and os.path.exists(output_path):
@@ -1505,11 +1511,11 @@ class PreviewController:
             self.gui.ensure_media_backend_ready()
         self.gui._suspend_live_subtitle_sync = False
         self.gui.preview_5s_btn.setEnabled(True)
-        self.gui.preview_5s_btn.setText("Fast Preview")
+        self.gui.preview_5s_btn.setText(t("Fast Preview"))
         self.gui.progress_bar.setValue(100)
 
         if error:
-            self.gui.show_error("Error", "5-second preview failed.", error)
+            self.gui.show_error(t("Error"), t("5-second preview failed."), error)
             return
 
         if output_path and os.path.exists(output_path):
@@ -1546,14 +1552,14 @@ class PreviewController:
             audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
             self.gui.log("[Preview] Video file not found, showing error")
-            QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Video file not found. Please select a video first."))
             return
         if mode in ("voice", "both") and (not audio_path or not os.path.exists(audio_path)):
             self.gui.log(f"[Preview] Audio file not found for mode={mode}, showing error")
             QMessageBox.warning(
                 self.gui,
-                "Error",
-                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
+                t("Error"),
+                t("No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes."),
             )
             return
 
@@ -1591,7 +1597,7 @@ class PreviewController:
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_full_active_subtitle_srt()
             if not preview_srt_path:
-                QMessageBox.warning(self.gui, "Error", "No active subtitle track is available for video preview.")
+                QMessageBox.warning(self.gui, t("Error"), t("No active subtitle track is available for video preview."))
                 return
             subtitle_style = self.gui.get_subtitle_export_style(segments=preview_segments)
         else:
@@ -1701,8 +1707,8 @@ class PreviewController:
             self.gui._video_filter_apply_requested = False
             self.gui._play_video_filter_preview_when_ready = False
             self.gui._suspend_live_subtitle_sync = False
-            self.gui.show_error("Error", "Preview failed.", str(error))
-            self.gui._pipeline_fail("Preview failed.")
+            self.gui.show_error(t("Error"), t("Preview failed."), str(error))
+            self.gui._pipeline_fail(t("Preview failed."))
             self.gui.refresh_ui_state()
             return
 

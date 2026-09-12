@@ -1,10 +1,15 @@
 import json
 import os
 
+try:
+    from i18n import current_source_text, set_current_source_text
+except ImportError:
+    from ui.i18n import current_source_text, set_current_source_text
+
 
 def save_user_settings(gui):
     s = gui.settings
-    s.setValue("output_mode", gui.output_mode_combo.currentText())
+    s.setValue("output_mode", current_source_text(gui.output_mode_combo))
     # Output/canvas choices are intentionally session-local. Remove legacy
     # cached values so reopening another project always starts from defaults.
     for key in ("output_quality", "output_fps", "output_ratio", "output_scale_mode"):
@@ -23,7 +28,7 @@ def save_user_settings(gui):
         "voice_speed", "audio_handling_mode", "voice_gender", "voice_timing_sync_mode",
     ):
         s.remove(key)
-    s.setValue("source_lang", gui.lang_whisper_combo.currentText())
+    s.setValue("source_lang", current_source_text(gui.lang_whisper_combo))
     s.setValue("whisper_model_name", getattr(gui, "selected_whisper_model_name", "auto"))
     s.setValue("final_output_folder", gui.final_output_folder_edit.text())
     s.setValue("audio_folder", gui.audio_folder_edit.text())
@@ -56,7 +61,7 @@ def load_user_settings(gui):
     s = gui.settings
     # Generation is always Subtitle + Voice; ignore legacy single-output
     # preferences while preserving the hidden compatibility combo.
-    gui.output_mode_combo.setCurrentText("Vietnamese subtitles + voice")
+    set_current_source_text(gui.output_mode_combo, "Vietnamese subtitles + voice")
     if hasattr(gui, "output_quality_combo"):
         gui.output_quality_combo.setCurrentIndex(0)
     if hasattr(gui, "output_fps_combo"):
@@ -71,7 +76,7 @@ def load_user_settings(gui):
     filter_modified = {}
     if hasattr(gui, "set_video_filter_state"):
         gui.set_video_filter_state(filter_preset, filter_intensity, filter_overrides, filter_modified)
-    source_lang = s.value("source_lang", gui.lang_whisper_combo.currentText())
+    source_lang = s.value("source_lang", current_source_text(gui.lang_whisper_combo))
     gui.selected_whisper_model_name = str(
         s.value("whisper_model_name", getattr(gui, "selected_whisper_model_name", "auto")) or "auto"
     ).strip().lower()
@@ -80,9 +85,9 @@ def load_user_settings(gui):
     small_model_dir = os.path.join(gui.workspace_root, "models", "faster_whisper", "small")
     if gui.selected_whisper_model_name == "medium" and os.path.isdir(small_model_dir):
         gui.selected_whisper_model_name = "auto"
-    source_index = gui.lang_whisper_combo.findText(source_lang)
+    source_index = gui.lang_whisper_combo.findData(source_lang)
     if source_index < 0:
-        source_index = gui.lang_whisper_combo.findData(source_lang)
+        source_index = gui.lang_whisper_combo.findText(source_lang)
     if source_index >= 0:
         gui.lang_whisper_combo.setCurrentIndex(source_index)
     gui.final_output_folder_edit.setText(s.value("final_output_folder", gui.final_output_folder_edit.text()))
@@ -135,7 +140,7 @@ def load_user_settings(gui):
         if index >= 0:
             gui.speaker_diarization_speakers_combo.setCurrentIndex(index)
     if hasattr(gui, "timeline"):
-        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+        gui.timeline.set_voice_sync_mode(current_source_text(gui.voice_timing_sync_combo))
     
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         gui.ai_dubbing_rewrite_cb.setChecked(str(s.value("ai_dubbing_rewrite", "true")).lower() == "true")
@@ -151,7 +156,7 @@ def load_user_settings(gui):
     if hasattr(gui, "_capture_subtitle_custom_style_state"):
         gui._capture_subtitle_custom_style_state()
     gui.update_subtitle_preview_style()
-    gui.on_output_mode_changed(gui.output_mode_combo.currentText())
+    gui.on_output_mode_changed(current_source_text(gui.output_mode_combo))
 
     # Clear stale audio/project cache if no video is selected
     video_path = gui.video_path_edit.text().strip() if hasattr(gui, "video_path_edit") else ""

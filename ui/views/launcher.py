@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QComboBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -25,6 +26,11 @@ from PySide6.QtWidgets import (
 )
 
 from runtime_paths import asset_path, subprocess_hidden_kwargs, workspace_root
+
+try:
+    from i18n import get_language, language_items, localize_widget_tree, set_language, t
+except ImportError:
+    from ui.i18n import get_language, language_items, localize_widget_tree, set_language, t
 
 
 
@@ -147,7 +153,7 @@ class ProjectCard(QFrame):
         layout.addWidget(self.name_label)
 
         stage_text, stage_color = _project_pipeline_status(video_path)
-        self.stage_badge = QLabel(stage_text)
+        self.stage_badge = QLabel(t(stage_text))
         self.stage_badge.setAlignment(Qt.AlignCenter)
         self.stage_badge.setStyleSheet(
             f"background-color: #142437; color: {stage_color}; border: 1px solid #2e4b68; "
@@ -165,7 +171,7 @@ class ProjectCard(QFrame):
             self._orig_pixmap = QPixmap(thumb_path)
             self._update_thumb()
         else:
-            self.thumb_label.setText("No Preview")
+            self.thumb_label.setText(t("No Preview"))
 
     def _update_thumb(self):
         if self._orig_pixmap is None or self._orig_pixmap.isNull():
@@ -224,7 +230,7 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
         os.makedirs(cache_dir, exist_ok=True)
 
         if callable(progress_cb):
-            progress_cb("Đang kiểm tra bộ đệm dự án...", 20)
+                progress_cb(t("Checking project cache..."), 20)
 
         try:
             with open(manifest_path, "r", encoding="utf-8") as handle:
@@ -240,7 +246,7 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
             ):
                 print("[Launcher] Timeline visuals loaded from cache")
                 if callable(progress_cb):
-                    progress_cb("Bộ đệm dự án đã sẵn sàng!", 100)
+                    progress_cb(t("Project cache ready!"), 100)
                 return
         except (OSError, ValueError, TypeError):
             pass
@@ -264,11 +270,11 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
             except OSError:
                 pass
             if callable(progress_cb):
-                progress_cb("Sẵn sàng mở dự án!", 100)
+                progress_cb(t("Ready to open project!"), 100)
             return
 
         if callable(progress_cb):
-            progress_cb("Đang trích xuất waveform và khung hình timeline...", 45)
+            progress_cb(t("Extracting timeline waveform and thumbnails..."), 45)
 
         if duration_s <= 60.0:
             interval_s = max(2.0, duration_s / 12.0)
@@ -349,7 +355,7 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
             }, handle)
         print(f"[Launcher] Timeline visuals prepared: waveform={len(waveform)}, thumbnails={len(thumbnails)}")
         if callable(progress_cb):
-            progress_cb("Sẵn sàng mở dự án!", 100)
+            progress_cb(t("Ready to open project!"), 100)
     except Exception as exc:
         print(f"[Launcher] Timeline visual preparation skipped: {exc}")
 
@@ -370,13 +376,14 @@ class VisualCacheWorker(QThread):
             _prepare_timeline_visual_cache(self.target_video, self.temp_root, progress_cb=_on_progress)
         except Exception as exc:
             print(f"[Launcher] Visual cache preparation error: {exc}")
-        self.progress.emit("Sẵn sàng mở dự án!", 100)
+        self.progress.emit(t("Ready to open project!"), 100)
         self.finished_prep.emit()
 
 
 class LauncherWindow(QDialog):
     def __init__(self):
         super().__init__()
+        set_language(get_language())
         self.selected_video = ""
         self.selected_device = "cuda"
         self._thumbnail_dir = os.path.join(workspace_root(), "temp", "launcher_thumbs")
@@ -387,7 +394,7 @@ class LauncherWindow(QDialog):
         if os.path.exists(logo):
             self.setWindowIcon(QIcon(logo))
 
-        self.setWindowTitle("CapCap - Video Translator")
+        self.setWindowTitle(t("CapCap - Video Translator"))
         self.setMinimumSize(840, 540)
         self.setStyleSheet("""
             QDialog {
@@ -411,9 +418,11 @@ class LauncherWindow(QDialog):
         root.setSpacing(16)
 
         header = QHBoxLayout()
-        title = QLabel("CapCap V7")
+        self._title_label = QLabel("CapCap V7")
+        title = self._title_label
         title.setStyleSheet("font-size: 26px; font-weight: 800; color: #ffffff;")
-        subtitle = QLabel("Video Translation & Voiceover Studio")
+        self._subtitle_label = QLabel("Video Translation & Voiceover Studio")
+        subtitle = self._subtitle_label
         subtitle.setStyleSheet("font-size: 12px; color: #6ee7d6;")
 
 
@@ -438,6 +447,23 @@ class LauncherWindow(QDialog):
         )
         self._missing_label.hide()
         header_text.addWidget(self._missing_label)
+
+        language_row = QHBoxLayout()
+        self._language_label = QLabel("Language")
+        self._language_label.setStyleSheet("color: #8ad7ff; font-size: 12px; font-weight: 700;")
+        self.language_combo = QComboBox()
+        self.language_combo.setObjectName("languageSelector")
+        self.language_combo.setMinimumWidth(125)
+        for label, code in language_items():
+            self.language_combo.addItem(label, code)
+        self.language_combo.setCurrentIndex(
+            max(0, self.language_combo.findData(get_language()))
+        )
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        language_row.addWidget(self._language_label)
+        language_row.addWidget(self.language_combo)
+        language_row.addStretch()
+        header_text.addLayout(language_row)
 
         device_row = QHBoxLayout()
         device_row.setSpacing(0)
@@ -694,6 +720,43 @@ class LauncherWindow(QDialog):
         loading_center_layout.addStretch(1)
         self.loading_container.hide()
         root.addWidget(self.loading_container, 1)
+        self._retranslate_ui()
+
+    def _on_language_changed(self, index: int):
+        code = self.language_combo.itemData(index)
+        if not code:
+            return
+        set_language(code)
+        self._retranslate_ui()
+
+    def _retranslate_ui(self):
+        """Refresh launcher copy and cards after an immediate language change."""
+        localize_widget_tree(self)
+        self.setWindowTitle(t("CapCap - Video Translator"))
+        self._title_label.setText(t("CapCap V7"))
+        self._subtitle_label.setText(t("Video Translation & Voiceover Studio"))
+        self._language_label.setText(t("Language"))
+        self.cpu_btn.setText(t("CPU"))
+        self._update_gpu_label(
+            bool(getattr(self, "_last_has_gpu", False)),
+            str(getattr(self, "_last_gpu_name", "")),
+            bool(getattr(self, "_last_cuda_ready", False)),
+        )
+        self.new_btn.setText(t("+ New Project"))
+        self.split_btn.setText(t("Split Video"))
+        self.resource_btn.setText(t("Manage Resources"))
+        self.clean_video_btn.setText(t("Clean Video Data"))
+        self.clean_video_btn.setToolTip(t("Remove generated project data and video preview caches"))
+        self.open_project_btn.setText(t("Open Project Folder"))
+        self.open_project_btn.setToolTip(t("Open the CapCap projects folder"))
+        self.about_btn.setText(t("About / Help"))
+        self.section_label.setText(t("Recent Projects"))
+        self.empty_label.setText(t('No recent projects. Click "+ New Project" to start.'))
+        self.loading_title.setText(t("Opening Project..."))
+        self.loading_status_label.setText(t("Preparing workspace..."))
+        self._load_recent()
+        if hasattr(self, "_missing_label"):
+            self._validate_resources_for_device()
 
     def set_project_loader(self, loader):
         self._project_loader = loader
@@ -714,12 +777,13 @@ class LauncherWindow(QDialog):
             getattr(self, "about_btn", None),
             getattr(self, "cpu_btn", None),
             getattr(self, "gpu_btn", None),
+            getattr(self, "language_combo", None),
         ):
             if btn is not None:
                 btn.setEnabled(False)
         self.loading_file_label.setText(os.path.basename(video_path))
         self.loading_bar.setValue(10)
-        self.loading_status_label.setText("Preparing environment and hardware...")
+        self.loading_status_label.setText(t("Preparing environment and hardware..."))
         self.loading_container.show()
         self.loading_panel.show()
         from PySide6.QtWidgets import QApplication
@@ -743,18 +807,18 @@ class LauncherWindow(QDialog):
             is_ok, missing, _advisory = self._launch_resource_state(service)
             if not is_ok:
                 from PySide6.QtWidgets import QMessageBox
-                labels = [label for _rid, label in missing]
+                labels = [t(label) for _rid, label in missing]
                 if self.selected_device == "cpu":
-                    prefix = "CPU mode needs:"
+                    prefix = t("CPU mode needs:")
                 else:
-                    prefix = "GPU mode needs:"
+                    prefix = t("GPU mode needs:")
                 mb = QMessageBox(self)
                 mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("Missing Resources")
+                mb.setWindowTitle(t("Missing Resources"))
                 mb.setText(f"{prefix}\n\n" + "\n".join(f"- {label}" for label in labels))
-                mb.setInformativeText("Open Manage Resources to download them.")
-                mb.addButton("Manage Resources", QMessageBox.AcceptRole)
-                mb.addButton("Close", QMessageBox.RejectRole)
+                mb.setInformativeText(t("Open Manage Resources to download them."))
+                mb.addButton(t("Manage Resources"), QMessageBox.AcceptRole)
+                mb.addButton(t("Close"), QMessageBox.RejectRole)
                 mb.setStyleSheet(MSG_STYLE)
                 mb.exec()
                 self._validate_resources_for_device()
@@ -892,13 +956,13 @@ class LauncherWindow(QDialog):
             self._update_gpu_label(has_gpu, gpu_name, cuda_ready)
             if not cuda_ready:
                 self.gpu_btn.setEnabled(False)
-                self.gpu_btn.setText("GPU (N/A)")
+                self.gpu_btn.setText(t("GPU (N/A)"))
         elif device == "cpu":
             has_gpu, _gpu_name, cuda_ready = self._detect_gpu_with_cuda()
             gpu_usable = has_gpu and cuda_ready
             if gpu_usable:
                 self.gpu_btn.setEnabled(True)
-                self.gpu_btn.setText("GPU (Recommended)")
+                self.gpu_btn.setText(t("GPU (Recommended)"))
                 self._update_gpu_label(has_gpu, _gpu_name, cuda_ready)
         if is_ok and not advisory:
             self._missing_label.hide()
@@ -906,8 +970,8 @@ class LauncherWindow(QDialog):
             if hasattr(self, "new_btn") and self.new_btn.toolTip():
                 self.new_btn.setToolTip("")
         elif is_ok:
-            labels = [label for _rid, label in advisory]
-            text = (
+            labels = [t(label) for _rid, label in advisory]
+            text = t(
                 "SenseVoice is not detected yet. You can continue to the Main UI; "
                 "download SenseVoice from Manage Resources before using it for transcription."
             )
@@ -915,14 +979,18 @@ class LauncherWindow(QDialog):
             self._missing_label.show()
             self.new_btn.setToolTip(text)
         else:
-            labels = [label for _rid, label in missing]
+            labels = [t(label) for _rid, label in missing]
             if advisory:
-                labels.extend(label for _rid, label in advisory)
+                labels.extend(t(label) for _rid, label in advisory)
             if device == "cpu":
-                prefix = "CPU mode needs:"
+                prefix = t("CPU mode needs:")
             else:
-                prefix = "GPU mode needs:"
-            text = f"{prefix} {', '.join(labels)}. Open Manage Resources to set them up."
+                prefix = t("GPU mode needs:")
+            text = t(
+                "{prefix} {labels}. Open Manage Resources to set them up.",
+                prefix=prefix,
+                labels=", ".join(labels),
+            )
             self._missing_label.setText(text)
             self._missing_label.show()
             self.new_btn.setToolTip(text)
@@ -968,8 +1036,8 @@ class LauncherWindow(QDialog):
 
     def _on_new_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video", "",
-            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)"
+            self, t("Select Video"), "",
+            t("Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)")
         )
         if path:
             self.selected_video = path
@@ -992,17 +1060,17 @@ class LauncherWindow(QDialog):
                 from PySide6.QtCore import QUrl
                 QDesktopServices.openUrl(QUrl.fromLocalFile(projects_dir))
         except Exception as exc:
-            message = QMessageBox(QMessageBox.Warning, "Open Project Folder",
-                f"Could not open the projects folder:\n\n{exc}", QMessageBox.Ok, self)
+            message = QMessageBox(QMessageBox.Warning, t("Open Project Folder"),
+                t("Could not open the projects folder:\n\n{error}", error=exc), QMessageBox.Ok, self)
             message.setStyleSheet(MSG_STYLE)
             message.exec()
 
     def _on_clean_video_data(self):
         from PySide6.QtWidgets import QMessageBox
 
-        confirm = QMessageBox(QMessageBox.Warning, "Clean Video Data",
-            "Remove all generated project data and video preview caches?\n\n"
-            "Source videos, downloaded models, Piper voices, CUDA files, and application resources will not be touched.",
+        confirm = QMessageBox(QMessageBox.Warning, t("Clean Video Data"),
+            t("Remove all generated project data and video preview caches?\n\n"
+              "Source videos, downloaded models, Piper voices, CUDA files, and application resources will not be touched."),
             QMessageBox.Yes | QMessageBox.No, self)
         confirm.setStyleSheet(MSG_STYLE)
         if confirm.exec() != QMessageBox.Yes:
@@ -1074,13 +1142,13 @@ class LauncherWindow(QDialog):
 
         if errors:
             detail = "\n".join(errors)
-            message = QMessageBox(QMessageBox.Warning, "Clean Video Data",
-                f"Some data could not be removed:\n\n{detail}", QMessageBox.Ok, self)
+            message = QMessageBox(QMessageBox.Warning, t("Clean Video Data"),
+                t("Some data could not be removed:\n\n{detail}", detail=detail), QMessageBox.Ok, self)
             message.setStyleSheet(MSG_STYLE)
             message.exec()
         else:
-            message = QMessageBox(QMessageBox.Information, "Clean Video Data",
-                "Generated project data and video caches were cleared.", QMessageBox.Ok, self)
+            message = QMessageBox(QMessageBox.Information, t("Clean Video Data"),
+                t("Generated project data and video caches were cleared."), QMessageBox.Ok, self)
             message.setStyleSheet(MSG_STYLE)
             message.exec()
 
@@ -1090,7 +1158,7 @@ class LauncherWindow(QDialog):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTextBrowser, QVBoxLayout, QHBoxLayout
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("About CapCap")
+        dialog.setWindowTitle(t("About CapCap"))
         dialog.setMinimumSize(650, 650)
         dialog.setStyleSheet("QDialog { background: #0a101e; color: #d7e3f4; }")
         layout = QVBoxLayout(dialog)
@@ -1104,50 +1172,50 @@ class LauncherWindow(QDialog):
             "QTextBrowser { background: #0f1928; color: #d7e3f4; border: 1px solid #1e3045; "
             "border-radius: 8px; padding: 10px; }"
         )
-        browser.setHtml("""
-        <h3 style='color:#8ad7ff;'>Description</h3>
-        <p>CapCap is a Windows application that supports both CPU and GPU processing.</p>
-        <p>GPU mode provides the best overall experience and performance. GPU acceleration currently supports NVIDIA GPUs.</p>
-        <p>If CUDA is not detected correctly, first update your NVIDIA GPU driver. If needed, install CUDA 12.8 from:<br>
+        browser.setHtml(f"""
+        <h3 style='color:#8ad7ff;'>{t("Description")}</h3>
+        <p>{t("CapCap is a Windows application that supports both CPU and GPU processing.")}</p>
+        <p>{t("GPU mode provides the best overall experience and performance. GPU acceleration currently supports NVIDIA GPUs.")}</p>
+        <p>{t("If CUDA is not detected correctly, first update your NVIDIA GPU driver. If needed, install CUDA 12.8 from:")}<br>
         <a href='https://developer.nvidia.com/cuda-12-8-0-download-archive'>CUDA 12.8 Download Archive</a></p>
 
-        <h3 style='color:#8ad7ff;'>Tutorial / Resource Setup</h3>
-        <p>Download the resource, then place it in the matching CapCap folder:</p>
+        <h3 style='color:#8ad7ff;'>{t("Tutorial / Resource Setup")}</h3>
+        <p>{t("Download the resource, then place it in the matching CapCap folder:")}</p>
         <table cellspacing='6'>
-        <tr><td><b>Whisper models</b></td><td><code>CapCap\\models\\faster_whisper</code></td></tr>
-        <tr><td><b>CUDA / cuDNN runtime</b></td><td><code>CapCap\\bin\\cuda12_fw</code></td></tr>
-        <tr><td><b>SenseVoice</b></td><td>Bundled by default in <code>CapCap\\models\\sensevoice</code></td></tr>
-        <tr><td><b>RapidOCR models</b></td><td>Bundled by default; optional files use <code>CapCap\\rapidocr\\models</code></td></tr>
-        <tr><td><b>Piper voices</b></td><td><code>CapCap\\models\\piper</code> (Vietnamese: shared <code>config.json</code>) or <code>CapCap\\models\\piper-en</code> (English)</td></tr>
-        <tr><td><b>Speaker Detection</b></td><td><code>CapCap\\models\\pyannote</code></td></tr>
+        <tr><td><b>{t("Whisper models")}</b></td><td><code>CapCap\\models\\faster_whisper</code></td></tr>
+        <tr><td><b>{t("CUDA / cuDNN runtime")}</b></td><td><code>CapCap\\bin\\cuda12_fw</code></td></tr>
+        <tr><td><b>{t("SenseVoice")}</b></td><td>{t("Bundled by default in")} <code>CapCap\\models\\sensevoice</code></td></tr>
+        <tr><td><b>{t("RapidOCR models")}</b></td><td>{t("Bundled by default; optional files use")} <code>CapCap\\rapidocr\\models</code></td></tr>
+        <tr><td><b>{t("Piper voices")}</b></td><td><code>CapCap\\models\\piper</code> ({t("Vietnamese")}: shared <code>config.json</code>) {t("or")} <code>CapCap\\models\\piper-en</code> ({t("English")})</td></tr>
+        <tr><td><b>{t("Speaker Detection")}</b></td><td><code>CapCap\\models\\pyannote</code></td></tr>
         </table>
-        <p>Resource Manager provides download links for supported optional resources. Extract downloaded archives into the folder shown above.</p>
+        <p>{t("Resource Manager provides download links for supported optional resources. Extract downloaded archives into the folder shown above.")}</p>
 
-        <h3 style='color:#8ad7ff;'>How to Setup</h3>
-        <p>CapCap has two processing modes: <b>CPU Mode</b> and <b>GPU Mode</b>.</p>
-        <p><b>CPU Mode:</b> Ready to use immediately without additional downloads. Optional resources add more models, voices, or features.</p>
-        <p><b>GPU Mode:</b> Requires the <b>GPU Acceleration Pack</b>. Download and extract it into <code>CapCap\\bin</code>. Whisper Medium is optional but recommended for better GPU transcription quality.</p>
-        <p>Other resources are optional enhancements. CapCap works without them unless you select a feature that needs one.</p>
+        <h3 style='color:#8ad7ff;'>{t("How to Setup")}</h3>
+        <p>{t("CapCap has two processing modes:")} <b>{t("CPU Mode")}</b> {t("and")} <b>{t("GPU Mode")}</b>.</p>
+        <p><b>{t("CPU Mode")}:</b> {t("Ready to use immediately without additional downloads. Optional resources add more models, voices, or features.")}</p>
+        <p><b>{t("GPU Mode")}:</b> {t("Requires the GPU Acceleration Pack. Download and extract it into")} <code>CapCap\\bin</code>. {t("Whisper Medium is optional but recommended for better GPU transcription quality.")}</p>
+        <p>{t("Other resources are optional enhancements. CapCap works without them unless you select a feature that needs one.")}</p>
 
-        <h3 style='color:#8ad7ff;'>How to Use</h3>
-        <p><b>Left side:</b> Workflow progress, configuration, and options.</p>
-        <p><b>Right side — Top:</b> Video Preview and action buttons on the left; the selected Timeline layer's Inspector on the right.</p>
-        <p><b>Right side — Bottom:</b> Timeline Editor and timeline editing actions.</p>
+        <h3 style='color:#8ad7ff;'>{t("How to Use")}</h3>
+        <p><b>{t("Left side:")}</b> {t("Workflow progress, configuration, and options.")}</p>
+        <p><b>{t("Right side — Top:")}</b> {t("Video Preview and action buttons on the left; the selected Timeline layer's Inspector on the right.")}</p>
+        <p><b>{t("Right side — Bottom:")}</b> {t("Timeline Editor and timeline editing actions.")}</p>
         <ol>
-        <li>Use the setup guidance above and download any resources you need.</li>
-        <li>Open Settings and select the Subtitle Source and AI Translation provider.</li>
-        <li>In Language, select the input and output languages.</li>
-        <li>Click <b>Generate</b>: choose <b>Full Pipeline</b> to run automatically, or <b>Step-by-Step</b> for individual phase control.</li>
+        <li>{t("Use the setup guidance above and download any resources you need.")}</li>
+        <li>{t("Open Settings and select the Subtitle Source and AI Translation provider.")}</li>
+        <li>{t("In Language, select the input and output languages.")}</li>
+        <li>{t("Click Generate: choose Full Pipeline to run automatically, or Step-by-Step for individual phase control.")}</li>
         </ol>
 
-        <h3 style='color:#8ad7ff;'>Developer Information</h3>
+        <h3 style='color:#8ad7ff;'>{t("Developer Information")}</h3>
         <p>GitHub: <a href='https://github.com/notepower2k1/CapCap'>github.com/notepower2k1/CapCap</a></p>
         """)
         layout.addWidget(browser, 1)
 
         donation_row = QHBoxLayout()
         donation_row.setSpacing(18)
-        donation_label = QLabel("Donate Vietnam\nScan to support development", dialog)
+        donation_label = QLabel(t("Donate Vietnam\nScan to support development"), dialog)
         donation_label.setStyleSheet("color:#d7e3f4; font-weight:600;")
         qr_label = QLabel(dialog)
         qr_label.setAlignment(Qt.AlignCenter)
@@ -1156,14 +1224,14 @@ class LauncherWindow(QDialog):
         if not qr_pixmap.isNull():
             qr_label.setPixmap(qr_pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            qr_label.setText("QR unavailable")
+            qr_label.setText(t("QR unavailable"))
         donation_row.addWidget(donation_label)
         donation_row.addWidget(qr_label)
         donation_row.addStretch()
 
         coffee_group = QHBoxLayout()
         coffee_group.setSpacing(5)
-        coffee_text = QLabel("International Donation\nClick to Buy Me a Coffee", dialog)
+        coffee_text = QLabel(t("International Donation\nClick to Buy Me a Coffee"), dialog)
         coffee_text.setStyleSheet("color:#d7e3f4; font-weight:600;")
         coffee_group.addWidget(coffee_text)
         coffee_path = asset_path("buymeacoffee.png")
@@ -1173,8 +1241,8 @@ class LauncherWindow(QDialog):
         if not coffee_pixmap.isNull():
             coffee_image.setPixmap(coffee_pixmap.scaled(190, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            coffee_image.setText("Buy Me a Coffee image unavailable")
-        coffee_image.setToolTip("Open Buy Me a Coffee")
+            coffee_image.setText(t("Buy Me a Coffee image unavailable"))
+        coffee_image.setToolTip(t("Open Buy Me a Coffee"))
         coffee_image.setCursor(Qt.PointingHandCursor)
         coffee_image.setAccessibleName("International Donation - Buy Me a Coffee")
         coffee_image.mousePressEvent = lambda _event: QDesktopServices.openUrl(QUrl("https://buymeacoffee.com/hcaht"))
@@ -1190,16 +1258,16 @@ class LauncherWindow(QDialog):
         from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog
         from PySide6.QtCore import QThread, Signal
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Long Video to Split", "",
-            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)"
+            self, t("Select Long Video to Split"), "",
+            t("Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)")
         )
         if not path:
             return
 
         duration = _get_video_duration(path)
         if duration <= 0:
-            mb = QMessageBox(QMessageBox.Warning, "Invalid Video",
-                "Could not determine video duration.",
+            mb = QMessageBox(QMessageBox.Warning, t("Invalid Video"),
+                t("Could not determine video duration."),
                 QMessageBox.Ok, self)
             mb.setStyleSheet(MSG_STYLE)
             mb.exec()
@@ -1209,8 +1277,8 @@ class LauncherWindow(QDialog):
         m = int((duration % 3600) // 60)
 
         seg_minutes, ok = QInputDialog.getInt(
-            self, "Segment Duration",
-            f"Video is {h}h {m}m.\nSplit into segments of how many minutes?",
+            self, t("Segment Duration"),
+            t("Video is {hours}h {minutes}m.\nSplit into segments of how many minutes?", hours=h, minutes=m),
             120, 10, 1440, 10,
         )
         if not ok:
@@ -1220,16 +1288,15 @@ class LauncherWindow(QDialog):
         base, ext = os.path.splitext(path)
         out_pattern = f"{base}_part%03d{ext}"
 
-        reply = QMessageBox(QMessageBox.Question, "Confirm Split",
-            f"Split into {seg_minutes}-minute segments using stream copy (no re-encode, fast).\n\n"
-            f"Output: {out_pattern}\n\nContinue?",
+        reply = QMessageBox(QMessageBox.Question, t("Confirm Split"),
+            t("Split into {minutes}-minute segments using stream copy (no re-encode, fast).\n\nOutput: {output}\n\nContinue?", minutes=seg_minutes, output=out_pattern),
             QMessageBox.Yes | QMessageBox.No, self)
         reply.setStyleSheet(MSG_STYLE)
         if reply.exec() != QMessageBox.Yes:
             return
 
-        progress = QProgressDialog("Splitting video...", None, 0, 0, self)
-        progress.setWindowTitle("Split Video")
+        progress = QProgressDialog(t("Splitting video..."), None, 0, 0, self)
+        progress.setWindowTitle(t("Split Video"))
         progress.setModal(True)
         progress.setCancelButton(None)
         progress.show()
@@ -1253,8 +1320,8 @@ class LauncherWindow(QDialog):
         threading.Thread(target=_do_split, daemon=True).start()
         progress.exec()
 
-        mb = QMessageBox(QMessageBox.Information, "Done",
-            f"Video split into {seg_minutes}-minute segments.\nSaved alongside the original file.",
+        mb = QMessageBox(QMessageBox.Information, t("Done"),
+            t("Video split into {minutes}-minute segments.\nSaved alongside the original file.", minutes=seg_minutes),
             QMessageBox.Ok, self)
         mb.setStyleSheet(MSG_STYLE)
         mb.exec()
@@ -1294,15 +1361,18 @@ class LauncherWindow(QDialog):
         return has_gpu, gpu_name, cuda_ready
 
     def _update_gpu_label(self, has_gpu: bool, gpu_name: str, cuda_ready: bool):
+        self._last_has_gpu = bool(has_gpu)
+        self._last_gpu_name = str(gpu_name or "")
+        self._last_cuda_ready = bool(cuda_ready)
         if has_gpu:
             if cuda_ready:
-                self._gpu_label.setText(f"GPU: {gpu_name}  \u2713 CUDA ready")
+                self._gpu_label.setText(t("GPU: {gpu_name}  ✓ CUDA ready", gpu_name=gpu_name))
                 self._gpu_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
             else:
-                self._gpu_label.setText(f"GPU: {gpu_name}  \u2717 Need GPU Acceleration Pack")
+                self._gpu_label.setText(t("GPU: {gpu_name}  ✗ Need GPU Acceleration Pack", gpu_name=gpu_name))
                 self._gpu_label.setStyleSheet("font-size: 11px; color: #ffa500;")
         else:
-            self._gpu_label.setText("CPU only")
+            self._gpu_label.setText(t("CPU only"))
             self._gpu_label.setStyleSheet("font-size: 11px; color: #5a7a9a;")
 
     @staticmethod

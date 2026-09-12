@@ -31,6 +31,11 @@ from widgets import MpvVideoView, VideoView
 from utils.icon_utils import load_icon
 from utils.media_backend import is_mpv_backend_available
 
+try:
+    from i18n import current_source_text, t
+except ImportError:
+    from ui.i18n import current_source_text, t
+
 
 def _import_editor_timeline():
     import importlib.util, os, sys
@@ -801,7 +806,7 @@ def build_preview_panel(gui):
     gui.timeline.setMinimumHeight(0)
     gui.timeline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     if hasattr(gui, "voice_timing_sync_combo"):
-        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+        gui.timeline.set_voice_sync_mode(current_source_text(gui.voice_timing_sync_combo))
     gui.timeline.seekRequestedMs.connect(gui.set_position)
     gui.timeline.segmentSelected.connect(gui.on_timeline_segment_selected)
     gui.timeline.segmentTimingEditStarted.connect(gui.on_timeline_segment_timing_edit_started)
@@ -1047,7 +1052,7 @@ def build_preview_panel(gui):
     gui.timeline_selection_mode_btn = QPushButton("Select Range")
     gui.timeline_selection_mode_btn.setCheckable(True)
     gui.timeline_selection_mode_btn.setFixedWidth(96)
-    gui.timeline_selection_mode_btn.setToolTip("Enable Selection Range Mode")
+    gui.timeline_selection_mode_btn.setToolTip(t("Enable Selection Range Mode"))
     gui.timeline_selection_mode_btn.setStyleSheet(
         "QPushButton:checked { background:#244b6d; border-color:#71adff; color:#ffffff; }"
     )
@@ -1091,10 +1096,10 @@ def build_preview_panel(gui):
         gui.timeline_selection_mode_btn.blockSignals(True)
         gui.timeline_selection_mode_btn.setChecked(bool(enabled))
         gui.timeline_selection_mode_btn.blockSignals(False)
-        gui.timeline_selection_mode_btn.setText("Selecting" if enabled else "Select Range")
+        gui.timeline_selection_mode_btn.setText(t("Selecting") if enabled else t("Select Range"))
         gui.timeline_selection_mode_btn.setToolTip(
-            "Selection Range Mode active: drag the ruler to create or adjust a range"
-            if enabled else "Enable Selection Range Mode"
+            t("Selection Range Mode active: drag the ruler to create or adjust a range")
+            if enabled else t("Enable Selection Range Mode")
         )
     gui.timeline.selectionModeChanged.connect(_on_selection_mode_changed)
     gui.timeline_layers_btn = QPushButton("Layers")

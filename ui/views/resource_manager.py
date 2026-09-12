@@ -18,6 +18,11 @@ from PySide6.QtWidgets import (
 from runtime_paths import workspace_root as default_workspace_root
 from services import ResourceDownloadService
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 _STATUS_STYLES = {
     "installed": ("Ready", "#3ddc97", "#1b3b2c"),
@@ -29,7 +34,7 @@ _STATUS_STYLES = {
 def _status_pill_widget(status_key: str, parent: QWidget, label_override: str = "") -> QLabel:
     status = str(status_key or "").strip().lower()
     default_label, fg, bg = _STATUS_STYLES.get(status, _STATUS_STYLES["missing"])
-    label = str(label_override or default_label).strip() or default_label
+    label = t(str(label_override or default_label).strip() or default_label)
     pill = QLabel(label, parent)
     pill.setAlignment(Qt.AlignCenter)
     pill.setStyleSheet(
@@ -61,7 +66,7 @@ def _open_folder_dialog(gui_parent, path: str) -> None:
         os.makedirs(target, exist_ok=True)
         os.startfile(os.path.abspath(target))
     except Exception as exc:
-        QMessageBox.critical(gui_parent, "Error", f"Could not open folder:\n{exc}")
+        QMessageBox.critical(gui_parent, t("Error"), f"{t('Could not open folder:')}\n{exc}")
 
 
 def open_resource_manager(workspace_root: str = None, parent=None,
@@ -72,7 +77,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     service = ResourceDownloadService(workspace_root)
 
     dialog = QDialog(parent)
-    dialog.setWindowTitle("Manage Resources")
+    dialog.setWindowTitle(t("Manage Resources"))
     dialog.setModal(True)
     dialog.resize(820, 580)
     dialog.setStyleSheet("""
@@ -100,14 +105,16 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     layout.setContentsMargins(18, 18, 18, 18)
     layout.setSpacing(12)
 
-    title = QLabel("Manage Resources", dialog)
+    title = QLabel(t("Manage Resources"), dialog)
     title.setObjectName("resourceTitle")
     layout.addWidget(title)
 
     hint = QLabel(
-        "Each resource shows its target folder and download link. "
-        "Use 'Download' for supported resources or download the file yourself "
-        "and drop it into the target folder. Use 'Refresh' to re-check status.",
+        t(
+            "Each resource shows its target folder and download link. "
+            "Use 'Download' for supported resources or download the file yourself "
+            "and drop it into the target folder. Use 'Refresh' to re-check status."
+        ),
         dialog,
     )
     hint.setObjectName("resourceHint")
@@ -144,10 +151,10 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             return
         if active:
             button.setEnabled(False)
-            button.setText(str(message or "Downloading..."))
+            button.setText(str(message or t("Downloading...")))
         else:
             button.setEnabled(bool(row.get("download_supported", False)))
-            button.setText(str(row.get("download_label", "Download")))
+            button.setText(t(str(row.get("download_label", "Download"))))
 
     def _on_download_progress(percent: int, message: str):
         resource_id = active_resource_id[0]
@@ -159,9 +166,9 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         except (TypeError, ValueError):
             value = -1
         if value >= 0:
-            _set_download_button(row, active=True, message=f"Downloading... {max(0, min(100, value))}%")
+            _set_download_button(row, active=True, message=f"{t('Downloading...')} {max(0, min(100, value))}%")
         else:
-            _set_download_button(row, active=True, message="Downloading...")
+            _set_download_button(row, active=True, message=t("Downloading..."))
 
     def _on_download_finished(resource_id: str, error: str):
         download_worker[0] = None
@@ -174,8 +181,8 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 dialog,
-                "Resource Download Failed",
-                f"Could not download {resource_id}.\n\n{error}",
+                t("Resource Download Failed"),
+                t("Could not download {resource_id}.\n\n{error}", resource_id=resource_id, error=error),
             )
             return
         _refresh()
@@ -193,8 +200,8 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(
                 dialog,
-                "Download in Progress",
-                "Another resource is already downloading. Please wait for it to finish.",
+                t("Download in Progress"),
+                t("Another resource is already downloading. Please wait for it to finish."),
             )
             return
         row = dialog._resource_rows.get(rid)
@@ -204,7 +211,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             from worker_adapters.processing_workers import ResourceDownloadWorker
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(dialog, "Resource Download", f"Download worker is unavailable:\n\n{exc}")
+            QMessageBox.warning(dialog, t("Resource Download"), f"{t('Download worker is unavailable:')}\n\n{exc}")
             return
 
         download_state["running"] = True
@@ -225,13 +232,13 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
         header_row = QHBoxLayout()
         header_row.setSpacing(8)
-        name_label = QLabel(str(item.get("name", item.get("id", "Resource"))), dialog)
+        name_label = QLabel(t(str(item.get("name", item.get("id", "Resource")))), dialog)
         name_label.setStyleSheet("color: #f8fbff; font-weight: 700; font-size: 14px; background-color: transparent;")
         header_row.addWidget(name_label, 1)
 
         required_for = str(item.get("required_for", "") or "").strip()
         if required_for:
-            required_label = QLabel(f"Required for {required_for}", dialog)
+            required_label = QLabel(t("Required for {required_for}", required_for=t(required_for)), dialog)
             required_label.setStyleSheet(
                 "color: #ffd28a; font-size: 10px; font-weight: 700; "
                 "background-color: #4a3520; border: 1px solid #8b6734; "
@@ -250,7 +257,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
         description = str(item.get("description", "")).strip()
         if description:
-            desc_label = QLabel(description, dialog)
+            desc_label = QLabel(t(description), dialog)
             desc_label.setWordWrap(True)
             desc_label.setStyleSheet("color: #c0d0e3; font-size: 12px; background-color: transparent;")
             outer.addWidget(desc_label)
@@ -259,7 +266,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         if target_dir:
             path_row = QHBoxLayout()
             path_row.setSpacing(6)
-            path_label = QLabel("Target folder:", dialog)
+            path_label = QLabel(t("Target folder:"), dialog)
             path_label.setStyleSheet("color: #8ea3bb; font-size: 11px; background-color: transparent;")
             path_value = QLabel(target_dir, dialog)
             path_value.setStyleSheet("color: #d7e3f4; font-size: 11px; font-family: monospace; background-color: transparent;")
@@ -273,7 +280,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         if expected:
             file_row = QHBoxLayout()
             file_row.setSpacing(6)
-            file_caption = QLabel("Expected file:", dialog)
+            file_caption = QLabel(t("Expected file:"), dialog)
             file_caption.setStyleSheet("color: #8ea3bb; font-size: 11px; background-color: transparent;")
             file_value = QLabel(expected, dialog)
             file_value.setStyleSheet("color: #d7e3f4; font-size: 11px; font-family: monospace; background-color: transparent;")
@@ -288,7 +295,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         button_row.addStretch(1)
 
         download_url = str(item.get("open_url", "") or item.get("download_url", "")).strip()
-        download_btn = QPushButton("Open Download Page", dialog)
+        download_btn = QPushButton(t("Open Download Page"), dialog)
         download_btn.setObjectName("primaryBtn")
         download_btn.setEnabled(bool(download_url))
         if download_url:
@@ -321,14 +328,14 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             "voice:vieneu": "Download VieNeu Models",
         }.get(resource_id, "Download")
         if download_supported:
-            resource_download_btn = QPushButton(download_label, dialog)
-            resource_download_btn.setToolTip("Download this resource into the target folder")
+            resource_download_btn = QPushButton(t(download_label), dialog)
+            resource_download_btn.setToolTip(t("Download this resource into the target folder"))
             resource_download_btn.clicked.connect(
                 lambda _checked=False, rid=item["id"]: _start_download(rid)
             )
             button_row.addWidget(resource_download_btn)
 
-        open_folder_btn = QPushButton("Open Storage Folder", dialog)
+        open_folder_btn = QPushButton(t("Open Storage Folder"), dialog)
         open_folder_btn.setEnabled(bool(target_dir))
         open_folder_btn.clicked.connect(
             lambda _checked=False, p=target_dir: _open_folder_dialog(dialog, p)
@@ -357,7 +364,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         wrapper_layout.setSpacing(0)
 
         btn = QToolButton()
-        btn.setText(("▼ " if expanded else "▶ ") + title_text)
+        btn.setText(("▼ " if expanded else "▶ ") + t(title_text))
         btn.setCheckable(True)
         btn.setChecked(expanded)
         btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
@@ -373,7 +380,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             inner.setMaximumHeight(0)
 
         btn.toggled.connect(lambda c: (
-            btn.setText(("▼ " if c else "▶ ") + title_text),
+            btn.setText(("▼ " if c else "▶ ") + t(title_text)),
             inner.setVisible(c),
             inner.setMaximumHeight(16777215 if c else 0),
         ))
@@ -446,18 +453,18 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     footer_row = QHBoxLayout()
     footer_row.setSpacing(8)
     footer_hint = QLabel(
-        "Tip: target folders are created automatically when you open them.",
+        t("Tip: target folders are created automatically when you open them."),
         dialog,
     )
     footer_hint.setObjectName("resourceHint")
     footer_hint.setWordWrap(True)
     footer_row.addWidget(footer_hint, 1)
 
-    refresh_btn = QPushButton("Refresh", dialog)
+    refresh_btn = QPushButton(t("Refresh"), dialog)
     refresh_btn.clicked.connect(_refresh)
     footer_row.addWidget(refresh_btn)
 
-    close_btn = QPushButton("Close", dialog)
+    close_btn = QPushButton(t("Close"), dialog)
     close_btn.clicked.connect(dialog.accept)
     footer_row.addWidget(close_btn)
 

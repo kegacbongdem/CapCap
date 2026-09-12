@@ -24,6 +24,11 @@ from PySide6.QtWidgets import (
 )
 from widgets.spin_boxes import ReliableDoubleSpinBox, ReliableSpinBox
 
+try:
+    from i18n import current_source_text, t
+except ImportError:
+    from ui.i18n import current_source_text, t
+
 
 def _section_title(text):
     label = QLabel(text)
@@ -61,7 +66,7 @@ def _build_collapsible_section(title: str, start_expanded: bool = True):
     content.setVisible(start_expanded)
 
     def _toggle_section(checked: bool):
-        toggle_btn.setText(("▼ " if checked else "▶ ") + title)
+        toggle_btn.setText(("▼ " if checked else "▶ ") + t(title))
         content.setVisible(checked)
         content.setMaximumHeight(16777215 if checked else 0)
 
@@ -179,14 +184,14 @@ def _update_device_label(gui):
     import os
     cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
     if cpu_mode:
-        gui.device_mode_label.setText("CPU mode")
+        gui.device_mode_label.setText(t("CPU mode"))
         gui.device_mode_label.setStyleSheet("font-size: 11px; color: #ffa500;")
     else:
         gpu_name = os.getenv("CAPCAP_GPU_NAME", "").strip()
         if gpu_name:
             gui.device_mode_label.setText(gpu_name)
         else:
-            gui.device_mode_label.setText("GPU mode")
+            gui.device_mode_label.setText(t("GPU mode"))
         gui.device_mode_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
 
 
@@ -507,14 +512,14 @@ def build_start_group(gui, left_layout):
     gui.voice_timing_sync_combo.setCurrentText("Smart")
 
     def _sync_voice_speed_enabled(_value: str = ""):
-        mode = gui.voice_timing_sync_combo.currentText().strip().lower()
+        mode = current_source_text(gui.voice_timing_sync_combo).strip().lower()
         gui.voice_speed_spin.setEnabled(mode != "off")
     gui.voice_timing_sync_combo.currentTextChanged.connect(_sync_voice_speed_enabled)
     _sync_voice_speed_enabled()
 
     def _on_voice_timing_sync_changed(_value: str = ""):
         if hasattr(gui, "timeline") and gui.timeline is not None:
-            gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+            gui.timeline.set_voice_sync_mode(current_source_text(gui.voice_timing_sync_combo))
     _on_voice_timing_sync_changed()
     # This is a media-generation policy, not an editor action. Keep it in
     # Media Workflow so the timeline toolbar stays focused on editing.
@@ -913,7 +918,7 @@ def build_start_group(gui, left_layout):
     gui.subtitle_x_offset_spin.hide()
 
     def _toggle_custom_section(checked: bool):
-        gui.custom_settings_toggle_btn.setText(("▼ " if checked else "▶ ") + "Style Details")
+        gui.custom_settings_toggle_btn.setText(("▼ " if checked else "▶ ") + t("Style Details"))
         gui.custom_settings_content.setVisible(checked)
 
     gui.custom_settings_toggle_btn.toggled.connect(_toggle_custom_section)

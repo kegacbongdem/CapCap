@@ -7,6 +7,11 @@ import time
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 class BackgroundableProgressDialog(QProgressDialog):
     def __init__(self, *args, **kwargs):
@@ -80,30 +85,30 @@ class StepWidget(QFrame):
     def set_status(self, status):
         self.status = status
         if status == "running":
-            self.status_label.setText("Processing")
+            self.status_label.setText(t("Processing"))
             self.status_label.setStyleSheet("color: #00E5FF;")
             self.indicator.setStyleSheet("background-color: #00E5FF; border: 2px solid rgba(0, 229, 255, 50);")
             self.setStyleSheet(self.styleSheet() + "#stepWidget { border: 1px solid rgba(0, 229, 255, 80); background-color: rgba(0, 229, 255, 15); }")
             self.pulse_timer.start()
         elif status == "done":
-            self.status_label.setText("Completed")
+            self.status_label.setText(t("Completed"))
             self.status_label.setStyleSheet("color: #00FF88;")
             self.indicator.setStyleSheet("background-color: #00FF88;")
             self.setStyleSheet(self.styleSheet().replace("rgba(0, 229, 255, 80)", "rgba(0, 255, 136, 40)").replace("rgba(0, 229, 255, 15)", "rgba(0, 0, 0, 180)"))
             self.pulse_timer.stop()
         elif status == "failed":
-            self.status_label.setText("Failed")
+            self.status_label.setText(t("Failed"))
             self.status_label.setStyleSheet("color: #FF4444;")
             self.indicator.setStyleSheet("background-color: #FF4444;")
             self.setStyleSheet(self.styleSheet() + "#stepWidget { border: 1px solid rgba(255, 68, 68, 80); background-color: rgba(255, 68, 68, 15); }")
             self.pulse_timer.stop()
         elif status == "skipped":
-            self.status_label.setText("Skipped")
+            self.status_label.setText(t("Skipped"))
             self.status_label.setStyleSheet("color: #f5c86a;")
             self.indicator.setStyleSheet("background-color: #f5c86a;")
             self.pulse_timer.stop()
         else:
-            self.status_label.setText("Pending")
+            self.status_label.setText(t("Pending"))
             self.status_label.setStyleSheet("color: #666;")
             self.indicator.setStyleSheet("background-color: #444; border-radius: 5px;")
         
@@ -119,7 +124,7 @@ class PipelineProgressDialog(QDialog):
         super().__init__(parent)
         self._stopped = False
         self._drag_pos = None
-        self.setWindowTitle("CapCap AI Pipeline")
+        self.setWindowTitle(t("CapCap AI Pipeline"))
         self.setFixedSize(580, 700)
         # Do not force the progress dialog above QMessageBox/other dialogs.
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
@@ -211,15 +216,15 @@ class PipelineProgressDialog(QDialog):
         self.steps = {}
         self.step_order = []
         
-        self.footer = QLabel("Initializing workflow engine...")
+        self.footer = QLabel(t("Initializing workflow engine..."))
         self.footer.setStyleSheet("color: #888; font-size: 13px; margin-top: 15px;")
         layout.addWidget(self.footer)
 
-        self.total_time_label = QLabel("Total time: 00:00")
+        self.total_time_label = QLabel(t("Total time: 00:00"))
         self.total_time_label.setStyleSheet("color: #d7e3f4; font-size: 12px; margin-top: 6px;")
         layout.addWidget(self.total_time_label)
 
-        self.dismiss_btn = QPushButton("Close")
+        self.dismiss_btn = QPushButton(t("Close"))
         self.dismiss_btn.setFixedHeight(34)
         self.dismiss_btn.setStyleSheet("""
             QPushButton {
@@ -236,7 +241,7 @@ class PipelineProgressDialog(QDialog):
         """)
         self.dismiss_btn.clicked.connect(self.hide)
 
-        self.stop_btn = QPushButton("Stop")
+        self.stop_btn = QPushButton(t("Stop"))
         self.stop_btn.setFixedHeight(34)
         self.stop_btn.setStyleSheet("""
             QPushButton {
@@ -301,7 +306,10 @@ class PipelineProgressDialog(QDialog):
             idx = self.step_order.index(step_id)
             val = int((idx / len(self.step_order)) * 100)
             self.overall_progress.setValue(val)
-            self.footer.setText(f"Stage {idx+1}/{len(self.step_order)}: {self.steps[step_id].name_label.text()}")
+            self.footer.setText(t(
+                "Stage {index}/{total}: {name}",
+                index=idx + 1, total=len(self.step_order), name=self.steps[step_id].name_label.text(),
+            ))
 
     def finish_step(self, step_id):
         if step_id in self.steps:
@@ -313,7 +321,10 @@ class PipelineProgressDialog(QDialog):
     def fail_step(self, step_id):
         if step_id in self.steps:
             self.steps[step_id].set_status("failed")
-            self.footer.setText(f"Error encountered during: {self.steps[step_id].name_label.text()}")
+            self.footer.setText(t(
+                "Error encountered during: {name}",
+                name=self.steps[step_id].name_label.text(),
+            ))
             self.footer.setStyleSheet("color: #FF4444; font-weight: bold; margin-top: 15px;")
             self._stop_total_timer()
 
@@ -332,7 +343,7 @@ class PipelineProgressDialog(QDialog):
             elif widget.status == "pending":
                 widget.set_status("skipped")
         self.overall_progress.setValue(100)
-        self.footer.setText(message or "✨ Pipeline execution complete! Video is ready.")
+        self.footer.setText(t(message or "✨ Pipeline execution complete! Video is ready."))
         self.footer.setStyleSheet("color: #00FF88; font-weight: bold; font-size: 14px; margin-top: 15px;")
         self._stop_total_timer()
         self.raise_()
@@ -344,7 +355,7 @@ class PipelineProgressDialog(QDialog):
         elapsed = int(time.monotonic() - self.workflow_start_time)
         mins = elapsed // 60
         secs = elapsed % 60
-        self.total_time_label.setText(f"Total time: {mins:02d}:{secs:02d}")
+        self.total_time_label.setText(t("Total time: {minutes:02d}:{seconds:02d}", minutes=mins, seconds=secs))
 
     def _stop_total_timer(self):
         if self.total_timer.isActive():
@@ -353,22 +364,22 @@ class PipelineProgressDialog(QDialog):
             elapsed = int(time.monotonic() - self.workflow_start_time)
             mins = elapsed // 60
             secs = elapsed % 60
-            self.total_time_label.setText(f"Total time: {mins:02d}:{secs:02d}")
+            self.total_time_label.setText(t("Total time: {minutes:02d}:{seconds:02d}", minutes=mins, seconds=secs))
             self.workflow_start_time = None
 
     def _on_stop(self):
         self._stopped = True
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setText("Stopping...")
-        self.footer.setText("Stopping pipeline...")
+        self.stop_btn.setText(t("Stopping..."))
+        self.footer.setText(t("Stopping pipeline..."))
         self.footer.setStyleSheet("color: #FF6B6B; font-weight: bold; font-size: 14px; margin-top: 15px;")
         self.stop_requested.emit()
 
     def cancel_stop_request(self):
         self._stopped = False
         self.stop_btn.setEnabled(True)
-        self.stop_btn.setText("Stop")
-        self.footer.setText("Pipeline is still running.")
+        self.stop_btn.setText(t("Stop"))
+        self.footer.setText(t("Pipeline is still running."))
         self.footer.setStyleSheet("color: #888; font-size: 13px; margin-top: 15px;")
 
     def hideEvent(self, event):

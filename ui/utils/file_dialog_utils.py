@@ -2,6 +2,12 @@
 import time
 
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
+
 def _normalize_selected_file_path(path: str) -> str:
     value = str(path or "").replace("\r", "").replace("\n", "").replace("\t", " ").strip().strip('"').strip("'")
     if not value:
@@ -13,7 +19,7 @@ def _normalize_selected_file_path(path: str) -> str:
 def browse_audio_folder(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    dir_path = QFileDialog.getExistingDirectory(gui, "Select Audio Folder")
+    dir_path = QFileDialog.getExistingDirectory(gui, t("Select Audio Folder"))
     if dir_path:
         gui.audio_folder_edit.setText(dir_path)
 
@@ -21,7 +27,7 @@ def browse_audio_folder(gui):
 def browse_srt_output_folder(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    dir_path = QFileDialog.getExistingDirectory(gui, "Select SRT Export Folder")
+    dir_path = QFileDialog.getExistingDirectory(gui, t("Select SRT Export Folder"))
     if dir_path:
         gui.srt_output_folder_edit.setText(dir_path)
 
@@ -29,7 +35,7 @@ def browse_srt_output_folder(gui):
 def browse_audio_source(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    file_path, _ = QFileDialog.getOpenFileName(gui, "Open Audio", "", "Audio Files (*.wav *.mp3 *.flac)")
+    file_path, _ = QFileDialog.getOpenFileName(gui, t("Open Audio"), "", t("Audio Files (*.wav *.mp3 *.flac)"))
     if file_path:
         gui.audio_source_edit.setText(_normalize_selected_file_path(file_path))
 
@@ -37,7 +43,7 @@ def browse_audio_source(gui):
 def browse_background_audio(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    file_path, _ = QFileDialog.getOpenFileName(gui, "Open Background Audio", "", "Audio Files (*.wav *.mp3 *.flac)")
+    file_path, _ = QFileDialog.getOpenFileName(gui, t("Open Background Audio"), "", t("Audio Files (*.wav *.mp3 *.flac)"))
     if file_path:
         normalized_path = _normalize_selected_file_path(file_path)
         gui.bg_music_edit.setText(normalized_path)
@@ -49,7 +55,7 @@ def browse_background_audio(gui):
 def browse_existing_mixed_audio(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    file_path, _ = QFileDialog.getOpenFileName(gui, "Open Mixed Audio", "", "Audio Files (*.wav *.mp3 *.flac)")
+    file_path, _ = QFileDialog.getOpenFileName(gui, t("Open Mixed Audio"), "", t("Audio Files (*.wav *.mp3 *.flac)"))
     if file_path:
         normalized_path = _normalize_selected_file_path(file_path)
         gui.mixed_audio_edit.setText(normalized_path)
@@ -62,7 +68,7 @@ def browse_existing_mixed_audio(gui):
 def browse_voice_output_folder(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    dir_path = QFileDialog.getExistingDirectory(gui, "Select Voice Output Folder")
+    dir_path = QFileDialog.getExistingDirectory(gui, t("Select Voice Output Folder"))
     if dir_path:
         gui.voice_output_folder_edit.setText(dir_path)
         if hasattr(gui, "final_output_folder_edit"):
@@ -78,7 +84,7 @@ def open_folder(gui, path):
         os.makedirs(path, exist_ok=True)
         os.startfile(os.path.abspath(path))
     except Exception as exc:
-        QMessageBox.critical(gui, "Error", f"Could not open folder:\n{exc}")
+        QMessageBox.critical(gui, t("Error"), f"{t('Could not open folder:')}\n{exc}")
 
 
 def cleanup_file_if_exists(path: str):

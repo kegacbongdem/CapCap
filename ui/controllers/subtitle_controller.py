@@ -20,14 +20,25 @@ from PySide6.QtWidgets import (
 )
 
 from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
-from translation import TranslationOrchestrator, load_prompt_options, load_translation_presets, render_preset_prompt
+from translation import (
+    TranslationOrchestrator,
+    get_preset_by_id,
+    load_prompt_options,
+    load_translation_presets,
+    render_preset_prompt,
+)
+
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
 
 
 class TranslationPromptDialog(QDialog):
     def __init__(self, parent, src_lang: str = "zh", target_lang: str = "vi"):
         super().__init__(parent)
         self.settings = getattr(parent, "settings", None) or QSettings("CapCap", "VideoTranslatorGUI")
-        self.setWindowTitle("Translation Settings & Prompt Review")
+        self.setWindowTitle(t("Translation Settings & Prompt Review"))
         self.setMinimumWidth(680)
         self.setMinimumHeight(600)
         self.src_lang = str(src_lang or "zh").strip().lower()
@@ -85,7 +96,7 @@ class TranslationPromptDialog(QDialog):
         else:
             self.provider_combo.setCurrentIndex(0)
         self.provider_combo.setEnabled(False)
-        self.provider_combo.setToolTip("AI Provider is configured in Settings. Open Settings to change provider or API keys.")
+        self.provider_combo.setToolTip(t("AI Provider is configured in Settings. Open Settings to change provider or API keys."))
         provider_col.addWidget(self.provider_combo)
         layout.addLayout(provider_col)
 
@@ -129,13 +140,13 @@ class TranslationPromptDialog(QDialog):
         layout.addWidget(self.preset_combo)
 
         # Auto-detect dialogue context & pronouns checkbox
-        self.auto_context_cb = QCheckBox("Tự động phân tích bối cảnh hội thoại & xưng hô (Auto-detect dialogue context & pronouns)")
+        self.auto_context_cb = QCheckBox("Auto-detect dialogue context & pronouns")
         saved_auto = self.settings.value("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
         is_checked = str(saved_auto).strip().lower() not in ("0", "false", "no")
         self.auto_context_cb.setChecked(is_checked)
         self.auto_context_cb.setToolTip(
-            "AI sẽ phân tích toàn bộ kịch bản (video ngắn) hoặc các câu đầu (video dài) để lập hồ sơ nhân vật, "
-            "vai vế và quy tắc xưng hô 2 chiều (address_rules), đảm bảo xưng hô nhất quán tuyệt đối."
+            "AI analyzes the full script for short videos or the opening lines for long videos to build character, "
+            "role, and two-way address_rules profiles for consistent pronouns."
         )
         layout.addWidget(self.auto_context_cb)
 
@@ -173,7 +184,7 @@ class TranslationPromptDialog(QDialog):
     def _on_provider_changed(self):
         provider = self.provider_combo.currentData() or "google_ai_studio"
         if provider == "google":
-            self.provider_hint.setText("💡 Google Translate translates directly via web API (free, no key). It does not use LLM system prompts.")
+            self.provider_hint.setText(t("💡 Google Translate translates directly via web API (free, no key). It does not use LLM system prompts."))
             self.prompt_edit.setEnabled(False)
             self.preset_combo.setEnabled(False)
             self.auto_context_cb.setEnabled(False)
@@ -333,14 +344,15 @@ class SubtitleController:
         else:
             provider = self.gui._selected_ai_provider_label() if hasattr(self.gui, "_selected_ai_provider_label") else "selected provider"
         action = "Re-translating" if is_retranslation else "Translating"
+        action_text = t(action)
         dialog = QProgressDialog(
-            f"{action} subtitles with {provider}...\nElapsed: 00:00",
+            f"{action_text} {t('subtitles with')} {provider}...\n{t('Elapsed')}: 00:00",
             None,
             0,
             100,
             self.gui,
         )
-        dialog.setWindowTitle(f"{action} Subtitles")
+        dialog.setWindowTitle(f"{action_text} {t('Subtitles')}")
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
@@ -361,12 +373,12 @@ class SubtitleController:
 
         def update_elapsed():
             elapsed = int(time.monotonic() - started)
-            prog_line = f"Progress: {dialog._progress_str}\n" if getattr(dialog, "_progress_str", "") else ""
+            prog_line = f"{t('Progress')}: {t(dialog._progress_str)}\n" if getattr(dialog, "_progress_str", "") else ""
             dialog.setLabelText(
-                f"{action} subtitles with {provider}...\n"
+                f"{action_text} {t('subtitles with')} {provider}...\n"
                 f"{prog_line}"
-                f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
-                "Large subtitle projects can take a few minutes."
+                f"{t('Elapsed')}: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
+                f"{t('Large subtitle projects can take a few minutes.')}"
             )
 
         timer.setInterval(1000)
@@ -395,14 +407,15 @@ class SubtitleController:
             "sensevoice": "SenseVoice STT",
         }.get(engine_name, "Speech Recognition")
         action = "Transcribing"
+        action_text = t(action)
         dialog = QProgressDialog(
-            f"{action} audio with {engine_label}...\nElapsed: 00:00",
+            f"{action_text} {t('audio with')} {engine_label}...\n{t('Elapsed')}: 00:00",
             None,
             0,
             100,
             self.gui,
         )
-        dialog.setWindowTitle("Transcribing Audio")
+        dialog.setWindowTitle(t("Transcribing Audio"))
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
@@ -423,16 +436,16 @@ class SubtitleController:
 
         def update_elapsed():
             elapsed = int(time.monotonic() - started)
-            prog_line = f"Progress: {dialog._progress_str}\n" if getattr(dialog, "_progress_str", "") else ""
+            prog_line = f"{t('Progress')}: {t(dialog._progress_str)}\n" if getattr(dialog, "_progress_str", "") else ""
             h = elapsed // 3600
             m = (elapsed % 3600) // 60
             s = elapsed % 60
             elapsed_str = f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
             dialog.setLabelText(
-                f"{action} audio with {engine_label}...\n"
+                f"{action_text} {t('audio with')} {engine_label}...\n"
                 f"{prog_line}"
-                f"Elapsed: {elapsed_str}\n"
-                "Long videos may take several minutes to transcribe."
+                f"{t('Elapsed')}: {elapsed_str}\n"
+                f"{t('Long videos may take several minutes to transcribe.')}"
             )
 
         timer.setInterval(1000)
@@ -457,23 +470,23 @@ class SubtitleController:
         dialog = getattr(self.gui, "_transcription_progress_dialog", None)
         if dialog is not None:
             dialog.setValue(max(0, min(100, int(percent))))
-            dialog._progress_str = message
+            dialog._progress_str = t(str(message or ""))
         if hasattr(self.gui, "progress_bar"):
             scaled_value = 40 + int(percent * 0.2)
             self.gui.progress_bar.setValue(min(60, max(40, scaled_value)))
         if hasattr(self.gui, "transcript_text"):
-            self.gui.transcript_text.setText(f"{message}\n\nVui lòng đợi trong giây lát...")
+            self.gui.transcript_text.setText(f"{t(message)}\n\n{t('Please wait a moment...')}")
 
     def run_transcription(self):
         audio_src = self.gui.audio_source_edit.text()
         if not audio_src or not os.path.exists(audio_src):
-            QMessageBox.warning(self.gui, "Error", "Audio source file not found! Please extract audio first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Audio source file not found! Please extract audio first."))
             return
 
         model_path = self.gui.get_whisper_model_path()
         lang = self.gui.get_source_language_code()
 
-        self.gui.transcript_text.setText("Transcribing... please wait (Loading...)")
+        self.gui.transcript_text.setText(t("Transcribing... please wait (Loading...)"))
         self.gui.transcribe_btn.setEnabled(False)
         self.gui.progress_bar.setValue(40)
         self.gui.update_project_step("transcribe", "running")
@@ -492,13 +505,13 @@ class SubtitleController:
             self.gui.update_project_step("transcribe", "failed")
             if error:
                 self.gui.show_error(
-                    "Transcription Failed",
-                    "Could not transcribe the audio.",
+                    t("Transcription Failed"),
+                    t("Could not transcribe the audio."),
                     error,
                 )
             else:
-                QMessageBox.warning(self.gui, "Warning", "Transcription failed or returned no results.")
-            self.gui._pipeline_fail("Transcription failed.")
+                QMessageBox.warning(self.gui, t("Warning"), t("Transcription failed or returned no results."))
+            self.gui._pipeline_fail(t("Transcription failed."))
             return
 
         self.gui.current_segments = segments
@@ -521,10 +534,10 @@ class SubtitleController:
             self.gui.last_original_srt_path = out_path
             self.gui.processed_artifacts["srt_original"] = out_path
             self.gui.persist_transcription_project_data(segments, out_path)
-            QMessageBox.information(self.gui, "Success", f"Transcription completed!\nOriginal SRT saved to: {out_path}")
+            QMessageBox.information(self.gui, t("Success"), f"{t('Transcription completed!')}\n{t('Original SRT saved to:')} {out_path}")
         else:
             self.gui.persist_transcription_project_data(segments)
-            QMessageBox.information(self.gui, "Success", "Transcription completed!")
+            QMessageBox.information(self.gui, t("Success"), t("Transcription completed!"))
 
         self.gui.refresh_ui_state()
         self.gui.schedule_auto_frame_preview()
@@ -542,7 +555,7 @@ class SubtitleController:
             return
         srt_source = self.gui.transcript_text.toPlainText()
         if not srt_source or not srt_source.strip():
-            QMessageBox.warning(self.gui, "Error", "No transcription available to translate!")
+            QMessageBox.warning(self.gui, t("Error"), t("No transcription available to translate!"))
             return
 
         state = self.gui.ensure_current_project()
@@ -556,14 +569,14 @@ class SubtitleController:
                 self.gui.progress_bar.setValue(100)
                 self.gui.refresh_ui_state()
                 msg_box = QMessageBox(self.gui)
-                msg_box.setWindowTitle("Existing Translation Found")
+                msg_box.setWindowTitle(t("Existing Translation Found"))
                 msg_box.setText(
-                    "Vietnamese subtitles already exist and the original transcript has not changed.\n\n"
-                    "Would you like to reuse the existing translation (saves time and AI tokens), or re-translate from scratch with AI?"
+                    f"{t('Vietnamese subtitles already exist and the original transcript has not changed.')}\n\n"
+                    f"{t('Would you like to reuse the existing translation (saves time and AI tokens), or re-translate from scratch with AI?')}"
                 )
                 msg_box.setIcon(QMessageBox.Question)
-                btn_reuse = msg_box.addButton("Use Existing (Recommended)", QMessageBox.AcceptRole)
-                btn_retranslate = msg_box.addButton("Re-translate with AI", QMessageBox.ActionRole)
+                btn_reuse = msg_box.addButton(t("Use Existing (Recommended)"), QMessageBox.AcceptRole)
+                btn_retranslate = msg_box.addButton(t("Re-translate with AI"), QMessageBox.ActionRole)
                 msg_box.setDefaultButton(btn_reuse)
                 msg_box.exec()
 
@@ -622,7 +635,7 @@ class SubtitleController:
         is_retranslation = bool(
             self.gui.current_translated_segments or self.gui.translated_text.toPlainText().strip()
         )
-        self.gui.translated_text.setText("Translating with the selected provider... please wait.")
+        self.gui.translated_text.setText(t("Translating with the selected provider... please wait."))
         self.gui.translate_btn.setEnabled(False)
         self.gui.progress_bar.setValue(80)
         self.gui.update_project_step("translate_raw", "running")
@@ -650,16 +663,16 @@ class SubtitleController:
         pct = max(0, min(100, int(completed * 100 / total)))
         dialog = getattr(self.gui, "_translation_progress_dialog", None)
         if dialog is not None:
-            dialog._progress_str = f"{completed}/{total} cues ({pct}%)"
+            dialog._progress_str = t("{completed}/{total} cues ({percent}%)", completed=completed, total=total, percent=pct)
             dialog.setValue(pct)
             elapsed = int(time.monotonic() - getattr(dialog, "_started_at", time.monotonic()))
             action = getattr(dialog, "_action", "Translating")
             provider = getattr(dialog, "_provider", "AI")
             dialog.setLabelText(
-                f"{action} subtitles with {provider}...\n"
-                f"Progress: {dialog._progress_str}\n"
-                f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
-                "Large subtitle projects can take a few minutes."
+                f"{t(action)} {t('subtitles with')} {provider}...\n"
+                f"{t('Progress')}: {t(dialog._progress_str)}\n"
+                f"{t('Elapsed')}: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
+                f"{t('Large subtitle projects can take a few minutes.')}"
             )
         if hasattr(self.gui, "progress_bar"):
             scaled = 80 + int(completed * 20 / total)
@@ -680,11 +693,11 @@ class SubtitleController:
         if error or not translated_srt:
             self.gui.update_project_step("translate_raw", "failed")
             self.gui.show_error(
-                "Translation Failed",
-                "Could not complete the Vietnamese translation.",
-                error or "The translator API returned an empty result.",
+                t("Translation Failed"),
+                t("Could not complete the Vietnamese translation."),
+                error or t("The translator API returned an empty result."),
             )
-            self.gui._pipeline_fail("Translation failed.")
+            self.gui._pipeline_fail(t("Translation failed."))
             return
 
         self.gui.progress_bar.setValue(100)
@@ -702,14 +715,14 @@ class SubtitleController:
             self.gui.last_translated_srt_path = out_path
             self.gui.processed_artifacts["srt_translated"] = out_path
             self.gui.persist_translation_project_data(self.gui.current_translated_segments, out_path)
-            message = f"Process complete! Subtitle saved and loaded for preview:\n{out_path}"
+            message = f"{t('Process complete! Subtitle saved and loaded for preview:')}\n{out_path}"
             if fallback_notice:
-                message = "Translation completed using Google Translate (AI Provider unavailable).\n\n" + message
-            QMessageBox.information(self.gui, "Finished", message)
+                message = f"{t('Translation completed using Google Translate (AI Provider unavailable).')}\n\n{message}"
+            QMessageBox.information(self.gui, t("Finished"), message)
         else:
             self.gui.persist_translation_project_data(self.gui.current_translated_segments)
-            message = "Translation completed using Google Translate (AI Provider unavailable)." if fallback_notice else "Translation complete!"
-            QMessageBox.information(self.gui, "Finished", message)
+            message = t("Translation completed using Google Translate (AI Provider unavailable).") if fallback_notice else t("Translation complete!")
+            QMessageBox.information(self.gui, t("Finished"), message)
 
         if fallback_notice:
             self.gui.log(f"[Translation] {fallback_notice}")
@@ -791,19 +804,19 @@ class SubtitleController:
 
     def run_rewrite_translation(self):
         if hasattr(self.gui, "_translation_phase_complete") and not self.gui._translation_phase_complete():
-            QMessageBox.information(self.gui, "Rewrite Unavailable", "Complete the Translation phase before rewriting subtitles.")
+            QMessageBox.information(self.gui, t("Rewrite Unavailable"), t("Complete the Translation phase before rewriting subtitles."))
             return
         source_segments = list(self.gui.current_segments or [])
         translated_segments = list(self.gui.current_translated_segments or [])
         if not source_segments:
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Original subtitles are missing. Please create or load the original subtitle track first.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Original subtitles are missing. Please create or load the original subtitle track first."))
             return
         if not translated_segments:
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Vietnamese subtitles are missing. Please translate or load them first.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Vietnamese subtitles are missing. Please translate or load them first."))
             return
         rewrite_segments = self._collapse_translated_segments_for_rewrite(source_segments, translated_segments)
         if len(source_segments) != len(rewrite_segments):
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Could not rebuild the original subtitle groups for rewrite safely.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Could not rebuild the original subtitle groups for rewrite safely."))
             return
         self.gui._rewrite_source_segments = source_segments
         self.gui._rewrite_base_translated_segments = rewrite_segments
@@ -811,19 +824,19 @@ class SubtitleController:
 
     def run_rewrite_selected_segment(self):
         if hasattr(self.gui, "_translation_phase_complete") and not self.gui._translation_phase_complete():
-            QMessageBox.information(self.gui, "Rewrite Unavailable", "Complete the Translation phase before rewriting subtitles.")
+            QMessageBox.information(self.gui, t("Rewrite Unavailable"), t("Complete the Translation phase before rewriting subtitles."))
             return
         source_segments = list(self.gui.current_segments or [])
         translated_segments = list(self.gui.current_translated_segments or [])
         if not source_segments:
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Original subtitles are missing. Please create or load the original subtitle track first.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Original subtitles are missing. Please create or load the original subtitle track first."))
             return
         if not translated_segments:
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Vietnamese subtitles are missing. Please translate or load them first.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Vietnamese subtitles are missing. Please translate or load them first."))
             return
         index = int(getattr(self.gui, "_selected_segment_index", -1))
         if not (0 <= index < len(translated_segments) and index < len(source_segments)):
-            QMessageBox.warning(self.gui, "Rewrite Unavailable", "Please select a subtitle block in the inspector first.")
+            QMessageBox.warning(self.gui, t("Rewrite Unavailable"), t("Please select a subtitle block in the inspector first."))
             return
 
         # Kept as a compatibility entry point for old shortcuts/plugins. The
@@ -843,18 +856,18 @@ class SubtitleController:
 
     def on_rewrite_translation_finished(self, translated_srt, error):
         self.gui.rewrite_translation_btn.setEnabled(True)
-        self.gui.rewrite_translation_btn.setText("Rewrite")
+        self.gui.rewrite_translation_btn.setText(t("Rewrite"))
         if hasattr(self.gui, "_rewrite_generate_btn"):
             self.gui._rewrite_generate_btn.setEnabled(True)
-            self.gui._rewrite_generate_btn.setText("Generate Preview")
+            self.gui._rewrite_generate_btn.setText(t("Generate Preview"))
         if hasattr(self.gui, "_rewrite_set_inputs_enabled"):
             self.gui._rewrite_set_inputs_enabled(True)
         if error or not translated_srt:
             self.gui.update_project_step("refine_translation", "failed")
             self.gui.show_error(
-                "Rewrite Failed",
-                "Could not rewrite the Vietnamese subtitles with AI.",
-                error or "The AI rewrite service returned an empty result.",
+                t("Rewrite Failed"),
+                t("Could not rewrite the Vietnamese subtitles with AI."),
+                error or t("The AI rewrite service returned an empty result."),
             )
             self.gui.refresh_ui_state()
             return
@@ -887,9 +900,9 @@ class SubtitleController:
         if error or not translated_srt:
             self.gui.update_project_step("refine_translation", "failed")
             self.gui.show_error(
-                "Rewrite Failed",
-                "Could not rewrite the selected subtitle block with AI.",
-                error or "The AI rewrite service returned an empty result.",
+                t("Rewrite Failed"),
+                t("Could not rewrite the selected subtitle block with AI."),
+                error or t("The AI rewrite service returned an empty result."),
             )
             self.gui.refresh_ui_state()
             _cleanup_selected_rewrite_state()
@@ -903,8 +916,8 @@ class SubtitleController:
         is_valid_srt, parsed_segments, _mode, validation_error = self._validate_rewrite_srt(translated_srt)
         if not is_valid_srt or not parsed_segments:
             self.gui.show_error(
-                "Rewrite Failed",
-                "The AI rewrite result for this block was not in valid SRT format.",
+                t("Rewrite Failed"),
+                t("The AI rewrite result for this block was not in valid SRT format."),
                 validation_error or translated_srt,
             )
             self.gui.update_project_step("refine_translation", "failed")
@@ -936,15 +949,15 @@ class SubtitleController:
             return
         translated_srt = preview_edit.toPlainText().strip()
         if not translated_srt:
-            QMessageBox.warning(self.gui, "Rewrite", "Please enter or generate rewritten subtitle content first.")
+            QMessageBox.warning(self.gui, t("Rewrite"), t("Please enter or generate rewritten subtitle content first."))
             return
 
         is_valid_srt, parsed_segments, _validation_mode, validation_error = self._validate_rewrite_srt(translated_srt)
         if not is_valid_srt:
             QMessageBox.warning(
                 self.gui,
-                "Invalid SRT",
-                f"Rewrite content must stay in valid SRT format.\n\n{validation_error}\n\nExample:\n1\n00:00:01,000 --> 00:00:02,000\nXin chao",
+                t("Invalid SRT"),
+                f"{t('Rewrite content must stay in valid SRT format.')}\n\n{validation_error}\n\n{t('Example:')}\n1\n00:00:01,000 --> 00:00:02,000\nXin chao",
             )
             return
 
@@ -961,8 +974,8 @@ class SubtitleController:
             if len(applied_segments) != len(selected_indices):
                 QMessageBox.warning(
                     self.gui,
-                    "Rewrite",
-                    "The AI returned a different number of cues than were checked. Nothing was changed.",
+                    t("Rewrite"),
+                    t("The AI returned a different number of cues than were checked. Nothing was changed."),
                 )
                 return
             for target_index, replacement in zip(selected_indices, applied_segments):
@@ -1005,7 +1018,7 @@ class SubtitleController:
         self.gui.schedule_live_subtitle_preview_refresh()
         self.gui.schedule_auto_frame_preview()
         self.gui.sync_segment_editor_rows()
-        QMessageBox.information(self.gui, "Rewrite Applied", "The rewritten SRT was applied to the subtitle editor.")
+        QMessageBox.information(self.gui, t("Rewrite Applied"), t("The rewritten SRT was applied to the subtitle editor."))
         self.gui.refresh_ui_state()
 
     def _open_rewrite_dialog(self, source_segments, translated_segments, *, initial_scope="all"):
@@ -1016,7 +1029,7 @@ class SubtitleController:
             selected_index = int(getattr(self.gui, "_selected_segment_index", -1))
         can_select_one = 0 <= selected_index < len(translated_segments) and selected_index < len(source_segments)
         dialog = QDialog(self.gui)
-        dialog.setWindowTitle("Rewrite Subtitles")
+        dialog.setWindowTitle(t("Rewrite Subtitles"))
         dialog.setModal(True)
         dialog.setMinimumWidth(820)
         dialog.setMinimumHeight(680)
@@ -1072,7 +1085,7 @@ class SubtitleController:
         if str(initial_scope or "all").strip().lower() == "selected" and can_select_one:
             scope_combo.setCurrentIndex(1)
         scope_row.addWidget(scope_combo, 1)
-        scope_hint = QLabel("" if translated_segments else "No translated subtitles")
+        scope_hint = QLabel("" if translated_segments else t("No translated subtitles"))
         scope_hint.setObjectName("helperLabel")
         scope_row.addWidget(scope_hint)
         layout.addLayout(scope_row)
@@ -1088,8 +1101,8 @@ class SubtitleController:
 
         active_preset_id = (os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default").strip()
         preset_info = get_preset_by_id(active_preset_id)
-        preset_title = preset_info.get("name", active_preset_id) if preset_info else "General / Standard Subtitles"
-        inherited_hint = QLabel(f"🔗 Inheriting rules from: <b>{preset_title}</b>", dialog)
+        preset_title = t(str(preset_info.get("name", active_preset_id) if preset_info else "General / Standard Subtitles"))
+        inherited_hint = QLabel(t("🔗 Inheriting rules from: <b>{preset_title}</b>", preset_title=preset_title), dialog)
         inherited_hint.setObjectName("helperLabel")
         inherited_hint.setWordWrap(True)
         layout.addWidget(inherited_hint)
@@ -1180,7 +1193,7 @@ class SubtitleController:
 
         def _toggle_custom_instruction(checked: bool):
             custom_prompt.setVisible(bool(checked))
-            _invalidate_preview("Custom instruction changed. Generate a new preview.")
+            _invalidate_preview(t("Custom instruction changed. Generate a new preview."))
 
         def _build_style_instruction() -> str:
             base_instruction = str(style_combo.currentData() or "").strip()
@@ -1219,18 +1232,20 @@ class SubtitleController:
             checked_scope = _scope_view()
             selected_indices = _scope_indices()
             if checked_scope:
-                selected_count_label.setText(f"{len(selected_indices)} / {len(translated_segments)} selected")
+                selected_count_label.setText(
+                    t("{selected} / {total} selected", selected=len(selected_indices), total=len(translated_segments))
+                )
                 scope_hint.setText(
-                    "Select the subtitles to rewrite."
+                    t("Select the subtitles to rewrite.")
                     if not selected_indices
-                    else f"{len(selected_indices)} subtitle(s) selected"
+                    else t("{count} subtitle(s) selected", count=len(selected_indices))
                 )
             else:
-                selected_count_label.setText(f"{len(translated_segments)} subtitle(s)")
+                selected_count_label.setText(t("{count} subtitle(s)", count=len(translated_segments)))
                 scope_hint.setText(
-                    f"All {len(translated_segments)} translated subtitles will be rewritten."
+                    t("All {count} translated subtitles will be rewritten.", count=len(translated_segments))
                     if translated_segments
-                    else "No translated subtitles"
+                    else t("No translated subtitles")
                 )
             select_all_btn.setVisible(checked_scope)
             unselect_all_btn.setVisible(checked_scope)
@@ -1238,7 +1253,7 @@ class SubtitleController:
             unselect_all_btn.setEnabled(checked_scope and bool(selected_indices))
 
         def _show_selection_view():
-            preview_label.setText("Select subtitles to rewrite" if _scope_view() else "All translated subtitles")
+            preview_label.setText(t("Select subtitles to rewrite") if _scope_view() else t("All translated subtitles"))
             check_list.setVisible(True)
             select_all_btn.setVisible(_scope_view())
             unselect_all_btn.setVisible(_scope_view())
@@ -1246,7 +1261,7 @@ class SubtitleController:
             preview_edit.setVisible(False)
 
         def _show_result_view():
-            preview_label.setText("AI Rewrite Preview")
+            preview_label.setText(t("AI Rewrite Preview"))
             check_list.setVisible(False)
             select_all_btn.setVisible(False)
             unselect_all_btn.setVisible(False)
@@ -1274,9 +1289,9 @@ class SubtitleController:
             _show_selection_view()
             _update_selection_summary()
             if _scope_view() and not selected_indices:
-                status_label.setText("Check at least one subtitle before generating an AI rewrite.")
+                status_label.setText(t("Check at least one subtitle before generating an AI rewrite."))
             else:
-                status_label.setText(message)
+                status_label.setText(t(message))
             status_label.setStyleSheet("")
             apply_btn.setEnabled(False)
 
@@ -1291,39 +1306,41 @@ class SubtitleController:
             current_text = preview_edit.toPlainText().strip()
             if not current_text:
                 if getattr(self.gui, "_rewrite_preview_ready", False):
-                    status_label.setText("The AI rewrite returned an empty result.")
+                    status_label.setText(t("The AI rewrite returned an empty result."))
                 apply_btn.setEnabled(False)
                 return
             is_valid_srt, parsed_segments, validation_mode, validation_error = self._validate_rewrite_srt(current_text)
             if is_valid_srt and validation_mode == "srt" and getattr(self.gui, "_rewrite_preview_ready", False):
                 status_label.setText(
-                    f"AI rewrite ready. Review the read-only result ({len(parsed_segments)} subtitle(s)), then apply it."
+                    t("AI rewrite ready. Review the read-only result ({count} subtitle(s)), then apply it.", count=len(parsed_segments))
                 )
                 status_label.setStyleSheet("color: #78f0b0; font-size: 12px; font-weight: 700;")
                 apply_btn.setEnabled(True)
             elif not getattr(self.gui, "_rewrite_preview_ready", False):
                 apply_btn.setEnabled(False)
             else:
-                status_label.setText(f"Invalid SRT. {validation_error or 'Keep standard blocks: index, time range, then subtitle text.'}")
+                status_label.setText(
+                    f"{t('Invalid SRT.')} {validation_error or t('Keep standard blocks: index, time range, then subtitle text.')}"
+                )
                 status_label.setStyleSheet("color: #ff8f8f; font-size: 12px; font-weight: 700;")
                 apply_btn.setEnabled(False)
 
         def _start_preview_generation():
             rewrite_source_segments, rewrite_base_segments = _scope_segments()
             if not rewrite_base_segments:
-                QMessageBox.information(dialog, "Rewrite", "Check at least one subtitle before generating an AI rewrite.")
+                QMessageBox.information(dialog, t("Rewrite"), t("Check at least one subtitle before generating an AI rewrite."))
                 return
             style_instruction = _build_style_instruction()
             self.gui._rewrite_preview_ready = False
             preview_edit.clear()
             _show_selection_view()
-            status_label.setText("Generating rewrite preview with AI...")
+            status_label.setText(t("Generating rewrite preview with AI..."))
             apply_btn.setEnabled(False)
             generate_btn.setEnabled(False)
-            generate_btn.setText("Generating...")
+            generate_btn.setText(t("Generating..."))
             _set_inputs_enabled(False)
             self.gui.rewrite_translation_btn.setEnabled(False)
-            self.gui.rewrite_translation_btn.setText("Rewriting...")
+            self.gui.rewrite_translation_btn.setText(t("Rewriting..."))
             self.gui.progress_bar.setValue(90)
             self.gui.update_project_step("refine_translation", "running")
 
@@ -1397,9 +1414,9 @@ class SubtitleController:
 
         custom_style_cb.toggled.connect(_toggle_custom_instruction)
         scope_combo.currentIndexChanged.connect(_on_scope_changed)
-        style_combo.currentIndexChanged.connect(lambda _index: _invalidate_preview("Rewrite style changed. Generate a new preview."))
+        style_combo.currentIndexChanged.connect(lambda _index: _invalidate_preview(t("Rewrite style changed. Generate a new preview.")))
         custom_prompt.textChanged.connect(
-            lambda _text: _invalidate_preview("Custom instruction changed. Generate a new preview.")
+            lambda _text: _invalidate_preview(t("Custom instruction changed. Generate a new preview."))
         )
 
         def _handle_scope_item_changed(item):
@@ -1460,8 +1477,8 @@ class SubtitleController:
             if show_message:
                 QMessageBox.warning(
                     self.gui,
-                    "Error",
-                    "Could not parse edited translated SRT.\n\nTip: Keep standard SRT format:\n1\\n00:00:01,000 --> 00:00:02,000\\ntext",
+                    t("Error"),
+                    t("Could not parse edited translated SRT.\n\nTip: Keep standard SRT format:\n1\\n00:00:01,000 --> 00:00:02,000\\ntext"),
                 )
             return False
 
@@ -1471,7 +1488,11 @@ class SubtitleController:
             self.gui.apply_segments_to_timeline()
 
         if show_message:
-            QMessageBox.information(self.gui, "Applied", f"Applied edited translation to timeline.\nSegments: {len(segments)}")
+            QMessageBox.information(
+                self.gui,
+                t("Applied"),
+                t("Applied edited translation to timeline.\nSegments: {count}", count=len(segments)),
+            )
         self.gui.refresh_ui_state()
         self.gui.schedule_auto_frame_preview()
         return True

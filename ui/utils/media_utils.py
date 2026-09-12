@@ -5,6 +5,11 @@ from PySide6.QtCore import QTimer, QUrl
 
 from .media_backend import create_media_backend, get_mpv_startup_diagnostic
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 def setup_media_player(gui):
     gui.media_player = create_media_backend(gui.video_view)
@@ -26,9 +31,9 @@ def setup_media_player(gui):
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.warning(
                     gui,
-                    "Advanced Video Preview Unavailable",
-                    f"Advanced Video Preview is unavailable.\n\nReason: {summary}\n\n"
-                    "CapCap will use the compatible preview instead. See Logs for technical details.",
+                    t("Advanced Video Preview Unavailable"),
+                    f"{t('Advanced Video Preview is unavailable.')}\n\n{t('Reason:')} {summary}\n\n"
+                    f"{t('CapCap will use the compatible preview instead. See Logs for technical details.')}",
                 )
 
             QTimer.singleShot(0, _show_preview_warning)
@@ -210,7 +215,7 @@ def toggle_play(gui):
                 if filter_workflow_active and bool(getattr(gui, "_video_filter_preview_dirty", False)):
                     gui._play_video_filter_preview_when_ready = False
                     if hasattr(gui, "video_filter_render_status_label") and gui.video_filter_render_status_label is not None:
-                        gui.video_filter_render_status_label.setText("Filter changes are pending. Click Apply Filter before playing.")
+                        gui.video_filter_render_status_label.setText(t("Filter changes are pending. Click Apply Filter before playing."))
                         gui.video_filter_render_status_label.setVisible(True)
                     if hasattr(gui, "video_filter_render_progress") and gui.video_filter_render_progress is not None:
                         gui.video_filter_render_progress.setVisible(False)
@@ -290,7 +295,7 @@ def toggle_play(gui):
         if hasattr(gui, "log"):
             gui.log(f"[Preview] toggle play failed: {exc}")
         if hasattr(gui, "show_error"):
-            gui.show_error("Preview Playback Failed", "Could not start or pause video preview.", str(exc))
+            gui.show_error(t("Preview Playback Failed"), t("Could not start or pause video preview."), str(exc))
 
 
 def stop_video(gui):
@@ -625,7 +630,7 @@ def update_duration_label(gui, current, total):
 def browse_video(gui):
     from PySide6.QtWidgets import QFileDialog
 
-    file_path, _ = QFileDialog.getOpenFileName(gui, "Open Video", "", "Video Files (*.mp4 *.mkv *.avi *.mov)")
+    file_path, _ = QFileDialog.getOpenFileName(gui, t("Open Video"), "", t("Video Files (*.mp4 *.mkv *.avi *.mov)"))
     if not file_path:
         return
 
@@ -667,7 +672,7 @@ def browse_video(gui):
 def update_frame_preview_thumbnail(gui, image_path: str, qpixmap_cls, qt):
     pixmap = qpixmap_cls(image_path)
     if pixmap.isNull():
-        gui.frame_preview_image_label.setText("Could not load frame preview")
+        gui.frame_preview_image_label.setText(t("Could not load frame preview"))
         gui.frame_preview_image_label.setPixmap(qpixmap_cls())
         return
     target_width = 0
@@ -685,4 +690,4 @@ def update_frame_preview_thumbnail(gui, image_path: str, qpixmap_cls, qt):
     scaled = pixmap.scaled(target_width, target_height, qt.KeepAspectRatio, qt.SmoothTransformation)
     gui.frame_preview_image_label.setPixmap(scaled)
     gui.frame_preview_image_label.setText("")
-    gui.frame_preview_status_label.setText(f"Exact frame preview synced at {time.strftime('%H:%M:%S')}.")
+    gui.frame_preview_status_label.setText(t("Exact frame preview synced at {time}.", time=time.strftime('%H:%M:%S')))

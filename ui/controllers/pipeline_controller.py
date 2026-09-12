@@ -12,6 +12,11 @@ from PySide6.QtWidgets import QMessageBox
 from worker_adapters import PrepareWorkflowWorker
 from runtime_paths import subprocess_hidden_kwargs
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 # Robust import for the progress widget
 try:
     from widgets.progress_dialog import BackgroundableProgressDialog, PipelineProgressDialog
@@ -276,8 +281,8 @@ class PipelineController:
         if self.progress_dialog:
             reply = QMessageBox.question(
                 self.progress_dialog,
-                "Stop Pipeline?",
-                "Stop the current pipeline run? The worker process for this run will be killed.",
+                t("Stop Pipeline?"),
+                t("Stop the current pipeline run? The worker process for this run will be killed."),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
@@ -323,13 +328,13 @@ class PipelineController:
         if self.progress_dialog:
             step_to_fail = "voiceover" if current_step == "voiceover" else ("preview" if current_step == "preview" else "ai_process")
             self.progress_dialog.fail_step(step_to_fail)
-            self.progress_dialog.footer.setText("Pipeline stopped.")
+            self.progress_dialog.footer.setText(t("Pipeline stopped."))
             self.progress_dialog.footer.setStyleSheet("color: #FFB86B; font-weight: bold; font-size: 14px; margin-top: 15px;")
             self.progress_dialog.stop_btn.setEnabled(False)
-            self.progress_dialog.stop_btn.setText("Stopped")
+            self.progress_dialog.stop_btn.setText(t("Stopped"))
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate")
+            self.gui.run_all_btn.setText(t("Generate"))
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(0)
         self.gui.refresh_ui_state()
@@ -366,8 +371,8 @@ class PipelineController:
             if self.whisper_download_dialog is not None:
                 return
             model_name = getattr(self.gui, "get_whisper_model_name", lambda: "medium")()
-            dlg = BackgroundableProgressDialog(f"Downloading Whisper model: {model_name} ...", "Hide", 0, 0, self.gui)
-            dlg.setWindowTitle("Downloading models")
+            dlg = BackgroundableProgressDialog(f"{t('Downloading Whisper model:')} {model_name} ...", t("Hide"), 0, 0, self.gui)
+            dlg.setWindowTitle(t("Downloading models"))
             dlg.setWindowModality(Qt.NonModal)
             dlg.setMinimumDuration(0)
             dlg.setAutoReset(False)
@@ -420,7 +425,7 @@ class PipelineController:
                 video_path = getattr(self.gui, "last_video_path", "")
 
         if not video_path or not os.path.exists(video_path):
-            QMessageBox.warning(self.gui, "Error", "Please select a video file first.")
+            QMessageBox.warning(self.gui, t("Error"), t("Please select a video file first."))
             return
 
         # Determine if we need vocal separation based on UI settings
@@ -437,7 +442,7 @@ class PipelineController:
         # UI Feedback
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(False)
-            self.gui.run_all_btn.setText("Processing...")
+            self.gui.run_all_btn.setText(t("Processing..."))
             
         self._setup_progress_dialog(includes_separation=requires_separation)
         self.progress_dialog.start_step("ai_process")
@@ -524,11 +529,11 @@ class PipelineController:
             "done": "Prepare complete",
             "error": "Prepare failed",
         }
-        label = str(message or labels.get(str(step_id or ""), step_id or "Processing")).strip()
+        label = t(str(message or labels.get(str(step_id or ""), step_id or "Processing")).strip())
         if label:
             self.gui.log(f"[Pipeline] Phase: {label}")
             if self.progress_dialog:
-                self.progress_dialog.footer.setText(f"Prepare: {label}")
+                self.progress_dialog.footer.setText(t("Prepare: {label}", label=label))
                 self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
         if step_id == "transcription":
             self._hide_whisper_download_dialog()
@@ -543,13 +548,13 @@ class PipelineController:
             except (ValueError, TypeError):
                 pass
 
-        disp_text = detail or message
+        disp_text = t(str(detail or message).strip())
         if not disp_text:
-            disp_text = f"Transcribing audio ({pct}%)" if pct is not None else "Processing..."
+            disp_text = t("Transcribing audio ({percent}%)", percent=pct) if pct is not None else t("Processing...")
 
         # Update PipelineProgressDialog
         if self.progress_dialog:
-            self.progress_dialog.footer.setText(f"Prepare: {disp_text}")
+            self.progress_dialog.footer.setText(t("Prepare: {label}", label=disp_text))
             self.progress_dialog.footer.setStyleSheet("color: #9fb7d5; font-size: 13px; margin-top: 15px;")
             if pct is not None and "ai_process" in self.progress_dialog.steps:
                 self.progress_dialog.steps["ai_process"].status_label.setText(f"{pct}%")
@@ -564,7 +569,7 @@ class PipelineController:
             scaled = 35 + int((pct / 100.0) * 30)
             self.gui.progress_bar.setValue(min(65, max(35, scaled)))
         if hasattr(self.gui, "status_bar") and disp_text:
-            self.gui.status_bar.showMessage(f"{disp_text}", 2000)
+            self.gui.status_bar.showMessage(disp_text, 2000)
 
     def on_prepare_workflow_finished(self, project_state_path, error, run_id=None):
         """Callback when the background PrepareWorkflow finishes completely."""
@@ -579,7 +584,7 @@ class PipelineController:
 
         if error or not project_state_path:
             self.pipeline_fail(f"Prepare workflow failed: {error}")
-            self.gui.show_error("Prepare Failed", "Could not complete project preparation.", str(error))
+            self.gui.show_error(t("Prepare Failed"), t("Could not complete project preparation."), str(error))
             return
 
         if self.progress_dialog:
@@ -630,9 +635,9 @@ class PipelineController:
         if getattr(self, "_fallback_notification_signature", "") == signature:
             return
         self._fallback_notification_signature = signature
-        notice = "AI Provider is unavailable. Translation completed using Google Translate instead."
+        notice = t("AI Provider is unavailable. Translation completed using Google Translate instead.")
         self.gui.log(f"[Translation] {notice}")
-        QMessageBox.information(self.gui, "Translation Fallback", notice)
+        QMessageBox.information(self.gui, t("Translation Fallback"), notice)
 
     def pipeline_advance(self, completed_step: str):
         """Manages transitions between major pipeline segments."""
@@ -664,13 +669,13 @@ class PipelineController:
                 self.pipeline_done()
                 if self.progress_dialog:
                     self.progress_dialog.skip_step("preview")
-                    self.progress_dialog.set_completed("✨ AI Voiceover complete! Audio track is ready.")
+                    self.progress_dialog.set_completed(t("✨ AI Voiceover complete! Audio track is ready."))
                     self.progress_dialog.raise_()
                     self.progress_dialog.activateWindow()
                 QMessageBox.information(
                     self.gui,
-                    "Success",
-                    "AI Voiceover generation finished successfully!\n\nThe new voice track is loaded and ready on the timeline.",
+                    t("Success"),
+                    t("AI Voiceover generation finished successfully!\n\nThe new voice track is loaded and ready on the timeline."),
                 )
                 return
             self.gui._pipeline_step = "preview"
@@ -698,13 +703,13 @@ class PipelineController:
             current_step = getattr(self.gui, "_pipeline_step", "prepare")
             self.progress_dialog.fail_step(current_step)
             # Show the error reason in the footer
-            self.progress_dialog.footer.setText(f"FAILED: {reason}")
+            self.progress_dialog.footer.setText(f"{t('FAILED')}: {t(reason)}")
             self.progress_dialog.footer.setStyleSheet("color: #FF4444; font-weight: bold;")
 
         # Restore UI
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate")
+            self.gui.run_all_btn.setText(t("Generate"))
         
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(0)
@@ -719,7 +724,7 @@ class PipelineController:
         
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate")
+            self.gui.run_all_btn.setText(t("Generate"))
             
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(100)

@@ -20,6 +20,11 @@ from PySide6.QtWidgets import (
 
 from vieneu_tts import save_cloned_voice
 
+try:
+    from i18n import t
+except ImportError:
+    from ui.i18n import t
+
 
 class CreateVoiceCloneDialog(QDialog):
     """Modal dialog allowing users to create and save a new clone voice."""
@@ -222,9 +227,9 @@ class CreateVoiceCloneDialog(QDialog):
     def _on_browse_audio(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Reference Audio File",
+            t("Select Reference Audio File"),
             "",
-            "Audio Files (*.wav *.mp3 *.m4a *.flac *.ogg);;All Files (*.*)",
+            t("Audio Files (*.wav *.mp3 *.m4a *.flac *.ogg);;All Files (*.*)"),
         )
         if file_path:
             self.audio_path_edit.setText(file_path)
@@ -252,13 +257,13 @@ class CreateVoiceCloneDialog(QDialog):
                     winsound.PlaySound(abs_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
                     self._winsound_active = True
                     played_native = True
-                    self.play_audio_btn.setText("⏹ Stop")
+                    self.play_audio_btn.setText(t("⏹ Stop"))
                 except Exception:
                     pass
             if not played_native:
                 self.player.setSource(QUrl.fromLocalFile(abs_path))
                 self.player.play()
-                self.play_audio_btn.setText("⏹ Stop")
+                self.play_audio_btn.setText(t("⏹ Stop"))
 
     def _stop_playback(self):
         if os.name == "nt":
@@ -272,11 +277,11 @@ class CreateVoiceCloneDialog(QDialog):
             self.player.stop()
         except Exception:
             pass
-        self.play_audio_btn.setText("▶ Play")
+        self.play_audio_btn.setText(t("▶ Play"))
 
     def _on_playback_state_changed(self, state):
         if state != QMediaPlayer.PlaybackState.PlayingState and not getattr(self, "_winsound_active", False):
-            self.play_audio_btn.setText("▶ Play")
+            self.play_audio_btn.setText(t("▶ Play"))
 
     def _on_save_voice(self):
         name = self.name_edit.text().strip()
@@ -286,20 +291,20 @@ class CreateVoiceCloneDialog(QDialog):
         description = self.desc_edit.text().strip()
 
         if not name:
-            QMessageBox.warning(self, "Missing Information", "Please enter a voice name.")
+            QMessageBox.warning(self, t("Missing Information"), t("Please enter a voice name."))
             self.name_edit.setFocus()
             return
 
         if not audio_path or not os.path.exists(audio_path):
-            QMessageBox.warning(self, "Missing Information", "Please select a valid reference audio file.")
+            QMessageBox.warning(self, t("Missing Information"), t("Please select a valid reference audio file."))
             self.browse_btn.setFocus()
             return
 
         if not ref_text:
             QMessageBox.warning(
                 self,
-                "Missing Information",
-                "Please enter the reference transcript (what is spoken in the audio sample).",
+                t("Missing Information"),
+                t("Please enter the reference transcript (what is spoken in the audio sample)."),
             )
             self.ref_text_edit.setFocus()
             return
@@ -317,7 +322,7 @@ class CreateVoiceCloneDialog(QDialog):
             self.created_voice_entry = saved_meta
             self.accept()
         except Exception as exc:
-            QMessageBox.critical(self, "Voice Clone Error", f"Could not save cloned voice:\n{exc}")
+            QMessageBox.critical(self, t("Voice Clone Error"), f"{t('Could not save cloned voice:')}\n{exc}")
 
     def closeEvent(self, event):
         self._stop_playback()

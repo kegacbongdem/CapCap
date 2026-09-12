@@ -208,7 +208,7 @@ class ProjectService:
         dub_volume: int = 100,
         normalizer_signature: str = "",
     ) -> str:
-        safe_voice_speed = max(0.5, min(1.30, float(voice_speed or 1.0)))
+        safe_voice_speed = max(0.5, min(2.0, float(voice_speed or 1.0)))
         def _segment_voice_text(seg) -> str:
             current = dict(seg or {})
             subtitle_text = str(current.get("text") or "").strip()

@@ -2293,10 +2293,21 @@ class VideoTranslatorGUI(QMainWindow):
         self._update_voice_preview_meta()
 
     def _parse_voice_speed_value(self) -> float:
-        raw = str(getattr(self, "voice_speed_spin", None).currentText() if getattr(self, "voice_speed_spin", None) else "1.0x").strip().lower()
-        raw = raw.replace("x", "")
+        spin = getattr(self, "voice_speed_spin", None)
+        if spin is None:
+            return 1.0
         try:
-            return float(raw or "1.0")
+            data = spin.currentData()
+            if isinstance(data, (int, float)) and data > 0:
+                return float(data)
+        except Exception:
+            pass
+        from ui.i18n import current_source_text
+        raw = current_source_text(spin) or str(spin.currentText() or "1.0x")
+        raw = raw.strip().lower().replace("x", "").split()[0]
+        try:
+            val = float(raw or "1.0")
+            return val if val > 0 else 1.0
         except ValueError:
             return 1.0
 
@@ -13949,9 +13960,7 @@ class VideoTranslatorGUI(QMainWindow):
 
         self.extract_btn.setEnabled(v_ok)
         self.vocal_sep_btn.setEnabled(a_ok)
-        if hasattr(self, "voice_timing_sync_combo") and hasattr(self, "voice_speed_spin"):
-            sync_mode = current_source_text(self.voice_timing_sync_combo).strip().lower()
-            self.voice_speed_spin.setEnabled(sync_mode != "off")
+
         self.transcribe_btn.setEnabled(a_ok)
         self.translate_btn.setEnabled(bool(self.transcript_text.toPlainText().strip()))
         self.apply_translated_btn.setEnabled(translation_ready and has_translated_text)

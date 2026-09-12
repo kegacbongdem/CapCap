@@ -82,7 +82,7 @@ def provider_native_speed(*, provider: str, requested_speed: float) -> float:
 
 def clamp_requested_speed(requested_speed: float) -> float:
     speed_value = max(0.5, float(requested_speed or 1.0))
-    if speed_value > 1.30:
-        print(f"[VoicePreviewUtils] Requested speed {speed_value:.2f} exceeds safe cap. Clamping to 1.30.")
-        return 1.30
+    if speed_value > 2.0:
+        print(f"[VoicePreviewUtils] Requested speed {speed_value:.2f} exceeds safe cap. Clamping to 2.00.")
+        return 2.0
     return speed_value

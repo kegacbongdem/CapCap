@@ -504,18 +504,31 @@ def build_start_group(gui, left_layout):
     gui.voice_gender_combo.currentTextChanged.connect(gui.on_voice_gender_changed)
     gui.voice_speed_spin = QComboBox(gui)
     gui.voice_speed_spin.setEditable(True)
-    gui.voice_speed_spin.addItems(["0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x", "1.5x", "1.6x", "1.8x", "2.0x"])
-    gui.voice_speed_spin.setCurrentText("1.0x")
-    gui.voice_speed_spin.hide()
+    speed_presets = [
+        ("0.8x", 0.8),
+        ("0.85x", 0.85),
+        ("0.9x", 0.9),
+        ("0.95x", 0.95),
+        ("1.0x (Normal)", 1.0),
+        ("1.05x", 1.05),
+        ("1.1x", 1.1),
+        ("1.15x", 1.15),
+        ("1.2x", 1.2),
+        ("1.25x", 1.25),
+        ("1.3x", 1.3),
+        ("1.4x", 1.4),
+        ("1.5x", 1.5),
+        ("1.6x", 1.6),
+        ("1.8x", 1.8),
+        ("2.0x", 2.0),
+    ]
+    for label, val in speed_presets:
+        gui.voice_speed_spin.addItem(label, val)
+    normal_idx = [v for _, v in speed_presets].index(1.0)
+    gui.voice_speed_spin.setCurrentIndex(normal_idx)
     gui.voice_timing_sync_combo = QComboBox()
     gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Timeline Priority", "Force Fit"])
     gui.voice_timing_sync_combo.setCurrentText("Smart")
-
-    def _sync_voice_speed_enabled(_value: str = ""):
-        mode = current_source_text(gui.voice_timing_sync_combo).strip().lower()
-        gui.voice_speed_spin.setEnabled(mode != "off")
-    gui.voice_timing_sync_combo.currentTextChanged.connect(_sync_voice_speed_enabled)
-    _sync_voice_speed_enabled()
 
     def _on_voice_timing_sync_changed(_value: str = ""):
         if hasattr(gui, "timeline") and gui.timeline is not None:
@@ -567,6 +580,9 @@ def build_start_group(gui, left_layout):
     fast_voice_layout.addLayout(voice_picker_row)
     fast_voice_layout.addWidget(QLabel("Voice type"))
     fast_voice_layout.addWidget(gui.voice_gender_combo)
+    gui.voice_speed_label = QLabel("Voice speed")
+    fast_voice_layout.addWidget(gui.voice_speed_label)
+    fast_voice_layout.addWidget(gui.voice_speed_spin)
     voice_setup_layout.addWidget(gui.fast_voice_panel)
     # Voice preview belongs to the global/default voice configuration.  It is
     # deliberately kept outside the per-speaker diarization controls below.

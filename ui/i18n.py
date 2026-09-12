@@ -271,6 +271,8 @@ VI_TRANSLATIONS: dict[str, str] = {
     "Voice model": "Model giọng đọc",
     "Voice Preview Library": "Thư viện xem trước giọng đọc",
     "Voice Setup": "Thiết lập giọng đọc",
+    "Voice speed": "Tốc độ giọng đọc",
+    "1.0x (Normal)": "1.0x (Chuẩn)",
     "Voice timing synchronization": "Đồng bộ thời gian giọng đọc",
     "Video": "Video",
     "Video Translation & Voiceover Studio": "Công cụ dịch và lồng tiếng video",

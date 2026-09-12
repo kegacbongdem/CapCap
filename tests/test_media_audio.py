@@ -217,5 +217,102 @@ class TestAudioReader(unittest.TestCase):
                     pass
 
 
+class TestAudioMixerPCM(unittest.TestCase):
+    """Test block-based PCM mixing and linear gain clipping."""
+
+    def test_mix_pcm_block_linear_and_clip(self):
+        """Test linear gain combination and clipping to [-1.0, 1.0]."""
+        from app.audio_mixer import mix_pcm_block
+
+        a = np.array([0.2, 0.9], dtype=np.float32)
+        b = np.array([0.4, 0.9], dtype=np.float32)
+        original = a.copy()
+        mixed = mix_pcm_block([a, b], [0.5, 1.0])
+        np.testing.assert_allclose(mixed, [0.5, 1.0], atol=1e-6)
+        np.testing.assert_array_equal(a, original)
+
+    def test_mix_pcm_block_negative_clipping(self):
+        """Test negative overload clips to -1.0."""
+        from app.audio_mixer import mix_pcm_block
+
+        a = np.array([-0.8, -0.6], dtype=np.float32)
+        b = np.array([-0.5, -0.7], dtype=np.float32)
+        mixed = mix_pcm_block([a, b], [1.0, 1.0])
+        # -0.8 + -0.5 = -1.3 -> -1.0; -0.6 + -0.7 = -1.3 -> -1.0
+        np.testing.assert_allclose(mixed, [-1.0, -1.0], atol=1e-6)
+
+    def test_mix_pcm_block_length_mismatch(self):
+        """Ensure blocks with different lengths raise ValueError."""
+        from app.audio_mixer import mix_pcm_block
+
+        a = np.array([0.1, 0.2], dtype=np.float32)
+        b = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        with self.assertRaises(ValueError):
+            mix_pcm_block([a, b], [1.0, 1.0])
+
+    def test_mix_pcm_block_empty(self):
+        """Ensure empty input returns empty array."""
+        from app.audio_mixer import mix_pcm_block
+
+        mixed = mix_pcm_block([], [])
+        self.assertEqual(len(mixed), 0)
+        self.assertEqual(mixed.dtype, np.float32)
+
+
+class TestPreviewAudioEngine(unittest.TestCase):
+    """Test PreviewAudioEngine lifecycle and asynchronous controls."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtCore import QCoreApplication
+        cls.app = QCoreApplication.instance()
+        if cls.app is None:
+            cls.app = QCoreApplication([])
+
+    def setUp(self):
+        self.temp_dir = os.path.join(PROJECT_ROOT, "temp", "test_preview_engine")
+        os.makedirs(self.temp_dir, exist_ok=True)
+        self.wav_path = os.path.join(self.temp_dir, "test_track.wav")
+        tone = (np.sin(2 * np.pi * 440 * np.linspace(0, 3.0, 3 * 16000))).astype(np.float32) * 0.5
+        sf.write(self.wav_path, tone, 16000, format="WAV", subtype="FLOAT")
+
+    def tearDown(self):
+        if os.path.exists(self.wav_path):
+            try:
+                os.remove(self.wav_path)
+            except OSError:
+                pass
+
+    def test_engine_lifecycle(self):
+        """Ensure PreviewAudioEngine initializes, sets tracks, seeks, and closes cleanly."""
+        from ui.utils.preview_audio import PreviewAudioEngine
+
+        engine = PreviewAudioEngine()
+        try:
+            tracks = [
+                {
+                    "id": "track_1",
+                    "path": self.wav_path,
+                    "start": 0.0,
+                    "end": 3.0,
+                    "volume": 80.0,
+                    "muted": False,
+                }
+            ]
+            engine.set_tracks(tracks)
+            engine.set_track_gain("track_1", 0.5, muted=False)
+            engine.seek(1200)
+            self.assertEqual(engine.timeline_position_ms(), 1200)
+
+            engine.play()
+            self.app.processEvents()
+            engine.pause()
+            self.app.processEvents()
+            engine.stop()
+            self.assertEqual(engine.timeline_position_ms(), 0)
+        finally:
+            engine.close()
+
+
 if __name__ == "__main__":
     unittest.main()

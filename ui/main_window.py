@@ -3416,6 +3416,42 @@ class VideoTranslatorGUI(QMainWindow):
                     pass
             else:
                 self.media_player.clear_audio()
+
+            if getattr(self.media_player, "_native_audio_active", False) and hasattr(self.media_player, "set_audio_tracks_snapshot"):
+                tracks_snapshot = []
+                orig_vol = self._compute_audio_track_volume("A1 Audio", base=100.0) * (10 ** (self._get_audio_track_gain_db("A1 Audio") / 20.0))
+                orig_path = original_audio or source_video
+                if orig_path and os.path.exists(orig_path):
+                    tracks_snapshot.append({
+                        "id": "A1 Audio",
+                        "path": orig_path,
+                        "start": 0.0,
+                        "end": self._audio_total_duration_ms() / 1000.0,
+                        "volume": orig_vol,
+                        "muted": self._is_audio_track_muted("A1 Audio"),
+                        "is_original_video": True,
+                    })
+                voice_only = self._resolve_preview_voice_only_audio_path()
+                if voice_only and os.path.exists(voice_only):
+                    dub_vol = self._compute_audio_track_volume("TS1", base=100.0) * (10 ** (self._get_audio_track_gain_db("TS1") / 20.0))
+                    tracks_snapshot.append({
+                        "id": "TS1",
+                        "path": voice_only,
+                        "start": 0.0,
+                        "end": self._audio_total_duration_ms() / 1000.0,
+                        "volume": dub_vol,
+                        "muted": self._is_audio_track_muted("TS1"),
+                        "is_original_video": False,
+                    })
+                for m in self._music_audio_tracks():
+                    m_copy = dict(m)
+                    m_copy.setdefault("id", str(m.get("path", "")))
+                    m_copy["is_original_video"] = False
+                    tracks_snapshot.append(m_copy)
+
+                warps = getattr(self, "_active_time_warps", lambda: [])()
+                self.media_player.set_audio_tracks_snapshot(tracks_snapshot, warps)
+
             if current_position > 0:
                 try:
                     self.media_player.setPosition(current_position)
@@ -8727,6 +8763,27 @@ class VideoTranslatorGUI(QMainWindow):
         """
         if not hasattr(self, "media_player") or self.media_player is None:
             return
+        if getattr(self.media_player, "_native_audio_active", False) and hasattr(self.media_player, "set_track_gain"):
+            try:
+                vol = self._compute_audio_track_volume(track_name, base=100.0)
+                gain_db = self._get_audio_track_gain_db(track_name)
+                effective = max(0.0, min(200.0, vol * (10 ** (gain_db / 20.0))))
+                muted = self._is_audio_track_muted(track_name)
+                linear_gain = effective / 100.0
+
+                if track_name == "A1 Audio":
+                    self.media_player.set_track_gain("A1 Audio", linear_gain, muted)
+                elif track_name in ("A2 Dub", "TS1"):
+                    self.media_player.set_track_gain("TS1", linear_gain, muted)
+                elif track_name == "A2 Music":
+                    for m_track in self._music_audio_tracks():
+                        m_id = str(m_track.get("id") or m_track.get("path", "A2 Music"))
+                        m_vol = float(m_track.get("volume", 100.0)) / 100.0
+                        self.media_player.set_track_gain(m_id, m_vol * linear_gain, muted)
+                return
+            except Exception:
+                pass
+
         try:
             if track_name == "A1 Audio":
                 vol = self._compute_audio_track_volume(track_name, base=100.0)

@@ -413,11 +413,14 @@ class QtMediaPlayerBackend(QObject):
         except Exception:
             pass
 
-    def playback_rate(self):
-        try:
-            return float(self._player.playbackRate())
-        except Exception:
-            return 1.0
+    def set_audio_tracks_snapshot(self, tracks, warps=None):
+        pass
+
+    def set_track_gain(self, track_id: str, gain: float, muted: bool = False):
+        pass
+
+    def close(self):
+        pass
 
 
 class MpvMediaPlayerBackend(QObject):
@@ -594,6 +597,21 @@ class MpvMediaPlayerBackend(QObject):
         self._dubbed_player.positionChanged.connect(self._on_dubbed_position_changed)
         self._dubbed_player.mediaStatusChanged.connect(self._on_dubbed_status_changed)
 
+        # --- Native PCM PreviewAudioEngine (opt-in via CAPCAP_NATIVE_AUDIO=1) ---
+        self._native_audio_engine = None
+        self._native_audio_active = False
+        native_opt = str(os.environ.get("CAPCAP_NATIVE_AUDIO", "0")).strip().lower()
+        if native_opt in {"1", "true", "yes", "on"}:
+            try:
+                from .preview_audio import PreviewAudioEngine
+                self._native_audio_engine = PreviewAudioEngine(self)
+                self._native_audio_active = True
+                self.log("[Preview] Native PCM PreviewAudioEngine enabled (opt-in)")
+            except Exception as exc:
+                self.log(f"[Preview] Native audio initialization failed, using legacy sidecars: {exc}")
+                self._native_audio_engine = None
+                self._native_audio_active = False
+
         # --- Timers ---
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(200)
@@ -734,16 +752,19 @@ class MpvMediaPlayerBackend(QObject):
             return
         self._video_frozen = False
         self._player.pause = False
-        if self._original_loaded_path:
-            try:
-                self._original_player.play()
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.play()
-            except Exception:
-                pass
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.play()
+        else:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.play()
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.play()
+                except Exception:
+                    pass
         self._state = QMediaPlayer.PlayingState
         try:
             self.stateChanged.emit(int(self._state.value))
@@ -753,16 +774,19 @@ class MpvMediaPlayerBackend(QObject):
     def pause(self):
         self._video_frozen = False
         self._player.pause = True
-        if self._original_loaded_path:
-            try:
-                self._original_player.pause()
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.pause()
-            except Exception:
-                pass
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.pause()
+        else:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.pause()
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.pause()
+                except Exception:
+                    pass
         self._state = QMediaPlayer.PausedState
         try:
             self.stateChanged.emit(int(self._state.value))
@@ -772,18 +796,21 @@ class MpvMediaPlayerBackend(QObject):
     def stop(self):
         self._video_frozen = False
         self._player.pause = True
-        if self._original_loaded_path:
-            try:
-                self._original_player.pause()
-                self._original_player.setPosition(0)
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.pause()
-                self._dubbed_player.setPosition(0)
-            except Exception:
-                pass
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.stop()
+        else:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.pause()
+                    self._original_player.setPosition(0)
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.pause()
+                    self._dubbed_player.setPosition(0)
+                except Exception:
+                    pass
         try:
             self._player.command("seek", 0, "absolute")
         except Exception:
@@ -860,25 +887,49 @@ class MpvMediaPlayerBackend(QObject):
             self._player.command("seek", seconds, "absolute")
         except Exception:
             pass
-        if self._original_loaded_path:
-            try:
-                self._original_player.setPosition(int(position))
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                warps = getattr(self, "_video_time_warps", [])
-                if timeline_pos is not None:
-                    dubbed_pos = int(timeline_pos)
-                elif warps:
-                    from app.services.time_warp_service import TimeWarpService
-                    dubbed_pos = int(round(TimeWarpService.media_to_timeline_time(position / 1000.0, warps) * 1000))
-                else:
-                    dubbed_pos = int(position)
-                self._dubbed_player.setPosition(dubbed_pos)
-            except Exception:
-                pass
+
+        warps = getattr(self, "_video_time_warps", [])
+        if timeline_pos is not None:
+            dubbed_pos = int(timeline_pos)
+        elif warps:
+            from app.services.time_warp_service import TimeWarpService
+            dubbed_pos = int(round(TimeWarpService.media_to_timeline_time(position / 1000.0, warps) * 1000))
+        else:
+            dubbed_pos = int(position)
+
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.seek(dubbed_pos)
+        else:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.setPosition(int(position))
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.setPosition(dubbed_pos)
+                except Exception:
+                    pass
         self.positionChanged.emit(self._position_ms)
+
+    def set_audio_tracks_snapshot(self, tracks, warps=None):
+        """Send tracks snapshot to native PCM audio engine."""
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.set_tracks(tracks, warps or self._video_time_warps)
+
+    def set_track_gain(self, track_id: str, gain: float, muted: bool = False):
+        """Update track volume without regenerating media files."""
+        if self._native_audio_active and self._native_audio_engine is not None:
+            self._native_audio_engine.set_track_gain(track_id, gain, muted)
+
+    def close(self):
+        """Release native audio engine and workers cleanly."""
+        if self._native_audio_engine is not None:
+            try:
+                self._native_audio_engine.close()
+            except Exception:
+                pass
+            self._native_audio_engine = None
 
     def position(self):
         return self._position_ms

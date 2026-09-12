@@ -742,11 +742,36 @@ def mix_audio_tracks(
         if fit_len > 0:
             base_buffer[start_sample:end_sample] += audio[:fit_len]
 
-    peak = float(np.max(np.abs(base_buffer))) if base_buffer.size else 0.0
-    if peak > 1.0:
-        base_buffer = (base_buffer / peak) * 0.999
+    # Clip output to [-1.0, 1.0] instead of whole-track normalization
+    # to maintain deterministic parity with native real-time PCM preview.
+    np.clip(base_buffer, -1.0, 1.0, out=base_buffer)
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
     sf.write(output_wav_path, base_buffer, sample_rate, subtype="PCM_16")
     return output_wav_path
+
+
+def mix_pcm_block(blocks: list[np.ndarray], gains: list[float]) -> np.ndarray:
+    """Mix multiple 1D float32 PCM audio blocks using linear gains and output clipping [-1.0, 1.0].
+
+    All input blocks must have the same length. Input blocks are never mutated in-place.
+    """
+    if not blocks:
+        return np.empty(0, dtype=np.float32)
+
+    block_len = len(blocks[0])
+    for b in blocks[1:]:
+        if len(b) != block_len:
+            raise ValueError(f"Block length mismatch: expected {block_len}, got {len(b)}")
+
+    out = np.zeros(block_len, dtype=np.float32)
+    for block, gain in zip(blocks, gains):
+        g = float(gain)
+        if abs(g) < 1e-6:
+            continue
+        clean_block = np.nan_to_num(block, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+        out += clean_block * g
+
+    np.clip(out, -1.0, 1.0, out=out)
+    return out
 

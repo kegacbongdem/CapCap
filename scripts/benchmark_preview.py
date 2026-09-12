@@ -511,6 +511,8 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     files_created: List[str] = []
     subprocesses_spawned: List[str] = []
     out_wav = os.path.join(temp_dir, "preview_mix_active.wav")
+    disk_writes_count = 0
+    cumulative_bytes_written = 0
 
     auditor = SubprocessAuditor()
     last_processed_time = 0.0
@@ -529,14 +531,16 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
                 ]
                 mix_audio_tracks(tracks=tracks, output_wav_path=out_wav, total_duration_ms=10000)
                 last_processed_time = simulated_tick_time
-                if os.path.exists(out_wav) and out_wav not in files_created:
-                    files_created.append(out_wav)
+                disk_writes_count += 1
+                if os.path.exists(out_wav):
+                    cumulative_bytes_written += os.path.getsize(out_wav)
+                    if out_wav not in files_created:
+                        files_created.append(out_wav)
 
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             volume_latencies_ms.append(elapsed_ms)
 
     subprocesses_spawned = auditor.spawned
-    total_bytes_written = sum(os.path.getsize(p) for p in files_created if os.path.exists(p))
 
     # Clean up generated mix files
     for f in files_created:
@@ -545,7 +549,37 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
         except OSError:
             pass
 
-    return {
+    # Benchmark native in-memory volume path using PreviewAudioEngine
+    print("[Benchmark] Measuring native in-memory volume adjustments (100 iterations)...")
+    native_latencies_ms: List[float] = []
+    native_subprocesses: List[str] = []
+    try:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+        from ui.utils.preview_audio import PreviewAudioEngine
+        engine = PreviewAudioEngine()
+        engine.set_tracks([
+            {"id": "voice", "path": voice_path, "start": 0.0, "end": 10.0, "volume": 100.0, "muted": False},
+            {"id": "music", "path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": 100.0, "muted": False},
+        ])
+        app.processEvents()
+
+        with SubprocessAuditor() as nat_auditor:
+            for i in range(100):
+                tts_vol = float(10 + (i % 90))
+                music_vol = float(100 - (i % 70))
+                t0 = time.perf_counter()
+                engine.set_track_gain("voice", tts_vol / 100.0)
+                engine.set_track_gain("music", music_vol / 100.0)
+                app.processEvents()
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                native_latencies_ms.append(elapsed_ms)
+        native_subprocesses = nat_auditor.spawned
+        engine.close()
+    except Exception as exc:
+        print(f"[Benchmark] Native volume benchmark skipped: {exc}")
+
+    res: Dict[str, Any] = {
         "legacy_volume_100_runs": {
             "min_ms": round(min(volume_latencies_ms), 2),
             "median_ms": round(sorted(volume_latencies_ms)[len(volume_latencies_ms) // 2], 2),
@@ -553,10 +587,24 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
             "max_ms": round(max(volume_latencies_ms), 2),
             "total_time_s": round(sum(volume_latencies_ms) / 1000.0, 2),
             "subprocesses_spawned_count": len(subprocesses_spawned),
+            "disk_writes_count": disk_writes_count,
             "files_created_count": len(files_created),
-            "total_bytes_written": total_bytes_written,
+            "total_bytes_written": cumulative_bytes_written,
         }
     }
+    if native_latencies_ms:
+        res["native_volume_100_runs"] = {
+            "min_ms": round(min(native_latencies_ms), 2),
+            "median_ms": round(sorted(native_latencies_ms)[len(native_latencies_ms) // 2], 2),
+            "p95_ms": round(percentile95(native_latencies_ms), 2),
+            "max_ms": round(max(native_latencies_ms), 2),
+            "total_time_s": round(sum(native_latencies_ms) / 1000.0, 2),
+            "subprocesses_spawned_count": len(native_subprocesses),
+            "disk_writes_count": 0,
+            "files_created_count": 0,
+            "total_bytes_written": 0,
+        }
+    return res
 
 
 def main():
@@ -610,10 +658,16 @@ def main():
         bench = run_baseline_benchmarks(temp_dir)
         results["baseline"] = bench
         vol_stats = bench["legacy_volume_100_runs"]
+        nat_stats = bench.get("native_volume_100_runs", {})
         print(f"Legacy volume 100 runs:")
         print(f"  p95 latency: {vol_stats['p95_ms']} ms (min: {vol_stats['min_ms']} ms, max: {vol_stats['max_ms']} ms)")
         print(f"  Subprocesses spawned: {vol_stats['subprocesses_spawned_count']}")
-        print(f"  Files created: {vol_stats['files_created_count']} ({vol_stats['total_bytes_written'] / (1024 * 1024):.2f} MiB written)")
+        print(f"  Disk writes: {vol_stats.get('disk_writes_count', 0)} ({vol_stats['total_bytes_written'] / (1024 * 1024):.2f} MiB written)")
+        if nat_stats:
+            print(f"Native in-memory volume 100 runs:")
+            print(f"  p95 latency: {nat_stats['p95_ms']} ms (min: {nat_stats['min_ms']} ms, max: {nat_stats['max_ms']} ms)")
+            print(f"  Subprocesses spawned: {nat_stats['subprocesses_spawned_count']}")
+            print(f"  Disk writes: {nat_stats['disk_writes_count']} (0.00 MiB written)")
 
     # Save output if specified
     out_path = args.output

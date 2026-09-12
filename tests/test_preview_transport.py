@@ -433,6 +433,87 @@ class TestPreviewTransport(unittest.TestCase):
         self.assertEqual(backend._video_time_warps, warps)
         backend._native_audio_engine.set_warps.assert_called_once_with(warps)
 
+    def test_tracks_snapshot_cached_and_sent_on_sink_ready(self):
+        """Verify tracks snapshot is cached if sink is not yet ready, then sent when sink becomes ready."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._native_audio_active = False
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+        backend._video_time_warps = []
+        backend.log = MagicMock()
+
+        tracks = [{"id": "t1", "path": "t1.wav"}]
+        backend.set_audio_tracks_snapshot(tracks)
+        mock_engine.set_tracks.assert_not_called()
+
+        backend._on_native_audio_sink_ready(True)
+        self.assertTrue(backend._native_audio_active)
+        mock_engine.set_tracks.assert_called_once_with(tracks, [])
+
+    def test_set_source_resets_native_audio_engine(self):
+        """Verify setSource stops and resets native audio engine on media change and teardown."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+        backend._player = MagicMock()
+        backend._original_player = MagicMock()
+        backend._dubbed_player = MagicMock()
+        backend._original_loaded_path = ""
+        backend._dubbed_loaded_path = ""
+        backend.stop = MagicMock()
+        backend.clear_subtitle = MagicMock()
+        backend._apply_blur_filter = MagicMock()
+        backend._apply_current_subtitle = MagicMock()
+
+        # Teardown / clear source
+        backend.setSource("")
+        mock_engine.stop.assert_called_once()
+        mock_engine.seek.assert_called_once_with(0)
+
+        # Load new source
+        mock_engine.reset_mock()
+        backend._normalize_source = lambda s: "sample.mp4"
+        backend.durationChanged = MagicMock()
+        backend.setSource("sample.mp4")
+        mock_engine.stop.assert_called_once()
+        mock_engine.seek.assert_called_once_with(0)
+
+    def test_on_native_audio_position_changed_emits_position_changed(self):
+        """Verify _on_native_audio_position_changed updates position and emits positionChanged."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._native_audio_active = True
+        backend._video_time_warps = []
+        backend.positionChanged = MagicMock()
+
+        backend._on_native_audio_position_changed(1500)
+        self.assertEqual(backend._dubbed_position_ms, 1500)
+        self.assertEqual(backend._position_ms, 1500)
+        backend.positionChanged.emit.assert_called_once_with(1500)
+
+    def test_freeze_timer_tick_uses_native_audio_clock(self):
+        """Verify freeze timer uses media_player.timeline_position_ms() when native audio is active."""
+        from ui.utils.media_utils import _on_freeze_timer_tick
+
+        gui = MagicMock()
+        gui._active_freeze_warp = {"id": "warp_1"}
+        gui.timeline._playing = True
+        gui.media_player._native_audio_active = True
+        gui.media_player.timeline_position_ms.return_value = 2500  # 2.5s
+        gui._freeze_anchor_tl_s = 2.0  # anchor at 2.0s
+        gui._freeze_duration_s = 1.0  # duration 1.0s (ends at 3.0s)
+        gui.video_time_warps = []
+        gui.media_player.duration.return_value = 10000
+
+        # At 2.5s, elapsed is 0.5s < 1.0s
+        _on_freeze_timer_tick(gui)
+        gui.timeline.set_position.assert_called_with(2500)
+
     def test_terminate_workers_calls_media_player_close(self):
         """Verify _terminate_workers calls media_player.close() to release mpv and timers."""
         from ui.main_window import VideoTranslatorGUI

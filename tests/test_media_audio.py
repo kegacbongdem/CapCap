@@ -648,6 +648,145 @@ class TestPreviewAudioEngine(unittest.TestCase):
         finally:
             worker.close()
 
+    def test_clock_accuracy_fractional_rates(self):
+        """Ensure 100 ticks at 0.25x, 0.50x, 0.75x, 1.25x, 2.00x maintain exact timeline clock."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        rates_and_expected = [
+            (0.25, 250),
+            (0.50, 500),
+            (0.75, 750),
+            (1.25, 1250),
+            (2.00, 2000),
+        ]
+        for rate, expected_ms in rates_and_expected:
+            worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+            try:
+                worker._sink_sr = 16000
+                worker._sink_channels = 1
+                worker._sink_is_float = True
+                worker._is_playing = True
+                worker._tracks = []
+                worker.set_rate(rate)
+
+                mock_sink = MagicMock()
+                mock_sink.bytesFree.return_value = 100000
+                mock_io = MagicMock()
+                mock_io.write.return_value = 640
+                worker._sink = mock_sink
+                worker._io_device = mock_io
+
+                for _ in range(100):
+                    worker._on_timer_tick()
+
+                self.assertEqual(worker._timeline_pos_ms, expected_ms)
+            finally:
+                worker.close()
+
+    def test_pause_and_set_rate_reset_state(self):
+        """Ensure pause() and set_rate() completely reset tempo graph, FIFO, PTS, resampler, and pending bytes."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+        try:
+            worker._sink_sr = 48000
+            worker._is_playing = True
+            worker._tempo_fifo = np.ones(100, dtype=np.float32)
+            worker._tempo_graph = ("mock_graph", None, None)
+            worker._tempo_in_pts = 1000
+            worker._sink_resampler = "mock_resampler"
+            worker._pending_write_bytes = b"dirty"
+
+            worker.pause()
+            self.assertEqual(len(worker._tempo_fifo), 0)
+            self.assertIsNone(worker._tempo_graph)
+            self.assertEqual(worker._tempo_in_pts, 0)
+            self.assertIsNone(worker._sink_resampler)
+            self.assertEqual(len(worker._pending_write_bytes), 0)
+
+            # Test set_rate reset
+            worker._tempo_fifo = np.ones(100, dtype=np.float32)
+            worker._tempo_graph = ("mock_graph", None, None)
+            worker._tempo_in_pts = 2000
+            worker._sink_resampler = "mock_resampler"
+            worker._pending_write_bytes = b"dirty"
+
+            worker.set_rate(1.5)
+            self.assertEqual(len(worker._tempo_fifo), 0)
+            self.assertIsNone(worker._tempo_graph)
+            self.assertEqual(worker._tempo_in_pts, 0)
+            self.assertIsNone(worker._sink_resampler)
+            self.assertEqual(len(worker._pending_write_bytes), 0)
+        finally:
+            worker.close()
+
+    def test_multichannel_output_expansion(self):
+        """Ensure 6-channel output sink receives properly tiled audio and advances clock correctly."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+        try:
+            worker._sink_sr = 16000
+            worker._sink_channels = 6
+            worker._sink_is_float = True
+            worker._is_playing = True
+            worker._tracks = []
+
+            mock_sink = MagicMock()
+            mock_sink.bytesFree.return_value = 100000
+            mock_io = MagicMock()
+            # 160 samples * 6 channels * 4 bytes = 3840 bytes
+            mock_io.write.side_effect = lambda data: len(data)
+            worker._sink = mock_sink
+            worker._io_device = mock_io
+
+            worker._on_timer_tick()
+            written_bytes = mock_io.write.call_args[0][0]
+            self.assertEqual(len(written_bytes), 160 * 6 * 4)
+            # Clock should advance by 10 ms (160 frames at 16kHz)
+            self.assertEqual(worker._timeline_pos_ms, 10)
+        finally:
+            worker.close()
+
+    def test_pyav_audio_reader_seek_past_eof_and_gap(self):
+        """Ensure AudioReader seeking past EOF or over gaps does not raise EOFError or TypeError."""
+        import av
+        import fractions
+
+        mkv_path = os.path.join(self.temp_dir, "test_gap_seek.mkv")
+        container = av.open(mkv_path, mode="w", format="matroska")
+        stream = container.add_stream("pcm_s16le", rate=16000)
+        stream.time_base = fractions.Fraction(1, 16000)
+
+        # 1600 samples (100 ms)
+        data = np.zeros(1600, dtype=np.int16)
+        frame = av.AudioFrame.from_ndarray(data.reshape(1, -1), format="s16", layout="mono")
+        frame.sample_rate = 16000
+        frame.time_base = stream.time_base
+        frame.pts = 32000  # Starts after 2.0s
+        for p in stream.encode(frame):
+            container.mux(p)
+        for p in stream.encode(None):
+            container.mux(p)
+        container.close()
+
+        try:
+            with AudioReader(mkv_path, sample_rate=16000) as reader:
+                # Seek chain: 0 -> 8000 -> 16000 -> 32000 -> 64000
+                for seek_sample in (0, 8000, 16000, 32000, 64000):
+                    block = reader.read(seek_sample, 160)
+                    self.assertEqual(len(block), 160)
+                    self.assertEqual(block.dtype, np.float32)
+        finally:
+            if os.path.exists(mkv_path):
+                try:
+                    os.remove(mkv_path)
+                except OSError:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()

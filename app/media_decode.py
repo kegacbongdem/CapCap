@@ -289,8 +289,12 @@ class AudioReader:
     def _read_pyav(self, start_sample: int, sample_count: int) -> np.ndarray:
         assert self._av_container is not None and self._av_stream is not None
 
-        buf_end = self._av_buffer_start + len(self._av_buffer)
-        if self._av_buffer_start <= start_sample and start_sample + sample_count <= buf_end:
+        buf_end = (self._av_buffer_start or 0) + len(self._av_buffer)
+        if (
+            self._av_buffer_start is not None
+            and self._av_buffer_start <= start_sample
+            and start_sample + sample_count <= buf_end
+        ):
             offset = start_sample - self._av_buffer_start
             if offset > 32000:
                 trim = offset - 16000
@@ -306,45 +310,55 @@ class AudioReader:
 
         needs_seek = (
             self._av_resampler is None
+            or self._av_buffer_start is None
             or start_sample < self._av_buffer_start
             or start_sample > buf_end + 16000
         )
         if needs_seek:
             target_pts = start_pts + int(target_time_sec / stream_tb)
-            self._av_container.seek(target_pts, stream=self._av_stream, backward=True)
+            try:
+                self._av_container.seek(target_pts, stream=self._av_stream, backward=True)
+            except Exception:
+                pass
             self._av_resampler = av.AudioResampler(format="fltp", rate=self.sample_rate)
             self._av_buffer = np.empty(0, dtype=np.float32)
             self._av_buffer_start = None
 
         needed_end = start_sample + sample_count
-        for frame in self._av_container.decode(self._av_stream):
-            pts_val = (frame.pts - start_pts) if frame.pts is not None else int(round(target_time_sec / stream_tb))
-            pts_s = float(pts_val * stream_tb)
-            dur_s = float(frame.samples) / float(frame.sample_rate)
-            if self._av_buffer_start is None:
-                if pts_s + dur_s < target_time_sec - 0.05:
-                    continue
-                self._av_buffer_start = int(round(pts_s * self.sample_rate))
+        try:
+            for frame in self._av_container.decode(self._av_stream):
+                pts_val = (frame.pts - start_pts) if frame.pts is not None else int(round(target_time_sec / stream_tb))
+                pts_s = float(pts_val * stream_tb)
+                dur_s = float(frame.samples) / float(frame.sample_rate)
+                if self._av_buffer_start is None:
+                    if pts_s + dur_s < target_time_sec - 0.05:
+                        continue
+                    self._av_buffer_start = int(round(pts_s * self.sample_rate))
 
-            for rf in self._av_resampler.resample(frame):
-                arr = rf.to_ndarray()
-                mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
-                self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
+                for rf in self._av_resampler.resample(frame):
+                    arr = rf.to_ndarray()
+                    mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
+                    self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
 
-            if self._av_buffer_start is not None and self._av_buffer_start + len(self._av_buffer) >= needed_end:
-                break
-        else:
-            # End of stream reached: flush remaining buffered samples from resampler
-            if self._av_resampler is not None:
-                try:
-                    for rf in self._av_resampler.resample(None):
-                        arr = rf.to_ndarray()
-                        mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
-                        self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
-                except Exception:
-                    pass
+                if self._av_buffer_start is not None and self._av_buffer_start + len(self._av_buffer) >= needed_end:
+                    break
+            else:
+                # End of stream reached: flush remaining buffered samples from resampler
+                if self._av_resampler is not None:
+                    try:
+                        for rf in self._av_resampler.resample(None):
+                            arr = rf.to_ndarray()
+                            mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
+                            self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
+                    except Exception:
+                        pass
+        except (EOFError, Exception):
+            pass
 
-        if self._av_buffer_start is None or len(self._av_buffer) == 0:
+        if self._av_buffer_start is None:
+            self._av_buffer_start = start_sample
+
+        if len(self._av_buffer) == 0:
             return np.zeros(sample_count, dtype=np.float32)
 
         offset = start_sample - self._av_buffer_start

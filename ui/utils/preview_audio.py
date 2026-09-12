@@ -105,7 +105,7 @@ class _PreviewAudioWorker(QObject):
 
         self._pcm_cache = _LRUPcmCache(max_bytes=128 * 1024 * 1024)
 
-        self._timeline_pos_ms: int = 0
+        self._timeline_pos_exact_ms: float = 0.0
         self._media_read_sample: int = 0
         self._is_playing: bool = False
         self._playback_rate: float = 1.0
@@ -120,6 +120,14 @@ class _PreviewAudioWorker(QObject):
         self._sink_channels: int = 2
         self._sink_is_float: bool = True
         self._sink_resampler: Any = None
+
+    @property
+    def _timeline_pos_ms(self) -> int:
+        return int(round(self._timeline_pos_exact_ms))
+
+    @_timeline_pos_ms.setter
+    def _timeline_pos_ms(self, val: Any) -> None:
+        self._timeline_pos_exact_ms = float(val)
 
     def init_sink(self) -> None:
         """Initialize QAudioSink with default audio output device format."""
@@ -234,6 +242,7 @@ class _PreviewAudioWorker(QObject):
     def seek(self, timeline_ms: int) -> None:
         """Seek playback to timeline millisecond."""
         self._timeline_pos_ms = max(0, int(timeline_ms))
+        self._timeline_pos_exact_ms = float(self._timeline_pos_ms)
         self._media_read_sample = int(self._timeline_pos_ms * self.internal_sr / 1000.0)
         self._generation_id += 1
         self._pending_write_bytes = b""
@@ -266,6 +275,10 @@ class _PreviewAudioWorker(QObject):
             if self._timer and self._timer.isActive():
                 self._timer.stop()
             self._pending_write_bytes = b""
+            self._tempo_fifo = np.empty(0, dtype=np.float32)
+            self._tempo_graph = None
+            self._tempo_in_pts = 0
+            self._sink_resampler = None
             if self._sink:
                 self._sink.reset()
             self.stateChanged.emit(2)
@@ -277,6 +290,7 @@ class _PreviewAudioWorker(QObject):
         if self._timer and self._timer.isActive():
             self._timer.stop()
         self._timeline_pos_ms = 0
+        self._timeline_pos_exact_ms = 0.0
         self._media_read_sample = 0
         self._pending_write_bytes = b""
         self._tempo_fifo = np.empty(0, dtype=np.float32)
@@ -297,6 +311,7 @@ class _PreviewAudioWorker(QObject):
             self._tempo_graph = None
             self._tempo_fifo = np.empty(0, dtype=np.float32)
             self._tempo_in_pts = 0
+            self._sink_resampler = None
             self._pending_write_bytes = b""
 
     @Slot(list)
@@ -404,7 +419,7 @@ class _PreviewAudioWorker(QObject):
                 bytes_per_frame = bytes_per_sample * self._sink_channels
                 frames_written = bytes_written // bytes_per_frame
                 ms_written = frames_written * 1000.0 / self._sink_sr
-                self._timeline_pos_ms += int(round(ms_written * self._playback_rate))
+                self._timeline_pos_exact_ms += ms_written * self._playback_rate
                 self.positionChanged.emit(self._timeline_pos_ms)
                 self._pending_write_bytes = self._pending_write_bytes[bytes_written:]
             return
@@ -422,7 +437,7 @@ class _PreviewAudioWorker(QObject):
 
         # Keep media read sample aligned to timeline when playing 1.0x
         if abs(self._playback_rate - 1.0) <= 0.01:
-            self._media_read_sample = int(round(self._timeline_pos_ms * self.internal_sr / 1000.0))
+            self._media_read_sample = int(round(self._timeline_pos_exact_ms * self.internal_sr / 1000.0))
 
         # 2. Generate 16kHz audio block (applying atempo filter if rate != 1.0)
         if abs(self._playback_rate - 1.0) > 0.01 and av is not None:
@@ -495,9 +510,9 @@ class _PreviewAudioWorker(QObject):
         if len(out_mono) == 0:
             return
 
-        # 4. Expand channels (mono -> stereo if needed)
-        if self._sink_channels == 2:
-            out_audio = np.column_stack([out_mono, out_mono])
+        # 4. Expand channels (mono -> stereo / multi-channel surround if needed)
+        if self._sink_channels > 1:
+            out_audio = np.tile(out_mono[:, None], (1, self._sink_channels))
         else:
             out_audio = out_mono
 
@@ -514,7 +529,7 @@ class _PreviewAudioWorker(QObject):
             bytes_per_frame = bytes_per_sample * self._sink_channels
             frames_written = bytes_written // bytes_per_frame
             ms_written = frames_written * 1000.0 / self._sink_sr
-            self._timeline_pos_ms += int(round(ms_written * self._playback_rate))
+            self._timeline_pos_exact_ms += ms_written * self._playback_rate
             self.positionChanged.emit(self._timeline_pos_ms)
             if bytes_written < len(data_bytes):
                 self._pending_write_bytes = data_bytes[bytes_written:]

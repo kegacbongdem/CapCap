@@ -104,8 +104,13 @@ def _on_freeze_timer_tick(gui):
         gui._active_freeze_warp = None
         return
 
-    now = time.monotonic()
-    elapsed = now - getattr(gui, "_freeze_start_mono", now)
+    if getattr(getattr(gui, "media_player", None), "_native_audio_active", False):
+        current_tl_s = gui.media_player.timeline_position_ms() / 1000.0
+        anchor_tl_s = float(getattr(gui, "_freeze_anchor_tl_s", 0.0))
+        elapsed = max(0.0, current_tl_s - anchor_tl_s)
+    else:
+        now = time.monotonic()
+        elapsed = now - getattr(gui, "_freeze_start_mono", now)
     dur = float(getattr(gui, "_freeze_duration_s", 0.0))
 
     warps = getattr(gui, "video_time_warps", [])

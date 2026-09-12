@@ -506,6 +506,30 @@ def edge_tts_to_wav_16k_mono(
     if last_error is not None:
         raise last_error
 
+    # Convert mp3 to 16kHz mono wav in-process via PyAV, fallback to ffmpeg
+    try:
+        import av
+        import soundfile as sf
+        import numpy as np
+
+        container = av.open(mp3_path)
+        if container.streams.audio:
+            stream = container.streams.audio[0]
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+            parts = []
+            for frame in container.decode(stream):
+                for rf in resampler.resample(frame):
+                    parts.append(rf.to_ndarray().flatten())
+            for rf in resampler.resample(None):
+                parts.append(rf.to_ndarray().flatten())
+            container.close()
+            if parts:
+                out_pcm = np.concatenate(parts)
+                sf.write(wav_path, out_pcm, 16000, subtype="PCM_16")
+                return wav_path
+    except Exception:
+        pass
+
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")

@@ -326,6 +326,29 @@ def synthesize_capcut_tts_wav_16k_mono(
 def _convert_mp3_to_wav_16k_mono(mp3_path: str, wav_path: str) -> str:
     """Convert an audio file (typically MP3) to 16kHz mono 16-bit PCM WAV."""
     os.makedirs(os.path.dirname(os.path.abspath(wav_path)), exist_ok=True)
+    try:
+        import av
+        import soundfile as sf
+        import numpy as np
+
+        container = av.open(mp3_path)
+        if container.streams.audio:
+            stream = container.streams.audio[0]
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+            parts = []
+            for frame in container.decode(stream):
+                for rf in resampler.resample(frame):
+                    parts.append(rf.to_ndarray().flatten())
+            for rf in resampler.resample(None):
+                parts.append(rf.to_ndarray().flatten())
+            container.close()
+            if parts:
+                out_pcm = np.concatenate(parts)
+                sf.write(wav_path, out_pcm, 16000, subtype="PCM_16")
+                return wav_path
+    except Exception:
+        pass
+
     ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
     if not ffmpeg or not os.path.exists(ffmpeg):
         import shutil

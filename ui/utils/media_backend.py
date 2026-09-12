@@ -597,11 +597,12 @@ class MpvMediaPlayerBackend(QObject):
         self._dubbed_player.positionChanged.connect(self._on_dubbed_position_changed)
         self._dubbed_player.mediaStatusChanged.connect(self._on_dubbed_status_changed)
 
-        # --- Native PCM PreviewAudioEngine (opt-in via CAPCAP_NATIVE_AUDIO=1) ---
+        # --- Native PCM PreviewAudioEngine (enabled by default, opt-out via CAPCAP_NATIVE_AUDIO=0) ---
         self._native_audio_engine = None
         self._native_audio_active = False
-        native_opt = str(os.environ.get("CAPCAP_NATIVE_AUDIO", "0")).strip().lower()
-        if native_opt in {"1", "true", "yes", "on"}:
+        self._last_tracks_snapshot = None
+        native_opt = str(os.environ.get("CAPCAP_NATIVE_AUDIO", "1")).strip().lower()
+        if native_opt not in {"0", "false", "no", "off"}:
             try:
                 from .preview_audio import PreviewAudioEngine
                 self._native_audio_engine = PreviewAudioEngine(self)
@@ -610,7 +611,7 @@ class MpvMediaPlayerBackend(QObject):
                 self._native_audio_engine.timelinePositionChanged.connect(self._on_native_audio_position_changed)
                 if self._native_audio_engine.is_ready():
                     self._native_audio_active = True
-                self.log("[Preview] Native PCM PreviewAudioEngine enabled (opt-in)")
+                self.log("[Preview] Native PCM PreviewAudioEngine enabled")
             except Exception as exc:
                 self.log(f"[Preview] Native audio initialization failed, using legacy sidecars: {exc}")
                 self._native_audio_engine = None
@@ -677,9 +678,10 @@ class MpvMediaPlayerBackend(QObject):
         next_position = int(float(time_pos or 0.0) * 1000)
         next_duration = int(float(duration or 0.0) * 1000)
         next_state = QMediaPlayer.PausedState if pause else QMediaPlayer.PlayingState
-        if next_position != self._position_ms:
-            self._position_ms = next_position
-            self.positionChanged.emit(next_position)
+        if not (self._native_audio_active and self._state == QMediaPlayer.PlayingState):
+            if next_position != self._position_ms:
+                self._position_ms = next_position
+                self.positionChanged.emit(next_position)
         if next_duration != self._duration_ms:
             self._duration_ms = next_duration
             self.durationChanged.emit(next_duration)
@@ -716,6 +718,12 @@ class MpvMediaPlayerBackend(QObject):
                 self._dubbed_player.stop()
             except Exception:
                 pass
+            if self._native_audio_engine is not None:
+                try:
+                    self._native_audio_engine.stop()
+                    self._native_audio_engine.seek(0)
+                except Exception:
+                    pass
             self._source_path = ""
             return
 
@@ -725,6 +733,12 @@ class MpvMediaPlayerBackend(QObject):
         self._state = QMediaPlayer.PausedState
         self._player.pause = True
         self._player.command("loadfile", source_path, "replace")
+        if self._native_audio_engine is not None:
+            try:
+                self._native_audio_engine.stop()
+                self._native_audio_engine.seek(0)
+            except Exception:
+                pass
         
         # Use ffprobe as fallback for duration detection
         # mpv might not report duration immediately after loading
@@ -942,6 +956,7 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_audio_tracks_snapshot(self, tracks, warps=None):
         """Send tracks snapshot to native PCM audio engine."""
+        self._last_tracks_snapshot = (list(tracks), warps or getattr(self, "_video_time_warps", []))
         if self._native_audio_active and self._native_audio_engine is not None:
             self._native_audio_engine.set_tracks(tracks, warps or self._video_time_warps)
 
@@ -954,6 +969,9 @@ class MpvMediaPlayerBackend(QObject):
         self._native_audio_active = bool(ready)
         if ready:
             self.log("[Preview] Native PCM PreviewAudioEngine sink ready and active")
+            if getattr(self, "_last_tracks_snapshot", None) and self._native_audio_engine is not None:
+                tracks, warps = self._last_tracks_snapshot
+                self._native_audio_engine.set_tracks(tracks, warps)
         else:
             self.log("[Preview] Native PCM sink initialization failed, falling back to sidecars")
 
@@ -971,6 +989,14 @@ class MpvMediaPlayerBackend(QObject):
     def _on_native_audio_position_changed(self, pos_ms: int):
         if self._native_audio_active:
             self._dubbed_position_ms = pos_ms
+            warps = getattr(self, "_video_time_warps", [])
+            if warps:
+                from app.services.time_warp_service import TimeWarpService
+                media_pos_s = TimeWarpService.timeline_to_media_time(pos_ms / 1000.0, warps)
+                self._position_ms = int(round(media_pos_s * 1000))
+            else:
+                self._position_ms = pos_ms
+            self.positionChanged.emit(self._position_ms)
 
     def close_native_audio(self):
         """Release native audio engine and workers cleanly."""

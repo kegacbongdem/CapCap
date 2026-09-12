@@ -2,6 +2,7 @@
 
 edge-tts
 soundfile
+av
 numpy
 huggingface_hub
 faster-whisper

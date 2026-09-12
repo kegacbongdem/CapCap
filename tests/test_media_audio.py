@@ -403,10 +403,10 @@ class TestPreviewAudioEngine(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from PySide6.QtCore import QCoreApplication
-        cls.app = QCoreApplication.instance()
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance()
         if cls.app is None:
-            cls.app = QCoreApplication([])
+            cls.app = QApplication([])
 
     def setUp(self):
         self.temp_dir = os.path.join(PROJECT_ROOT, "temp", "test_preview_engine")

@@ -313,9 +313,9 @@ class QtMediaPlayerBackend(QObject):
         self._video_frozen = False
         self._player.stop()
 
-    def setPosition(self, position, timeline_pos=None):
+    def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
         self._video_frozen = False
-        self._player.setPosition(position)
+        self._player.setPosition(int(position))
 
     def position(self):
         return self._player.position()
@@ -876,17 +876,21 @@ class MpvMediaPlayerBackend(QObject):
                 pass
         self._state = QMediaPlayer.PlayingState
 
-    def setPosition(self, position, timeline_pos=None):
+    def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
         self._video_frozen = False
         self._position_ms = int(position)
         if not self._source_path:
             self.positionChanged.emit(self._position_ms)
             return
         seconds = max(0.0, position / 1000.0)
+        flag = "exact" if exact else "keyframes"
         try:
-            self._player.command("seek", seconds, "absolute")
+            self._player.command("seek", seconds, "absolute", flag)
         except Exception:
-            pass
+            try:
+                self._player.command("seek", seconds, "absolute")
+            except Exception:
+                pass
 
         warps = getattr(self, "_video_time_warps", [])
         if timeline_pos is not None:
@@ -911,6 +915,16 @@ class MpvMediaPlayerBackend(QObject):
                 except Exception:
                     pass
         self.positionChanged.emit(self._position_ms)
+
+    def timeline_position_ms(self) -> int:
+        """Return timeline position in ms taking into account time warps and audio clock."""
+        if self._native_audio_active and self._native_audio_engine is not None:
+            return self._native_audio_engine.timeline_position_ms()
+        warps = getattr(self, "_video_time_warps", [])
+        if warps:
+            from app.services.time_warp_service import TimeWarpService
+            return int(round(TimeWarpService.media_to_timeline_time(self._position_ms / 1000.0, warps) * 1000))
+        return self._position_ms
 
     def set_audio_tracks_snapshot(self, tracks, warps=None):
         """Send tracks snapshot to native PCM audio engine."""

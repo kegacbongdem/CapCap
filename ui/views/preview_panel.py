@@ -807,7 +807,24 @@ def build_preview_panel(gui):
     gui.timeline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     if hasattr(gui, "voice_timing_sync_combo"):
         gui.timeline.set_voice_sync_mode(current_source_text(gui.voice_timing_sync_combo))
-    gui.timeline.seekRequestedMs.connect(gui.set_position)
+
+    def _on_scrub_started():
+        gui._is_scrubbing = True
+        if hasattr(gui, "media_player") and getattr(gui.media_player, "_native_audio_active", False):
+            if hasattr(gui.media_player, "_native_audio_engine") and gui.media_player._native_audio_engine:
+                gui.media_player._native_audio_engine.pause()
+
+    def _on_scrub_seek(pos_ms):
+        is_scrubbing = getattr(gui, "_is_scrubbing", False)
+        gui.set_position(pos_ms, exact=not is_scrubbing)
+
+    def _on_scrub_finished(final_pos_ms):
+        gui._is_scrubbing = False
+        gui.set_position(final_pos_ms, exact=True)
+
+    gui.timeline.scrubStarted.connect(_on_scrub_started)
+    gui.timeline.scrubFinished.connect(_on_scrub_finished)
+    gui.timeline.seekRequestedMs.connect(_on_scrub_seek)
     gui.timeline.segmentSelected.connect(gui.on_timeline_segment_selected)
     gui.timeline.segmentTimingEditStarted.connect(gui.on_timeline_segment_timing_edit_started)
     gui.timeline.segmentTimingChanged.connect(gui.on_timeline_segment_timing_changed)

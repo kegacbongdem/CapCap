@@ -535,7 +535,7 @@ def duration_changed(gui, duration):
     update_duration_label(gui, gui.media_player.position(), tl_duration)
 
 
-def set_position(gui, position):
+def set_position(gui, position, *, exact: bool = True):
     if hasattr(gui, "ensure_media_backend_ready"):
         gui.ensure_media_backend_ready()
 
@@ -555,7 +555,10 @@ def set_position(gui, position):
             media_pos = max(0, media_dur - 100)
         if hasattr(gui.media_player, "set_time_warps"):
             gui.media_player.set_time_warps([])
-        gui.media_player.setPosition(media_pos)
+        try:
+            gui.media_player.setPosition(media_pos, exact=exact)
+        except TypeError:
+            gui.media_player.setPosition(media_pos)
         gui.timeline.set_position(position)
     else:
         warps = getattr(gui, "video_time_warps", [])
@@ -584,9 +587,12 @@ def set_position(gui, position):
         if hasattr(gui.media_player, "set_time_warps"):
             gui.media_player.set_time_warps(warps)
         try:
-            gui.media_player.setPosition(media_pos, timeline_pos=position)
+            gui.media_player.setPosition(media_pos, timeline_pos=position, exact=exact)
         except TypeError:
-            gui.media_player.setPosition(media_pos)
+            try:
+                gui.media_player.setPosition(media_pos, timeline_pos=position)
+            except TypeError:
+                gui.media_player.setPosition(media_pos)
         gui.timeline.set_position(position)
     try:
         gui.update_playback_subtitle_highlight(position)

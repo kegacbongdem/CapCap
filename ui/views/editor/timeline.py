@@ -17,6 +17,8 @@ class EditorTimeline(QGraphicsView):
 
     seekRequested = Signal(float)
     seekRequestedMs = Signal(int)
+    scrubStarted = Signal()
+    scrubFinished = Signal(int)
     layerSelected = Signal(str)
     layerMoved = Signal(str, float, float)
     playheadMoved = Signal(float)
@@ -1918,6 +1920,7 @@ class EditorTimeline(QGraphicsView):
                         self.seekRequested.emit(t)
                         self.seekRequestedMs.emit(int(t * 1000))
                         self._selection_drag = {"mode": "scrub"}
+                        self.scrubStarted.emit()
                 event.accept()
                 return
             if in_ruler:
@@ -1932,6 +1935,7 @@ class EditorTimeline(QGraphicsView):
                         self.seekRequested.emit(t)
                         self.seekRequestedMs.emit(int(t * 1000))
                         self._selection_drag = {"mode": "scrub"}
+                        self.scrubStarted.emit()
                         event.accept()
                         return
                     drag_mode = "new"
@@ -2028,6 +2032,7 @@ class EditorTimeline(QGraphicsView):
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
                     self._selection_drag = {"mode": "scrub"}
+                    self.scrubStarted.emit()
                     event.accept()
                     return
 
@@ -2038,6 +2043,7 @@ class EditorTimeline(QGraphicsView):
             drag = self._selection_drag
             self._selection_drag = None
             if drag.get("mode") == "scrub":
+                self.scrubFinished.emit(int(self._playhead_time * 1000))
                 event.accept()
                 return
             if not drag.get("changed", False) and drag.get("mode") == "new":

@@ -491,6 +491,22 @@ class TimelineWaveformWorker(QThread):
                 self.finished.emit(self.request_signature, [], self.duration_s, "")
                 return
 
+            source_media = (self.audio_path if self.audio_path and os.path.exists(self.audio_path) else "") or self.video_path
+            if not source_media or not os.path.exists(source_media):
+                self.finished.emit(self.request_signature, [], 0.0, "")
+                return
+
+            # Try native in-process streaming waveform first
+            try:
+                from app.media_decode import build_waveform
+                wf, dur = build_waveform(source_media)
+                if wf is not None and len(wf) > 0:
+                    dur_s = max(dur, self.duration_s)
+                    self.finished.emit(self.request_signature, wf, dur_s, "")
+                    return
+            except Exception:
+                pass
+
             audio_path = self.audio_path if self.audio_path and os.path.exists(self.audio_path) else ""
             if not audio_path and self.video_path and os.path.exists(self.video_path):
                 temp_audio = self.temp_audio_path
@@ -599,22 +615,6 @@ class TimelineThumbnailWorker(QThread):
                 self.finished.emit(self.request_signature, [], "")
                 return
 
-            ffmpeg_candidates = [
-                bin_path("ffmpeg", "ffmpeg.exe"),
-                bin_path("ffmpeg.exe"),
-                shutil.which("ffmpeg"),
-                shutil.which("ffmpeg.exe"),
-            ]
-            ffmpeg_path = ""
-            for candidate in ffmpeg_candidates:
-                if candidate and os.path.isfile(candidate):
-                    ffmpeg_path = candidate
-                    break
-
-            if not ffmpeg_path:
-                self.finished.emit(self.request_signature, [], "")
-                return
-
             # Adapt density to media length: short clips need frequent visual
             # landmarks, while long videos stay bounded for fast preparation.
             if self.duration_s <= 60.0:
@@ -636,6 +636,46 @@ class TimelineThumbnailWorker(QThread):
             digest = hashlib.md5(
                 f"{self.video_path}|{self.request_signature}".encode("utf-8", errors="replace")
             ).hexdigest()[:16]
+
+            # Try native in-process thumbnail decoding first
+            try:
+                import numpy as np
+                from app.media_decode import iter_video_thumbnails
+                from PySide6.QtGui import QImage
+
+                thumbnails = []
+                for idx, (actual_pts, rgb) in enumerate(iter_video_thumbnails(self.video_path, timestamps, width=180)):
+                    output_path = os.path.join(self.thumb_dir, f"{digest}_{idx:02d}.jpg")
+                    if not os.path.exists(output_path):
+                        h, w, _ = rgb.shape
+                        rgb_contig = np.ascontiguousarray(rgb)
+                        image = QImage(rgb_contig.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                        image.save(output_path, "JPG", 75)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        thumbnails.append((float(actual_pts), output_path))
+
+                if thumbnails:
+                    self.finished.emit(self.request_signature, thumbnails, "")
+                    return
+            except Exception:
+                pass
+
+            # Fallback to FFmpeg CLI if native decoding is unavailable
+            ffmpeg_candidates = [
+                bin_path("ffmpeg", "ffmpeg.exe"),
+                bin_path("ffmpeg.exe"),
+                shutil.which("ffmpeg"),
+                shutil.which("ffmpeg.exe"),
+            ]
+            ffmpeg_path = ""
+            for candidate in ffmpeg_candidates:
+                if candidate and os.path.isfile(candidate):
+                    ffmpeg_path = candidate
+                    break
+
+            if not ffmpeg_path:
+                self.finished.emit(self.request_signature, [], "")
+                return
 
             startupinfo = None
             creationflags = 0

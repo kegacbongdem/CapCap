@@ -431,6 +431,18 @@ class EditorTimeline(QGraphicsView):
 
     @staticmethod
     def _probe_video_duration(path: str) -> float:
+        if not path or not os.path.exists(path):
+            return 0.0
+        try:
+            import av
+            c = av.open(path)
+            dur = float(c.duration) / 1000000.0 if c.duration is not None else 0.0
+            c.close()
+            if dur > 0.0:
+                return dur
+        except Exception:
+            pass
+
         try:
             import subprocess
             from app.video_processor import _ffprobe_path

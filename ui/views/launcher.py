@@ -288,65 +288,87 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
         ]
         os.makedirs(thumb_dir, exist_ok=True)
 
-        def build_waveform():
-            waveform = []
-            audio_path = _extract_waveform_audio(source, temp_root)
-            waveform_duration = duration_s
-            if audio_path and os.path.exists(audio_path):
-                with wave.open(audio_path, "rb") as audio_file:
-                    frame_count = audio_file.getnframes()
-                    sample_rate = max(1, audio_file.getframerate())
-                    raw_samples = audio_file.readframes(frame_count)
-                samples = np.frombuffer(raw_samples, dtype=np.int16).astype(np.float32)
-                waveform_duration = max(waveform_duration, frame_count / sample_rate)
-                peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-                if peak > 0:
-                    samples /= peak
-                    bucket_count = int(min(1200, max(240, round(waveform_duration * 12.0))))
-                    chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
-                    for start in range(0, samples.size, chunk_size):
-                        chunk = samples[start:start + chunk_size]
-                        peak_value = float(np.max(np.abs(chunk))) if chunk.size else 0.0
-                        rms_value = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
-                        waveform.append(min(1.0, max(0.03, max(peak_value, rms_value * 1.15) ** 0.85)))
-            return waveform, waveform_duration
+        # Try native in-process thumbnail and waveform generation
+        native_done = False
+        try:
+            from app.media_decode import build_waveform as native_build_waveform, iter_video_thumbnails
+            from PySide6.QtGui import QImage
 
-        def build_thumbnail(index_and_time):
-            index, timestamp_s = index_and_time
-            output_path = os.path.join(thumb_dir, f"launcher_{digest}_v4_{index:03d}.jpg")
-            if not os.path.exists(output_path):
-                subprocess.run(
-                    [_ffmpeg_path(), "-y", "-loglevel", "error", "-ss", f"{timestamp_s:.3f}",
-                     "-i", source, "-frames:v", "1", "-q:v", "4",
-                     "-vf", "scale=180:-1:force_original_aspect_ratio=decrease", output_path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20,
-                    **subprocess_hidden_kwargs(),
-                )
-            return [float(timestamp_s), output_path] if os.path.exists(output_path) and os.path.getsize(output_path) > 0 else None
+            native_wf, native_dur = native_build_waveform(source)
+            native_thumbs = []
+            for idx, (pts, rgb) in enumerate(iter_video_thumbnails(source, timestamps, width=180)):
+                output_path = os.path.join(thumb_dir, f"launcher_{digest}_v4_{idx:03d}.jpg")
+                if not os.path.exists(output_path):
+                    h, w, _ = rgb.shape
+                    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                    qimg.save(output_path, "JPG", 75)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    native_thumbs.append([float(pts), output_path])
 
-        # Two independent FFmpeg workers seek the original video directly,
-        # while waveform extraction runs alongside them. This stays bounded
-        # (two thumbnail processes plus one audio process) and avoids splits.
-        from concurrent.futures import ThreadPoolExecutor
-        import threading
-        print(f"[Launcher] Preparing {thumb_count} timeline thumbnails with 2 workers + waveform worker")
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="capcap-thumbs") as thumbnail_pool:
-            # Keep waveform CPU/audio work independent from the two thumbnail
-            # slots so all three tasks can progress concurrently.
-            waveform_result = []
-            waveform_error = []
-            def run_waveform():
-                try:
-                    waveform_result.extend(build_waveform())
-                except Exception as exc:
-                    waveform_error.append(exc)
-            waveform_thread = threading.Thread(target=run_waveform, name="capcap-waveform", daemon=True)
-            waveform_thread.start()
-            thumbnails = [item for item in thumbnail_pool.map(build_thumbnail, enumerate(timestamps)) if item]
-            waveform_thread.join()
-        if waveform_error:
-            raise waveform_error[0]
-        waveform, duration_s = waveform_result if waveform_result else ([], duration_s)
+            if native_thumbs:
+                waveform = native_wf
+                duration_s = max(duration_s, native_dur)
+                thumbnails = native_thumbs
+                native_done = True
+        except Exception as ex:
+            print(f"[Launcher] Native visual prep error, falling back to FFmpeg: {ex}")
+            native_done = False
+
+        if not native_done:
+            def build_waveform():
+                waveform = []
+                audio_path = _extract_waveform_audio(source, temp_root)
+                waveform_duration = duration_s
+                if audio_path and os.path.exists(audio_path):
+                    with wave.open(audio_path, "rb") as audio_file:
+                        frame_count = audio_file.getnframes()
+                        sample_rate = max(1, audio_file.getframerate())
+                        raw_samples = audio_file.readframes(frame_count)
+                    samples = np.frombuffer(raw_samples, dtype=np.int16).astype(np.float32)
+                    waveform_duration = max(waveform_duration, frame_count / sample_rate)
+                    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+                    if peak > 0:
+                        samples /= peak
+                        bucket_count = int(min(1200, max(240, round(waveform_duration * 12.0))))
+                        chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
+                        for start in range(0, samples.size, chunk_size):
+                            chunk = samples[start:start + chunk_size]
+                            peak_value = float(np.max(np.abs(chunk))) if chunk.size else 0.0
+                            rms_value = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
+                            waveform.append(min(1.0, max(0.03, max(peak_value, rms_value * 1.15) ** 0.85)))
+                return waveform, waveform_duration
+
+            def build_thumbnail(index_and_time):
+                index, timestamp_s = index_and_time
+                output_path = os.path.join(thumb_dir, f"launcher_{digest}_v4_{index:03d}.jpg")
+                if not os.path.exists(output_path):
+                    subprocess.run(
+                        [_ffmpeg_path(), "-y", "-loglevel", "error", "-ss", f"{timestamp_s:.3f}",
+                         "-i", source, "-frames:v", "1", "-q:v", "4",
+                         "-vf", "scale=180:-1:force_original_aspect_ratio=decrease", output_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20,
+                        **subprocess_hidden_kwargs(),
+                    )
+                return [float(timestamp_s), output_path] if os.path.exists(output_path) and os.path.getsize(output_path) > 0 else None
+
+            from concurrent.futures import ThreadPoolExecutor
+            import threading
+            print(f"[Launcher] Preparing {thumb_count} timeline thumbnails with 2 workers + waveform worker")
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="capcap-thumbs") as thumbnail_pool:
+                waveform_result = []
+                waveform_error = []
+                def run_waveform():
+                    try:
+                        waveform_result.extend(build_waveform())
+                    except Exception as exc:
+                        waveform_error.append(exc)
+                waveform_thread = threading.Thread(target=run_waveform, name="capcap-waveform", daemon=True)
+                waveform_thread.start()
+                thumbnails = [item for item in thumbnail_pool.map(build_thumbnail, enumerate(timestamps)) if item]
+                waveform_thread.join()
+            if waveform_error:
+                raise waveform_error[0]
+            waveform, duration_s = waveform_result if waveform_result else ([], duration_s)
 
         with open(manifest_path, "w", encoding="utf-8") as handle:
             json.dump({

@@ -12,7 +12,8 @@ from __future__ import annotations
 import io
 import math
 import os
-from typing import Optional, Tuple, Union
+import threading
+from typing import Iterator, Optional, Tuple, Union
 
 import numpy as np
 import scipy.signal
@@ -424,3 +425,176 @@ def convert_audio_to_wav_16k_mono(
     """Convert audio source (file path, bytes, or BytesIO) to 16kHz mono WAV atomically."""
     from app.tts_processor import convert_audio_data_to_wav_16k_mono
     return convert_audio_data_to_wav_16k_mono(source, wav_path)
+
+
+_WAVEFORM_CACHE: dict[tuple[str, int, int, int], tuple[list[float], float]] = {}
+_WAVEFORM_CACHE_LOCK = threading.Lock()
+
+
+def iter_video_thumbnails(
+    path: str,
+    timestamps: list[float],
+    *,
+    width: int = 180,
+) -> Iterator[Tuple[float, np.ndarray]]:
+    """Yield (actual_pts_seconds, rgb_ndarray) for requested video timestamps.
+
+    Decodes video in-process using PyAV without subprocess CLI calls.
+    Output RGB array has shape (h, width, 3) and dtype uint8.
+    """
+    if not timestamps or not path or not os.path.exists(path):
+        return
+
+    if av is None:
+        raise RuntimeError("PyAV is required for iter_video_thumbnails")
+
+    container = None
+    try:
+        container = av.open(path)
+        if not container.streams.video:
+            return
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        tb = float(stream.time_base) if stream.time_base is not None else 1.0 / 1000.0
+
+        orig_w = stream.codec_context.width or 180
+        orig_h = stream.codec_context.height or 135
+        target_w = max(2, (int(width) // 2) * 2)
+        target_h = max(2, (int(round(target_w * orig_h / max(1, orig_w))) // 2) * 2)
+
+        current_frame = None
+        current_time = -1.0
+        frame_iter = container.decode(stream)
+
+        for target in timestamps:
+            target_s = max(0.0, float(target))
+            if current_time < 0.0 or target_s < current_time or (target_s - current_time) > 1.5:
+                seek_pts = int(round(target_s / tb))
+                try:
+                    container.seek(seek_pts, stream=stream, backward=True)
+                    frame_iter = container.decode(stream)
+                except (av.FFmpegError, OSError):
+                    pass
+
+            target_frame = None
+            for frame in frame_iter:
+                ft = (
+                    float(frame.time)
+                    if frame.time is not None
+                    else (float(frame.pts * tb) if frame.pts is not None else target_s)
+                )
+                current_frame = frame
+                current_time = ft
+                if ft >= target_s - 0.04:
+                    target_frame = frame
+                    break
+
+            if target_frame is None and current_frame is not None:
+                target_frame = current_frame
+
+            if target_frame is not None:
+                actual_pts = (
+                    float(target_frame.time)
+                    if target_frame.time is not None
+                    else (float(target_frame.pts * tb) if target_frame.pts is not None else target_s)
+                )
+                rf = target_frame.reformat(width=target_w, height=target_h, format="rgb24")
+                arr = np.ascontiguousarray(rf.to_ndarray())
+                yield actual_pts, arr
+    finally:
+        if container is not None:
+            try:
+                container.close()
+            except (av.FFmpegError, OSError):
+                pass
+
+
+def build_waveform(
+    path: str,
+    *,
+    bucket_count: int = 1200,
+) -> Tuple[list[float], float]:
+    """Build audio waveform envelope without decoding full PCM array into RAM.
+
+    Streams PCM chunks using AudioReader and computes bucket peak/RMS envelope.
+    Returns (waveform_envelope, duration_seconds).
+    """
+    if not path or not os.path.exists(path):
+        return [], 0.0
+
+    stat = os.stat(path)
+    cache_key = (os.path.abspath(path), int(stat.st_size), int(getattr(stat, "st_mtime_ns", 0)), bucket_count)
+    with _WAVEFORM_CACHE_LOCK:
+        if cache_key in _WAVEFORM_CACHE:
+            return _WAVEFORM_CACHE[cache_key]
+
+    try:
+        reader = AudioReader(path, sample_rate=16000)
+    except Exception:
+        duration_s = 0.0
+        if av is not None:
+            try:
+                c = av.open(path)
+                duration_s = float(c.duration) / 1000000.0 if c.duration is not None else 0.0
+                c.close()
+            except Exception:
+                pass
+        return [], duration_s
+
+    with reader:
+        total_samples = reader.total_samples
+        duration_s = reader.duration_seconds
+        if total_samples <= 0 or duration_s <= 0.0:
+            return [], duration_s
+
+        actual_buckets = int(min(bucket_count, max(240, round(duration_s * 12.0))))
+        chunk_size = max(256, int(np.ceil(total_samples / max(1, actual_buckets))))
+        num_buckets = int(np.ceil(total_samples / chunk_size))
+
+        bucket_peaks = np.zeros(num_buckets, dtype=np.float32)
+        bucket_sum_sq = np.zeros(num_buckets, dtype=np.float64)
+        bucket_counts = np.zeros(num_buckets, dtype=np.int64)
+
+        block_size = 16384
+        global_peak = 0.0
+        offset = 0
+
+        while offset < total_samples:
+            count = min(block_size, total_samples - offset)
+            block = reader.read(offset, count)
+            if len(block) == 0:
+                break
+
+            abs_block = np.abs(block)
+            block_peak = float(np.max(abs_block)) if len(abs_block) > 0 else 0.0
+            if block_peak > global_peak:
+                global_peak = block_peak
+
+            sample_indices = offset + np.arange(len(block))
+            bucket_indices = np.minimum(num_buckets - 1, sample_indices // chunk_size)
+
+            np.maximum.at(bucket_peaks, bucket_indices, abs_block)
+            np.add.at(bucket_sum_sq, bucket_indices, block.astype(np.float64) ** 2)
+            np.add.at(bucket_counts, bucket_indices, 1)
+
+            offset += count
+
+        if global_peak <= 0.0:
+            result = ([0.0] * num_buckets, duration_s)
+            with _WAVEFORM_CACHE_LOCK:
+                _WAVEFORM_CACHE[cache_key] = result
+            return result
+
+        safe_counts = np.maximum(1, bucket_counts)
+        norm_peaks = bucket_peaks / global_peak
+        rms = np.sqrt(bucket_sum_sq / safe_counts) / global_peak
+
+        values = np.maximum(norm_peaks, rms * 1.15)
+        envelope = np.clip(values ** 0.85, 0.03, 1.0)
+        waveform = [float(x) for x in envelope]
+
+        result = (waveform, duration_s)
+        with _WAVEFORM_CACHE_LOCK:
+            _WAVEFORM_CACHE[cache_key] = result
+        return result
+

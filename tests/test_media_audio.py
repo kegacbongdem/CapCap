@@ -899,8 +899,55 @@ class TestPreviewAudioEngine(unittest.TestCase):
             sf.write(test_wav, np.zeros(160, dtype=np.float32), 16000)
 
         self.assertEqual(auditor.disk_writes_count, 2)
-        self.assertGreater(auditor.total_bytes_written, 0)
+        expected_bytes = len("hello world\n") + os.path.getsize(test_wav)
+        self.assertEqual(auditor.total_bytes_written, expected_bytes)
         self.assertEqual(len(auditor.files_opened_for_write), 2)
+
+    def test_tts_in_memory_ffmpeg_fallback(self):
+        """Ensure TTS converter falls back to FFmpeg via pipe:0 without creating temp files when PyAV fails."""
+        from unittest.mock import patch
+        import av
+        import io
+        import soundfile as sf
+        from app.tts_processor import convert_audio_data_to_wav_16k_mono
+        from app.capcut.tts import _convert_mp3_to_wav_16k_mono
+        from scripts.benchmark_preview import IoWriteAuditor
+
+        bio = io.BytesIO()
+        c = av.open(bio, mode="w", format="mp3")
+        s = c.add_stream("mp3", rate=44100)
+        f = av.AudioFrame.from_ndarray(np.zeros((1, 4410), dtype=np.int16), format="s16p", layout="mono")
+        f.sample_rate = 44100
+        for p in s.encode(f):
+            c.mux(p)
+        for p in s.encode(None):
+            c.mux(p)
+        c.close()
+        mp3_bytes = bio.getvalue()
+
+        out_wav_1 = os.path.join(self.temp_dir, "test_fallback_edge.wav")
+        out_wav_2 = os.path.join(self.temp_dir, "test_fallback_capcut.wav")
+
+        try:
+            with IoWriteAuditor() as auditor, patch("av.open", side_effect=av.FFmpegError(1, "Simulated PyAV error")):
+                convert_audio_data_to_wav_16k_mono(mp3_bytes, out_wav_1)
+                _convert_mp3_to_wav_16k_mono(io.BytesIO(mp3_bytes), out_wav_2)
+
+            self.assertTrue(os.path.exists(out_wav_1))
+            self.assertTrue(os.path.exists(out_wav_2))
+            d1, sr1 = sf.read(out_wav_1)
+            d2, sr2 = sf.read(out_wav_2)
+            self.assertEqual(sr1, 16000)
+            self.assertEqual(sr2, 16000)
+
+            # Ensure Python opened 0 temporary files for writing (input streamed via pipe:0)
+            self.assertEqual(auditor.files_opened_for_write, [])
+            self.assertEqual(auditor.disk_writes_count, 0)
+            self.assertEqual(auditor.total_bytes_written, 0)
+        finally:
+            for p in (out_wav_1, out_wav_2):
+                if os.path.exists(p):
+                    os.remove(p)
 
 
 if __name__ == "__main__":

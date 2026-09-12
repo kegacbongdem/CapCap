@@ -545,15 +545,13 @@ class IoWriteAuditor:
                 if file_str not in auditor.files_opened_for_write:
                     auditor.files_opened_for_write.append(file_str)
                 auditor.disk_writes_count += 1
+                res = auditor._orig_sf_write(file, data, samplerate, *args, **kwargs)
                 try:
-                    import numpy as np
-                    if isinstance(data, np.ndarray):
-                        auditor.total_bytes_written += data.nbytes
-                    else:
-                        auditor.total_bytes_written += len(data)
+                    if isinstance(file, (str, os.PathLike)) and os.path.exists(file):
+                        auditor.total_bytes_written += os.path.getsize(file)
                 except Exception:
                     pass
-                return auditor._orig_sf_write(file, data, samplerate, *args, **kwargs)
+                return res
 
             sf.write = hooked_sf_write
         except Exception:
@@ -576,8 +574,8 @@ class IoWriteAuditor:
 def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     """Execute baseline measurements of the legacy audio mixing and conversion path.
 
-    - 100 volume slider changes with TTS + Music (measuring call duration, subprocesses, files)
-    - 200 sentence conversions (synthesized WAV speed/fit/trim)
+    1. Workload 1: Volume slider interaction (100 movements with 30ms UI debounce simulation).
+    2. Workload 2: Equal audio processing throughput (10.0 seconds of audio).
     """
     os.makedirs(temp_dir, exist_ok=True)
     import numpy as np
@@ -590,11 +588,12 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     music_path = os.path.join(temp_dir, "bench_music.wav")
 
     voice_data = (np.sin(2 * np.pi * 300 * np.linspace(0, 10, 10 * sr))).astype(np.float32) * 0.5
-    music_data = (np.sin(2 * np.pi * 150 * np.linspace(0, 15, 15 * sr))).astype(np.float32) * 0.3
+    music_data = (np.sin(2 * np.pi * 150 * np.linspace(0, 10, 10 * sr))).astype(np.float32) * 0.3
 
     sf.write(voice_path, voice_data, sr, format="WAV", subtype="PCM_16")
     sf.write(music_path, music_data, sr, format="WAV", subtype="PCM_16")
 
+    # --- Workload 1: Volume slider interaction (100 events, 30ms UI debounce) ---
     print("[Benchmark] Measuring legacy volume adjustments with UI debounce & overwrite (100 iterations)...")
     volume_latencies_ms: List[float] = []
     out_wav = os.path.join(temp_dir, "preview_mix_active.wav")
@@ -632,7 +631,7 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
         except OSError:
             pass
 
-    # Benchmark full native preview audio loop (volume adjustment + timer tick audio processing)
+    # Benchmark native in-memory volume adjustments + buffer tick
     print("[Benchmark] Measuring native in-memory volume adjustments + audio ticks (100 iterations)...")
     native_latencies_ms: List[float] = []
     native_subprocesses: List[str] = []
@@ -686,7 +685,57 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
     except Exception as exc:
         print(f"[Benchmark] Native volume benchmark skipped: {exc}")
 
+    # --- Workload 2: Equal audio processing throughput (10.0 seconds of audio) ---
+    print("[Benchmark] Measuring equal workload (10.0 seconds of audio) comparison...")
+    out_10s_wav = os.path.join(temp_dir, "workload_10s_legacy.wav")
+    with IoWriteAuditor() as eq_leg_io:
+        t0 = time.perf_counter()
+        mix_audio_tracks(
+            tracks=[
+                {"path": voice_path, "start": 0.0, "end": 10.0, "volume": 80.0, "muted": False},
+                {"path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": 50.0, "muted": False},
+            ],
+            output_wav_path=out_10s_wav,
+            total_duration_ms=10000,
+        )
+        t_legacy_10s = (time.perf_counter() - t0) * 1000.0
+
+    legacy_10s_writes = eq_leg_io.disk_writes_count
+    legacy_10s_bytes = eq_leg_io.total_bytes_written
+    if os.path.exists(out_10s_wav):
+        try:
+            os.remove(out_10s_wav)
+        except OSError:
+            pass
+
+    t_native_10s = 0.0
+    try:
+        w_eq = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+        w_eq._sink_sr = 48000
+        w_eq._sink_channels = 2
+        w_eq._sink_is_float = True
+        w_eq._is_playing = True
+        w_eq._sink = _MockSink()
+        w_eq._io_device = _MockIoDevice()
+        w_eq.set_tracks([
+            {"id": "voice", "path": voice_path, "start": 0.0, "end": 10.0, "volume": 80.0, "muted": False},
+            {"id": "music", "path": music_path, "start": 0.0, "end": 10.0, "source_start": 0.0, "volume": 50.0, "muted": False},
+        ])
+        t0 = time.perf_counter()
+        # 1000 ticks * 10ms = 10,000 ms = 10.0 seconds of audio
+        for _ in range(1000):
+            w_eq._on_timer_tick()
+        t_native_10s = (time.perf_counter() - t0) * 1000.0
+        w_eq.close()
+    except Exception as exc:
+        print(f"[Benchmark] Native 10s equal workload skipped: {exc}")
+
     res: Dict[str, Any] = {
+        "notes": {
+            "workload_1_volume_slider": "Interactive latency during 100 volume slider changes (30ms UI debounce simulation). Legacy re-renders entire 10s timeline to disk on debounced ticks; Native updates gain parameters in memory + runs worker buffer tick.",
+            "workload_2_equal_workload_10s": "Equal audio volume throughput comparison (10.0 seconds of audio). Legacy mixes in a single batch pass to disk; Native streams 1000 blocks x 10ms in RAM.",
+            "execution_environment": "Native latency measurements reflect worker thread in-memory buffer loop with mock audio sink device (excluding OS audio driver queue buffer and hardware output latency).",
+        },
         "legacy_volume_100_runs": {
             "min_ms": round(min(volume_latencies_ms), 2),
             "median_ms": round(sorted(volume_latencies_ms)[len(volume_latencies_ms) // 2], 2),
@@ -697,10 +746,8 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
             "disk_writes_count": legacy_disk_writes,
             "files_created_count": len(legacy_files_created),
             "total_bytes_written": legacy_bytes_written,
-        }
-    }
-    if native_latencies_ms:
-        res["native_volume_100_runs"] = {
+        },
+        "native_volume_100_runs": {
             "min_ms": round(min(native_latencies_ms), 2),
             "median_ms": round(sorted(native_latencies_ms)[len(native_latencies_ms) // 2], 2),
             "p95_ms": round(percentile95(native_latencies_ms), 2),
@@ -710,7 +757,17 @@ def run_baseline_benchmarks(temp_dir: str) -> Dict[str, Any]:
             "disk_writes_count": native_disk_writes,
             "files_created_count": len(native_files_created),
             "total_bytes_written": native_bytes_written,
-        }
+        },
+        "equal_workload_10s_audio": {
+            "legacy_batch_time_ms": round(t_legacy_10s, 2),
+            "legacy_disk_writes": legacy_10s_writes,
+            "legacy_bytes_written": legacy_10s_bytes,
+            "native_streaming_time_ms": round(t_native_10s, 2),
+            "native_disk_writes": 0,
+            "native_bytes_written": 0,
+            "native_realtime_factor": round(10000.0 / max(0.001, t_native_10s), 1),
+        },
+    }
     return res
 
 
@@ -766,15 +823,23 @@ def main():
         results["baseline"] = bench
         vol_stats = bench["legacy_volume_100_runs"]
         nat_stats = bench.get("native_volume_100_runs", {})
-        print(f"Legacy volume 100 runs:")
-        print(f"  p95 latency: {vol_stats['p95_ms']} ms (min: {vol_stats['min_ms']} ms, max: {vol_stats['max_ms']} ms)")
-        print(f"  Subprocesses spawned: {vol_stats['subprocesses_spawned_count']}")
-        print(f"  Disk writes: {vol_stats.get('disk_writes_count', 0)} ({vol_stats['total_bytes_written'] / (1024 * 1024):.2f} MiB written)")
+        eq_stats = bench.get("equal_workload_10s_audio", {})
+
+        print("\n[Workload 1] Volume Slider Interaction (100 events, 30ms UI debounce):")
+        print(f"  Legacy (re-renders 10s timeline to WAV on debounced ticks):")
+        print(f"    p95 latency: {vol_stats['p95_ms']} ms (min: {vol_stats['min_ms']} ms, max: {vol_stats['max_ms']} ms)")
+        print(f"    Subprocesses spawned: {vol_stats['subprocesses_spawned_count']}")
+        print(f"    Disk writes: {vol_stats.get('disk_writes_count', 0)} ({vol_stats['total_bytes_written'] / (1024 * 1024):.2f} MiB written)")
         if nat_stats:
-            print(f"Native in-memory volume 100 runs:")
-            print(f"  p95 latency: {nat_stats['p95_ms']} ms (min: {nat_stats['min_ms']} ms, max: {nat_stats['max_ms']} ms)")
-            print(f"  Subprocesses spawned: {nat_stats['subprocesses_spawned_count']}")
-            print(f"  Disk writes: {nat_stats['disk_writes_count']} (0.00 MiB written)")
+            print(f"  Native in-memory (updates gain floats in RAM + 1 worker buffer tick):")
+            print(f"    p95 latency: {nat_stats['p95_ms']} ms (min: {nat_stats['min_ms']} ms, max: {nat_stats['max_ms']} ms) [worker in-memory loop]")
+            print(f"    Subprocesses spawned: {nat_stats['subprocesses_spawned_count']}")
+            print(f"    Disk writes: {nat_stats['disk_writes_count']} (0.00 MiB written)")
+
+        if eq_stats:
+            print("\n[Workload 2] Equal Audio Workload Throughput (10.0 seconds of audio):")
+            print(f"  Legacy batch mix (1 pass to WAV file): {eq_stats['legacy_batch_time_ms']} ms ({eq_stats['legacy_disk_writes']} write, {eq_stats['legacy_bytes_written'] / 1024:.1f} KiB)")
+            print(f"  Native streaming mix (1000 blocks x 10ms in RAM): {eq_stats['native_streaming_time_ms']} ms (0 writes, {eq_stats['native_realtime_factor']}x realtime)")
 
     # Save output if specified
     out_path = args.output

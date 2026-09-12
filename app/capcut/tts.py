@@ -336,46 +336,41 @@ def _convert_mp3_to_wav_16k_mono(source: Any, wav_path: str) -> str:
                 return wav_path
     except (ImportError, ModuleNotFoundError):
         pass
-    except (av.error.FFmpegError, av.error.InvalidDataError):
-        pass
-    except Exception:
+    except (av.FFmpegError, av.error.InvalidDataError):
         pass
 
-    # Fallback to FFmpeg CLI only if PyAV is missing or failed
+    # Fallback to FFmpeg CLI only if PyAV is missing or failed (streams via stdin pipe:0)
     ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
     if not ffmpeg or not os.path.exists(ffmpeg):
         import shutil
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
 
-    temp_created = False
-    if isinstance(source, (bytes, bytearray, io.BytesIO)):
-        import tempfile
-        temp_input = tempfile.mktemp(suffix=".mp3")
-        with open(temp_input, "wb") as f:
-            f.write(source if isinstance(source, (bytes, bytearray)) else source.getvalue())
-        temp_created = True
-    else:
-        temp_input = source
+    is_bytes = isinstance(source, (bytes, bytearray, io.BytesIO))
+    raw_input_bytes = (
+        source.getvalue() if isinstance(source, io.BytesIO) else bytes(source)
+    ) if is_bytes else None
+    input_arg = "pipe:0" if is_bytes else str(source)
 
-    try:
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-loglevel", "error",
-            "-i", temp_input,
-            "-vn",
-            "-ac", "1",
-            "-ar", "16000",
-            "-c:a", "pcm_s16le",
-            wav_path,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, **subprocess_hidden_kwargs())
-    finally:
-        if temp_created and os.path.exists(temp_input):
-            try:
-                os.remove(temp_input)
-            except OSError:
-                pass
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-loglevel", "error",
+        "-i", input_arg,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        wav_path,
+    ]
+    proc = subprocess.run(
+        cmd,
+        input=raw_input_bytes,
+        capture_output=True,
+        **subprocess_hidden_kwargs(),
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+        raise RuntimeError(f"FFmpeg conversion failed:\n{err}")
     return wav_path
 
 

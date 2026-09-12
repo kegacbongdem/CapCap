@@ -572,6 +572,53 @@ class TestPreviewTransport(unittest.TestCase):
         mock_engine.close.assert_called_once()
         backend._player.terminate.assert_called_once()
 
+    def test_real_thread_set_tracks_unloads_readers(self):
+        """Verify PreviewAudioEngine unloads readers in real background QThread when setting empty tracks."""
+        import tempfile
+        import time
+        import numpy as np
+        import soundfile as sf
+        from PySide6.QtWidgets import QApplication
+        from ui.utils.preview_audio import PreviewAudioEngine
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
+        wav_path = tmp.name
+
+        try:
+            sf.write(wav_path, np.zeros(1600, dtype=np.float32), 16000)
+            engine = PreviewAudioEngine()
+
+            for _ in range(30):
+                app.processEvents()
+                time.sleep(0.01)
+
+            engine.set_tracks([{"id": "t1", "path": wav_path, "start": 0.0, "end": 1.0}])
+            for _ in range(30):
+                app.processEvents()
+                time.sleep(0.01)
+                if len(engine._worker._readers) == 1:
+                    break
+            self.assertEqual(len(engine._worker._readers), 1)
+
+            # Clear tracks: should close AudioReader in real background thread
+            engine.set_tracks([])
+            for _ in range(30):
+                app.processEvents()
+                time.sleep(0.01)
+                if len(engine._worker._readers) == 0:
+                    break
+            self.assertEqual(len(engine._worker._readers), 0)
+
+            engine.close()
+        finally:
+            if os.path.exists(wav_path):
+                try:
+                    os.remove(wav_path)
+                except OSError:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()

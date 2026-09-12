@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Union
 
 from dotenv import load_dotenv
-from runtime_paths import app_path, bin_path, models_path, temp_path, subprocess_text_kwargs
+from runtime_paths import app_path, bin_path, models_path, temp_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
 if os.path.exists(ENV_PATH):
@@ -511,49 +511,40 @@ def convert_audio_data_to_wav_16k_mono(
                 return wav_path
     except (ImportError, ModuleNotFoundError):
         pass
-    except (av.error.FFmpegError, av.error.InvalidDataError) as exc:
-        pass
-    except Exception:
+    except (av.FFmpegError, av.error.InvalidDataError):
         pass
 
-    # Fallback to FFmpeg CLI only if PyAV is missing or failed
+    # Fallback to FFmpeg CLI only if PyAV is missing or failed (streams via stdin pipe:0)
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
-    temp_created = False
-    if isinstance(source, (bytes, bytearray, io.BytesIO)):
-        if tmp_dir is None:
-            tmp_dir = temp_path()
-        os.makedirs(tmp_dir, exist_ok=True)
-        temp_input = os.path.join(tmp_dir, f"tts_input_{uuid.uuid4().hex[:8]}.mp3")
-        with open(temp_input, "wb") as f:
-            f.write(source if isinstance(source, (bytes, bytearray)) else source.getvalue())
-        temp_created = True
-    else:
-        temp_input = source
+    is_bytes = isinstance(source, (bytes, bytearray, io.BytesIO))
+    raw_input_bytes = (
+        source.getvalue() if isinstance(source, io.BytesIO) else bytes(source)
+    ) if is_bytes else None
+    input_arg = "pipe:0" if is_bytes else str(source)
 
-    try:
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-i",
-            temp_input,
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            wav_path,
-        ]
-        proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
-        if proc.returncode != 0:
-            raise RuntimeError(f"FFmpeg conversion failed:\n{proc.stderr or proc.stdout}")
-    finally:
-        if temp_created and os.path.exists(temp_input):
-            try:
-                os.remove(temp_input)
-            except OSError:
-                pass
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-loglevel", "error",
+        "-i", input_arg,
+        "-vn",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        wav_path,
+    ]
+    proc = subprocess.run(
+        cmd,
+        input=raw_input_bytes,
+        capture_output=True,
+        **subprocess_hidden_kwargs(),
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+        raise RuntimeError(f"FFmpeg conversion failed:\n{err}")
     return wav_path
 
 

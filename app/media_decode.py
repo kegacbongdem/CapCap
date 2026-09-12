@@ -318,7 +318,7 @@ class AudioReader:
             target_pts = start_pts + int(target_time_sec / stream_tb)
             try:
                 self._av_container.seek(target_pts, stream=self._av_stream, backward=True)
-            except Exception:
+            except (av.FFmpegError, OSError):
                 pass
             self._av_resampler = av.AudioResampler(format="fltp", rate=self.sample_rate)
             self._av_buffer = np.empty(0, dtype=np.float32)
@@ -363,9 +363,9 @@ class AudioReader:
                             arr = rf.to_ndarray()
                             mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
                             self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
-                    except Exception:
+                    except (EOFError, StopIteration, av.FFmpegError):
                         pass
-        except (EOFError, StopIteration, av.EOFError):
+        except (EOFError, StopIteration, av.FFmpegError):
             pass
 
         if self._av_buffer_start is None:
@@ -398,14 +398,14 @@ class AudioReader:
         if self._sf_file is not None:
             try:
                 self._sf_file.close()
-            except Exception:
+            except OSError:
                 pass
             self._sf_file = None
 
         if self._av_container is not None:
             try:
                 self._av_container.close()
-            except Exception:
+            except (OSError, av.FFmpegError):
                 pass
             self._av_container = None
             self._av_stream = None

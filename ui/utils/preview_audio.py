@@ -106,10 +106,14 @@ class _PreviewAudioWorker(QObject):
         self._pcm_cache = _LRUPcmCache(max_bytes=128 * 1024 * 1024)
 
         self._timeline_pos_ms: int = 0
+        self._media_read_sample: int = 0
         self._is_playing: bool = False
         self._playback_rate: float = 1.0
         self._generation_id: int = 0
         self._tempo_graph: Any = None
+        self._tempo_fifo: np.ndarray = np.empty(0, dtype=np.float32)
+        self._tempo_in_pts: int = 0
+        self._pending_write_bytes: bytes = b""
 
         # Resampling state for output sink
         self._sink_sr: int = 48000
@@ -230,10 +234,17 @@ class _PreviewAudioWorker(QObject):
     def seek(self, timeline_ms: int) -> None:
         """Seek playback to timeline millisecond."""
         self._timeline_pos_ms = max(0, int(timeline_ms))
+        self._media_read_sample = int(self._timeline_pos_ms * self.internal_sr / 1000.0)
         self._generation_id += 1
-        if self._sink and self._is_playing:
+        self._pending_write_bytes = b""
+        self._tempo_fifo = np.empty(0, dtype=np.float32)
+        self._tempo_graph = None
+        self._tempo_in_pts = 0
+        self._sink_resampler = None
+        if self._sink:
             self._sink.reset()
-            self._io_device = self._sink.start()
+            if self._is_playing:
+                self._io_device = self._sink.start()
         self.positionChanged.emit(self._timeline_pos_ms)
 
     @Slot()
@@ -254,6 +265,9 @@ class _PreviewAudioWorker(QObject):
             self._is_playing = False
             if self._timer and self._timer.isActive():
                 self._timer.stop()
+            self._pending_write_bytes = b""
+            if self._sink:
+                self._sink.reset()
             self.stateChanged.emit(2)
 
     @Slot()
@@ -263,6 +277,12 @@ class _PreviewAudioWorker(QObject):
         if self._timer and self._timer.isActive():
             self._timer.stop()
         self._timeline_pos_ms = 0
+        self._media_read_sample = 0
+        self._pending_write_bytes = b""
+        self._tempo_fifo = np.empty(0, dtype=np.float32)
+        self._tempo_graph = None
+        self._tempo_in_pts = 0
+        self._sink_resampler = None
         if self._sink:
             self._sink.reset()
         self.positionChanged.emit(0)
@@ -275,6 +295,15 @@ class _PreviewAudioWorker(QObject):
         if abs(new_rate - self._playback_rate) > 1e-3:
             self._playback_rate = new_rate
             self._tempo_graph = None
+            self._tempo_fifo = np.empty(0, dtype=np.float32)
+            self._tempo_in_pts = 0
+            self._pending_write_bytes = b""
+
+    @Slot(list)
+    def set_warps(self, warps: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Update timeline warp markers."""
+        self._warps = list(warps or [])
+        self._generation_id += 1
 
     def _is_time_frozen(self, t_sec: float) -> bool:
         """Return True if timestamp t_sec falls within a freeze frame warp."""
@@ -287,26 +316,10 @@ class _PreviewAudioWorker(QObject):
             accum += dur
         return False
 
-    def _on_timer_tick(self) -> None:
-        """Mix and push PCM audio blocks to the sink."""
-        if not self._is_playing or self._io_device is None or self._sink is None:
-            return
-
-        free_bytes = self._sink.bytesFree()
-        # Compute output block byte size
-        bytes_per_sample = 4 if self._sink_is_float else 2
-        gcd = math.gcd(self.internal_sr, self._sink_sr)
-        up = self._sink_sr // gcd
-        down = self.internal_sr // gcd
-        out_samples_per_block = int(round(self.block_size * up / down))
-        out_bytes_per_block = out_samples_per_block * self._sink_channels * bytes_per_sample
-
-        # If sink buffer has insufficient room, wait for next tick
-        if free_bytes < out_bytes_per_block:
-            return
-
-        cur_t_sec = self._timeline_pos_ms / 1000.0
-        cur_sample = int(self._timeline_pos_ms * self.internal_sr / 1000.0)
+    def _read_mixed_block(self, cur_sample: int) -> np.ndarray:
+        """Read and mix tracks for a window of self.block_size starting at cur_sample."""
+        cur_t_sec = cur_sample / float(self.internal_sr)
+        cur_timeline_pos_ms = int(round(cur_sample * 1000.0 / self.internal_sr))
 
         blocks: List[np.ndarray] = []
         gains: List[float] = []
@@ -325,9 +338,9 @@ class _PreviewAudioWorker(QObject):
             start_ms = track["start_ms"]
             end_ms = track["end_ms"]
 
-            if self._timeline_pos_ms < start_ms:
+            if cur_timeline_pos_ms < start_ms:
                 continue
-            if end_ms > start_ms and self._timeline_pos_ms >= end_ms:
+            if end_ms > start_ms and cur_timeline_pos_ms >= end_ms:
                 continue
 
             # Compute track-relative sample offset
@@ -335,7 +348,7 @@ class _PreviewAudioWorker(QObject):
                 media_time_s = TimeWarpService.timeline_to_media_time(cur_t_sec, self._warps)
                 offset_ms = int(round(media_time_s * 1000.0)) + track["source_start_ms"]
             else:
-                offset_ms = self._timeline_pos_ms - start_ms + track["source_start_ms"]
+                offset_ms = cur_timeline_pos_ms - start_ms + track["source_start_ms"]
 
             track_sample = int(offset_ms * self.internal_sr / 1000.0)
 
@@ -357,13 +370,11 @@ class _PreviewAudioWorker(QObject):
                 self._pcm_cache.put(cache_key, block)
 
             # Apply smooth 5ms ramp toward target gain
-            # 5ms ramp at 16kHz = 80 samples
             ramp_len = min(80, self.block_size)
             cur_g = track["current_gain"]
             target_g = track["target_gain"]
 
             if abs(cur_g - target_g) > 1e-4:
-                # Interpolate
                 gain_envelope = np.linspace(cur_g, target_g, ramp_len, dtype=np.float32)
                 if ramp_len < self.block_size:
                     gain_envelope = np.concatenate([gain_envelope, np.full(self.block_size - ramp_len, target_g, dtype=np.float32)])
@@ -376,13 +387,44 @@ class _PreviewAudioWorker(QObject):
 
             blocks.append(block)
 
-        # Mix down to mono 16kHz
         if blocks:
-            mixed_16k = mix_pcm_block(blocks, gains)
-        else:
-            mixed_16k = np.zeros(self.block_size, dtype=np.float32)
+            return mix_pcm_block(blocks, gains)
+        return np.zeros(self.block_size, dtype=np.float32)
 
-        # Time-stretch if playback rate != 1.0 using PyAV atempo filter
+    def _on_timer_tick(self) -> None:
+        """Mix and push PCM audio blocks to the sink."""
+        if not self._is_playing or self._io_device is None or self._sink is None:
+            return
+
+        # 1. Flush any pending leftover bytes from previous tick first
+        if self._pending_write_bytes:
+            bytes_written = self._io_device.write(self._pending_write_bytes)
+            if bytes_written > 0:
+                bytes_per_sample = 4 if self._sink_is_float else 2
+                bytes_per_frame = bytes_per_sample * self._sink_channels
+                frames_written = bytes_written // bytes_per_frame
+                ms_written = frames_written * 1000.0 / self._sink_sr
+                self._timeline_pos_ms += int(round(ms_written * self._playback_rate))
+                self.positionChanged.emit(self._timeline_pos_ms)
+                self._pending_write_bytes = self._pending_write_bytes[bytes_written:]
+            return
+
+        free_bytes = self._sink.bytesFree()
+        bytes_per_sample = 4 if self._sink_is_float else 2
+        gcd = math.gcd(self.internal_sr, self._sink_sr)
+        up = self._sink_sr // gcd
+        down = self.internal_sr // gcd
+        out_samples_per_block = int(round(self.block_size * up / down))
+        out_bytes_per_block = out_samples_per_block * self._sink_channels * bytes_per_sample
+
+        if free_bytes < out_bytes_per_block:
+            return
+
+        # Keep media read sample aligned to timeline when playing 1.0x
+        if abs(self._playback_rate - 1.0) <= 0.01:
+            self._media_read_sample = int(round(self._timeline_pos_ms * self.internal_sr / 1000.0))
+
+        # 2. Generate 16kHz audio block (applying atempo filter if rate != 1.0)
         if abs(self._playback_rate - 1.0) > 0.01 and av is not None:
             try:
                 if getattr(self, "_tempo_graph", None) is None:
@@ -394,25 +436,46 @@ class _PreviewAudioWorker(QObject):
                     tempo.link_to(sink)
                     g.configure()
                     self._tempo_graph = (g, src, sink)
+                    self._tempo_in_pts = 0
                 _, t_src, t_sink = self._tempo_graph
-                f = av.AudioFrame(format='flt', layout='mono', samples=len(mixed_16k))
-                f.sample_rate = self.internal_sr
-                f.pts = cur_sample
-                f.planes[0].update(mixed_16k.astype(np.float32).tobytes())
-                t_src.push(f)
-                out_tempo_parts = []
-                while True:
-                    try:
-                        of = t_sink.pull()
-                        out_tempo_parts.append(of.to_ndarray().flatten())
-                    except Exception:
-                        break
-                if out_tempo_parts:
-                    mixed_16k = np.concatenate(out_tempo_parts)
-            except Exception:
-                pass
 
-        # Resample to output sink sample rate preserving filter continuity across blocks
+                max_feed_iterations = 20
+                iter_count = 0
+                while len(self._tempo_fifo) < self.block_size and iter_count < max_feed_iterations:
+                    iter_count += 1
+                    chunk = self._read_mixed_block(self._media_read_sample)
+                    self._media_read_sample += len(chunk)
+                    f = av.AudioFrame(format='flt', layout='mono', samples=len(chunk))
+                    f.sample_rate = self.internal_sr
+                    f.pts = self._tempo_in_pts
+                    self._tempo_in_pts += len(chunk)
+                    f.planes[0].update(chunk.astype(np.float32).tobytes())
+                    t_src.push(f)
+                    while True:
+                        try:
+                            of = t_sink.pull()
+                            arr = of.to_ndarray().flatten().astype(np.float32)
+                            self._tempo_fifo = np.concatenate([self._tempo_fifo, arr]) if len(self._tempo_fifo) else arr
+                        except Exception:
+                            break
+
+                if len(self._tempo_fifo) >= self.block_size:
+                    mixed_16k = self._tempo_fifo[:self.block_size]
+                    self._tempo_fifo = self._tempo_fifo[self.block_size:]
+                elif len(self._tempo_fifo) > 0:
+                    pad = np.zeros(self.block_size - len(self._tempo_fifo), dtype=np.float32)
+                    mixed_16k = np.concatenate([self._tempo_fifo, pad])
+                    self._tempo_fifo = np.empty(0, dtype=np.float32)
+                else:
+                    mixed_16k = np.zeros(self.block_size, dtype=np.float32)
+            except Exception:
+                mixed_16k = self._read_mixed_block(self._media_read_sample)
+                self._media_read_sample += len(mixed_16k)
+        else:
+            mixed_16k = self._read_mixed_block(self._media_read_sample)
+            self._media_read_sample += len(mixed_16k)
+
+        # 3. Resample to output sink sample rate preserving filter continuity across blocks
         if self._sink_sr == self.internal_sr:
             out_mono = mixed_16k
         elif av is not None:
@@ -432,19 +495,19 @@ class _PreviewAudioWorker(QObject):
         if len(out_mono) == 0:
             return
 
-        # Expand channels (mono -> stereo if needed)
+        # 4. Expand channels (mono -> stereo if needed)
         if self._sink_channels == 2:
             out_audio = np.column_stack([out_mono, out_mono])
         else:
             out_audio = out_mono
 
-        # Convert to target format bytes
+        # 5. Convert to target format bytes
         if self._sink_is_float:
             data_bytes = out_audio.astype(np.float32).tobytes()
         else:
             data_bytes = (out_audio * 32767.0).clip(-32768.0, 32767.0).astype(np.int16).tobytes()
 
-        # Push to sink and advance clock only by actual written bytes
+        # 6. Push to sink and advance clock only by actual written bytes
         bytes_written = self._io_device.write(data_bytes)
         if bytes_written > 0:
             bytes_per_sample = 4 if self._sink_is_float else 2
@@ -453,6 +516,10 @@ class _PreviewAudioWorker(QObject):
             ms_written = frames_written * 1000.0 / self._sink_sr
             self._timeline_pos_ms += int(round(ms_written * self._playback_rate))
             self.positionChanged.emit(self._timeline_pos_ms)
+            if bytes_written < len(data_bytes):
+                self._pending_write_bytes = data_bytes[bytes_written:]
+        else:
+            self._pending_write_bytes = data_bytes
 
     @Slot()
     def close(self) -> None:
@@ -492,6 +559,7 @@ class PreviewAudioEngine(QObject):
 
     # Internal signals for safe cross-thread queued dispatching to worker
     _sig_set_tracks = Signal(list, list)
+    _sig_set_warps = Signal(list)
     _sig_set_track_gain = Signal(str, float, bool)
     _sig_seek = Signal(int)
     _sig_play = Signal()
@@ -514,6 +582,7 @@ class PreviewAudioEngine(QObject):
 
         # Connect internal control signals
         self._sig_set_tracks.connect(self._worker.set_tracks)
+        self._sig_set_warps.connect(self._worker.set_warps)
         self._sig_set_track_gain.connect(self._worker.set_track_gain)
         self._sig_seek.connect(self._worker.seek)
         self._sig_play.connect(self._worker.play)
@@ -544,6 +613,10 @@ class PreviewAudioEngine(QObject):
     def set_tracks(self, tracks: List[Dict[str, Any]], warps: Optional[List[Dict[str, Any]]] = None) -> None:
         """Update active audio tracks snapshot."""
         self._sig_set_tracks.emit(tracks, warps or [])
+
+    def set_warps(self, warps: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Update timeline warp markers."""
+        self._sig_set_warps.emit(list(warps or []))
 
     def set_track_gain(self, track_id: str, gain: float, muted: bool = False) -> None:
         """Update track volume without regenerating media files."""

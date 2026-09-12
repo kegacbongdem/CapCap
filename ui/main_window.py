@@ -3454,7 +3454,7 @@ class VideoTranslatorGUI(QMainWindow):
                     m_copy["is_original_video"] = False
                     tracks_snapshot.append(m_copy)
 
-                warps = getattr(self, "_active_time_warps", lambda: [])()
+                warps = list(getattr(self, "video_time_warps", []) or [])
                 self.media_player.set_audio_tracks_snapshot(tracks_snapshot, warps)
 
             if current_position > 0:
@@ -16544,14 +16544,14 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception:
             pass
         if hasattr(self, "media_player") and self.media_player is not None:
-            if hasattr(self.media_player, "close_native_audio"):
-                try:
-                    self.media_player.close_native_audio()
-                except Exception:
-                    pass
-            elif hasattr(self.media_player, "close"):
+            if hasattr(self.media_player, "close"):
                 try:
                     self.media_player.close()
+                except Exception:
+                    pass
+            elif hasattr(self.media_player, "close_native_audio"):
+                try:
+                    self.media_player.close_native_audio()
                 except Exception:
                     pass
         print("[Cleanup] Worker termination complete.")

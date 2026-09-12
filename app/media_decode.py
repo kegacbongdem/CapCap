@@ -302,6 +302,7 @@ class AudioReader:
         # Determine target seek timestamp
         target_time_sec = max(0.0, start_sample / float(self.sample_rate))
         stream_tb = self._av_stream.time_base or (1 / self._orig_sr)
+        start_pts = self._av_stream.start_time if self._av_stream.start_time is not None else 0
 
         needs_seek = (
             self._av_resampler is None
@@ -309,7 +310,7 @@ class AudioReader:
             or start_sample > buf_end + 16000
         )
         if needs_seek:
-            target_pts = int(target_time_sec / stream_tb)
+            target_pts = start_pts + int(target_time_sec / stream_tb)
             self._av_container.seek(target_pts, stream=self._av_stream, backward=True)
             self._av_resampler = av.AudioResampler(format="fltp", rate=self.sample_rate)
             self._av_buffer = np.empty(0, dtype=np.float32)
@@ -317,7 +318,8 @@ class AudioReader:
 
         needed_end = start_sample + sample_count
         for frame in self._av_container.decode(self._av_stream):
-            pts_s = float(frame.pts * stream_tb) if frame.pts is not None else target_time_sec
+            pts_val = (frame.pts - start_pts) if frame.pts is not None else int(round(target_time_sec / stream_tb))
+            pts_s = float(pts_val * stream_tb)
             dur_s = float(frame.samples) / float(frame.sample_rate)
             if self._av_buffer_start is None:
                 if pts_s + dur_s < target_time_sec - 0.05:
@@ -331,6 +333,16 @@ class AudioReader:
 
             if self._av_buffer_start is not None and self._av_buffer_start + len(self._av_buffer) >= needed_end:
                 break
+        else:
+            # End of stream reached: flush remaining buffered samples from resampler
+            if self._av_resampler is not None:
+                try:
+                    for rf in self._av_resampler.resample(None):
+                        arr = rf.to_ndarray()
+                        mono = np.mean(arr, axis=0, dtype=np.float32) if arr.ndim == 2 else arr.flatten().astype(np.float32)
+                        self._av_buffer = np.concatenate([self._av_buffer, mono]) if len(self._av_buffer) else mono
+                except Exception:
+                    pass
 
         if self._av_buffer_start is None or len(self._av_buffer) == 0:
             return np.zeros(sample_count, dtype=np.float32)

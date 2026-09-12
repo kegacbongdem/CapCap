@@ -466,7 +466,7 @@ def _apply_audio_fade(gui, position_ms: int):
     except Exception:
         has_composed_dubbed_sidecar = False
 
-    for track_name in ("A1 Audio", "TS1"):
+    for track_name in ("A1 Audio", "TS1", "A2 Music"):
         track, _ = _find_audio_track(gui, track_name)
         if track is None:
             continue
@@ -486,6 +486,17 @@ def _apply_audio_fade(gui, position_ms: int):
             if remaining < fade_out:
                 mult = min(mult, max(0.0, remaining / fade_out) if fade_out > 0 else 1.0)
         effective = base_vol * mult
+
+        if getattr(gui.media_player, "_native_audio_active", False) and hasattr(gui.media_player, "set_track_gain"):
+            linear_gain = max(0.0, min(2.0, effective / 100.0))
+            is_muted = bool(meta.get("_muted", False)) or (hasattr(gui, "_is_audio_track_muted") and gui._is_audio_track_muted(track_name))
+            if track_name == "A2 Music" and hasattr(gui, "_music_audio_tracks"):
+                for m_track in gui._music_audio_tracks():
+                    m_id = str(m_track.get("id") or m_track.get("path", "A2 Music"))
+                    gui.media_player.set_track_gain(m_id, linear_gain, is_muted)
+            else:
+                gui.media_player.set_track_gain(track_name, linear_gain, is_muted)
+
         if track_name == "A1 Audio":
             if hasattr(gui.media_player, "set_original_volume"):
                 gui.media_player.set_original_volume(effective)

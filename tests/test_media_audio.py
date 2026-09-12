@@ -397,6 +397,29 @@ class TestAudioMixerPCM(unittest.TestCase):
         self.assertEqual(len(mixed), 0)
         self.assertEqual(mixed.dtype, np.float32)
 
+    def test_mix_pcm_block_does_not_mutate_nan_inputs(self):
+        """Ensure blocks containing NaN or inf are not mutated in-place."""
+        from app.audio_mixer import mix_pcm_block
+
+        input_arr = np.array([0.5, np.nan, np.inf, -np.inf], dtype=np.float32)
+        mixed = mix_pcm_block([input_arr], [1.0])
+        # Output must be cleaned and clamped
+        np.testing.assert_allclose(mixed, [0.5, 0.0, 1.0, -1.0], atol=1e-6)
+        # Original input MUST still contain NaN and inf (never mutated in-place)
+        self.assertTrue(np.isnan(input_arr[1]))
+        self.assertTrue(np.isposinf(input_arr[2]))
+        self.assertTrue(np.isneginf(input_arr[3]))
+
+    def test_mix_pcm_block_gains_count_mismatch(self):
+        """Ensure mismatch between number of blocks and number of gains raises ValueError."""
+        from app.audio_mixer import mix_pcm_block
+
+        b1 = np.array([0.1, 0.2], dtype=np.float32)
+        b2 = np.array([0.3, 0.4], dtype=np.float32)
+        with self.assertRaises(ValueError):
+            # 2 blocks but only 1 gain
+            mix_pcm_block([b1, b2], [1.0])
+
 
 class TestPreviewAudioEngine(unittest.TestCase):
     """Test PreviewAudioEngine lifecycle and asynchronous controls."""
@@ -556,6 +579,72 @@ class TestPreviewAudioEngine(unittest.TestCase):
             # Setting close to 1.0 resets tempo graph
             worker.set_rate(1.0)
             self.assertEqual(worker._playback_rate, 1.0)
+        finally:
+            worker.close()
+
+    def test_atempo_clock_accuracy_2x_and_half_x(self):
+        """Ensure 100 ticks at 2.0x reaches ~2000 ms and at 0.5x reaches ~500 ms."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        for rate, expected_ms in ((2.0, 2000), (0.5, 500)):
+            worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+            try:
+                worker._sink_sr = 16000
+                worker._sink_channels = 1
+                worker._sink_is_float = True
+                worker._is_playing = True
+                worker._tracks = []
+                worker.set_rate(rate)
+
+                mock_sink = MagicMock()
+                mock_sink.bytesFree.return_value = 100000
+                mock_io = MagicMock()
+                # 160 samples float32 = 640 bytes written per tick
+                mock_io.write.return_value = 640
+                worker._sink = mock_sink
+                worker._io_device = mock_io
+
+                for _ in range(100):
+                    worker._on_timer_tick()
+
+                self.assertEqual(worker._timeline_pos_ms, expected_ms)
+            finally:
+                worker.close()
+
+    def test_partial_write_buffer_preservation(self):
+        """Ensure partial sink writes buffer trailing bytes without dropping them."""
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from unittest.mock import MagicMock
+
+        worker = _PreviewAudioWorker(sample_rate=16000, block_size=160)
+        try:
+            worker._sink_sr = 16000
+            worker._sink_channels = 1
+            worker._sink_is_float = True
+            worker._is_playing = True
+            worker._tracks = []
+
+            mock_sink = MagicMock()
+            mock_sink.bytesFree.return_value = 100000
+            mock_io = MagicMock()
+            worker._sink = mock_sink
+            worker._io_device = mock_io
+
+            # Block size 160 float32 = 640 bytes
+            # Tick 1: only 320 bytes accepted by sink
+            mock_io.write.return_value = 320
+            worker._on_timer_tick()
+            # Clock advanced by 320 bytes (80 samples = 5 ms)
+            self.assertEqual(worker._timeline_pos_ms, 5)
+            self.assertEqual(len(worker._pending_write_bytes), 320)
+
+            # Tick 2: sink accepts remaining 320 bytes
+            mock_io.write.return_value = 320
+            worker._on_timer_tick()
+            # Clock advances remaining 5 ms (total 10 ms = 160 samples)
+            self.assertEqual(worker._timeline_pos_ms, 10)
+            self.assertEqual(len(worker._pending_write_bytes), 0)
         finally:
             worker.close()
 

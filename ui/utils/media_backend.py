@@ -829,6 +829,8 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_time_warps(self, warps):
         self._video_time_warps = list(warps or [])
+        if self._native_audio_engine is not None and hasattr(self._native_audio_engine, "set_warps"):
+            self._native_audio_engine.set_warps(self._video_time_warps)
 
     def freeze_video_frame(self, anchor_ms):
         """Freezes the video frame at anchor_ms while keeping dubbed audio (TTS/music) playing."""
@@ -839,16 +841,20 @@ class MpvMediaPlayerBackend(QObject):
             self._player.pause = True
         except Exception:
             pass
-        if self._original_loaded_path:
-            try:
-                self._original_player.pause()
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.play()
-            except Exception:
-                pass
+        if not self._native_audio_active:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.pause()
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.play()
+                except Exception:
+                    pass
+        else:
+            if self._native_audio_engine is not None:
+                self._native_audio_engine.play()
 
     def unfreeze_video_frame(self, resume_pos_ms=None):
         """Unfreezes the video frame and resumes synchronized playback."""
@@ -868,16 +874,20 @@ class MpvMediaPlayerBackend(QObject):
             self._player.pause = False
         except Exception:
             pass
-        if self._original_loaded_path:
-            try:
-                self._original_player.play()
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.play()
-            except Exception:
-                pass
+        if not self._native_audio_active:
+            if self._original_loaded_path:
+                try:
+                    self._original_player.play()
+                except Exception:
+                    pass
+            if self._dubbed_loaded_path:
+                try:
+                    self._dubbed_player.play()
+                except Exception:
+                    pass
+        else:
+            if self._native_audio_engine is not None:
+                self._native_audio_engine.play()
         self._state = QMediaPlayer.PlayingState
 
     def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
@@ -950,6 +960,13 @@ class MpvMediaPlayerBackend(QObject):
     def _on_native_audio_error(self, err_msg: str):
         self.log(f"[Preview] Native audio engine error: {err_msg}; falling back to legacy sidecars")
         self._native_audio_active = False
+        engine = getattr(self, "_native_audio_engine", None)
+        if engine is not None:
+            try:
+                engine.pause()
+                engine.stop()
+            except Exception:
+                pass
 
     def _on_native_audio_position_changed(self, pos_ms: int):
         if self._native_audio_active:
@@ -1483,8 +1500,15 @@ class MpvMediaPlayerBackend(QObject):
                 self._native_audio_engine.play()
 
             a_pos = self._native_audio_engine.timeline_position_ms()
-            if abs(v_pos_ms - a_pos) > 100:
-                self._native_audio_engine.seek(v_pos_ms)
+            warps = getattr(self, "_video_time_warps", [])
+            if warps:
+                from app.services.time_warp_service import TimeWarpService
+                expected_a_pos_ms = int(round(TimeWarpService.media_to_timeline_time(v_pos_ms / 1000.0, warps) * 1000.0))
+            else:
+                expected_a_pos_ms = v_pos_ms
+
+            if abs(expected_a_pos_ms - a_pos) > 100:
+                self._native_audio_engine.seek(expected_a_pos_ms)
             return
 
         if self._original_loaded_path:

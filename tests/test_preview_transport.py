@@ -335,6 +335,115 @@ class TestPreviewTransport(unittest.TestCase):
         gui.media_player.play.assert_called_once()
         self.assertFalse(gui._scrub_was_playing)
 
+    def test_sync_audio_uses_timeline_coords_after_freeze(self):
+        """Verify _sync_audio_to_video maps media time through warps and does not seek backwards after freeze."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "video.mp4"
+        backend._video_frozen = False
+        backend._player = MagicMock()
+        # Video media time is 2500 ms
+        backend._player.time_pos = 2.5
+        backend._player.pause = False
+        backend._native_audio_active = True
+        # 1.0s freeze at 2.0s shifts timeline by 1.0s -> media 2.5s corresponds to timeline 3500 ms!
+        backend._video_time_warps = [{"time": 2.0, "duration": 1.0}]
+        backend._native_audio_engine = MagicMock()
+        # Audio is already at timeline 3500 ms
+        backend._native_audio_engine.timeline_position_ms.return_value = 3500
+
+        backend._original_loaded_path = ""
+        backend._dubbed_loaded_path = ""
+
+        backend._sync_audio_to_video()
+
+        # Must NOT seek to 2500ms
+        backend._native_audio_engine.seek.assert_not_called()
+
+    def test_freeze_unfreeze_never_plays_sidecars_when_native_active(self):
+        """Verify freeze and unfreeze do not activate legacy QMediaPlayer sidecars when native audio is active."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "video.mp4"
+        backend._video_frozen = False
+        backend._position_ms = 0
+        backend._native_audio_active = True
+        backend._native_audio_engine = MagicMock()
+
+        backend._player = MagicMock()
+        backend._original_loaded_path = "orig.wav"
+        backend._original_player = MagicMock()
+        backend._dubbed_loaded_path = "dub.wav"
+        backend._dubbed_player = MagicMock()
+
+        # Freeze frame
+        backend.freeze_video_frame(2000)
+        backend._dubbed_player.play.assert_not_called()
+        backend._original_player.play.assert_not_called()
+
+        # Unfreeze frame
+        backend.unfreeze_video_frame(2035)
+        backend._dubbed_player.play.assert_not_called()
+        backend._original_player.play.assert_not_called()
+        backend._native_audio_engine.play.assert_called()
+
+    def test_native_error_fallback_stops_engine(self):
+        """Verify that on native engine error, engine is stopped and paused to prevent dual audio."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._native_audio_active = True
+        backend.log = MagicMock()
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+
+        backend._on_native_audio_error("Device unplugged")
+        self.assertFalse(backend._native_audio_active)
+        mock_engine.pause.assert_called_once()
+        mock_engine.stop.assert_called_once()
+
+    def test_apply_audio_fade_updates_native_track_gain(self):
+        """Verify _apply_audio_fade updates native track gain during fade window."""
+        from ui.utils.media_utils import _apply_audio_fade
+
+        gui = MagicMock()
+        gui.media_player.duration.return_value = 10000
+        gui.media_player._native_audio_active = True
+        gui._is_audio_track_muted.return_value = False
+
+        track = MagicMock(metadata={"_fade_in": 2.0, "_volume": 100.0})
+        track.name = "A1 Audio"
+        gui.timeline._timeline.tracks = [track]
+
+        # At 1.0s (halfway through 2.0s fade-in), gain should be ~0.50
+        _apply_audio_fade(gui, 1000)
+        gui.media_player.set_track_gain.assert_called_with("A1 Audio", 0.5, False)
+
+    def test_set_time_warps_propagates_to_native_engine(self):
+        """Verify set_time_warps updates backend and forwards warps to native engine."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._native_audio_engine = MagicMock()
+        warps = [{"time": 1.5, "duration": 0.5}]
+
+        backend.set_time_warps(warps)
+        self.assertEqual(backend._video_time_warps, warps)
+        backend._native_audio_engine.set_warps.assert_called_once_with(warps)
+
+    def test_terminate_workers_calls_media_player_close(self):
+        """Verify _terminate_workers calls media_player.close() to release mpv and timers."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui._active_workers = {}
+        gui.media_player = MagicMock()
+
+        VideoTranslatorGUI._terminate_workers(gui)
+        gui.media_player.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

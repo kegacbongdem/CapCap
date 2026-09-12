@@ -759,6 +759,9 @@ def mix_pcm_block(blocks: list[np.ndarray], gains: list[float]) -> np.ndarray:
     if not blocks:
         return np.empty(0, dtype=np.float32)
 
+    if len(blocks) != len(gains):
+        raise ValueError(f"Count mismatch: {len(blocks)} blocks and {len(gains)} gains")
+
     block_len = len(blocks[0])
     for b in blocks[1:]:
         if len(b) != block_len:
@@ -769,7 +772,7 @@ def mix_pcm_block(blocks: list[np.ndarray], gains: list[float]) -> np.ndarray:
         g = float(gain)
         if abs(g) < 1e-6:
             continue
-        clean_block = np.nan_to_num(block, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+        clean_block = np.nan_to_num(block, copy=True, nan=0.0, posinf=1.0, neginf=-1.0)
         out += clean_block * g
 
     np.clip(out, -1.0, 1.0, out=out)

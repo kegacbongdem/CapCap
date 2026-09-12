@@ -645,14 +645,10 @@ class TimelineThumbnailWorker(QThread):
 
                 thumbnails = []
                 for idx, (actual_pts, rgb) in enumerate(iter_video_thumbnails(self.video_path, timestamps, width=180)):
-                    output_path = os.path.join(self.thumb_dir, f"{digest}_{idx:02d}.jpg")
-                    if not os.path.exists(output_path):
-                        h, w, _ = rgb.shape
-                        rgb_contig = np.ascontiguousarray(rgb)
-                        image = QImage(rgb_contig.data, w, h, w * 3, QImage.Format_RGB888).copy()
-                        image.save(output_path, "JPG", 75)
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                        thumbnails.append((float(actual_pts), output_path))
+                    h, w, _ = rgb.shape
+                    rgb_contig = np.ascontiguousarray(rgb)
+                    image = QImage(rgb_contig.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                    thumbnails.append((float(actual_pts), image))
 
                 if thumbnails:
                     self.finished.emit(self.request_signature, thumbnails, "")

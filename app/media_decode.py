@@ -9,6 +9,7 @@ containers (MP4, MKV, WebM) or fallback audio streams.
 
 from __future__ import annotations
 
+import collections
 import io
 import math
 import os
@@ -427,8 +428,67 @@ def convert_audio_to_wav_16k_mono(
     return convert_audio_data_to_wav_16k_mono(source, wav_path)
 
 
-_WAVEFORM_CACHE: dict[tuple[str, int, int, int], tuple[list[float], float]] = {}
-_WAVEFORM_CACHE_LOCK = threading.Lock()
+WAVEFORM_ALGO_VERSION = 1
+
+
+class BoundedWaveformCache:
+    """Bounded in-memory LRU cache for waveform envelopes with version and fingerprinting."""
+
+    def __init__(self, max_bytes: int = 16 * 1024 * 1024, max_entries: int = 128):
+        self.max_bytes = max_bytes
+        self.max_entries = max_entries
+        self.current_bytes = 0
+        self._cache: collections.OrderedDict[tuple, tuple[list[float], float]] = collections.OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def compute_fingerprint(
+        path: str,
+        stat: os.stat_result,
+        bucket_count: int,
+        stream_index: int = 0,
+    ) -> tuple:
+        return (
+            WAVEFORM_ALGO_VERSION,
+            os.path.abspath(path),
+            int(stat.st_size),
+            int(getattr(stat, "st_mtime_ns", 0)),
+            int(stream_index),
+            int(bucket_count),
+        )
+
+    def get(self, key: tuple) -> Optional[tuple[list[float], float]]:
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
+
+    def put(self, key: tuple, value: tuple[list[float], float]) -> None:
+        waveform, _dur = value
+        entry_bytes = len(waveform) * 8 + 128
+        with self._lock:
+            if key in self._cache:
+                old_wf, _ = self._cache.pop(key)
+                self.current_bytes -= (len(old_wf) * 8 + 128)
+
+            while (
+                (self.current_bytes + entry_bytes > self.max_bytes or len(self._cache) >= self.max_entries)
+                and self._cache
+            ):
+                _old_key, (old_wf, _) = self._cache.popitem(last=False)
+                self.current_bytes -= (len(old_wf) * 8 + 128)
+
+            self._cache[key] = value
+            self.current_bytes += entry_bytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self.current_bytes = 0
+
+
+_WAVEFORM_CACHE = BoundedWaveformCache()
 
 
 def iter_video_thumbnails(
@@ -523,10 +583,10 @@ def build_waveform(
         return [], 0.0
 
     stat = os.stat(path)
-    cache_key = (os.path.abspath(path), int(stat.st_size), int(getattr(stat, "st_mtime_ns", 0)), bucket_count)
-    with _WAVEFORM_CACHE_LOCK:
-        if cache_key in _WAVEFORM_CACHE:
-            return _WAVEFORM_CACHE[cache_key]
+    cache_key = BoundedWaveformCache.compute_fingerprint(path, stat, bucket_count)
+    cached = _WAVEFORM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         reader = AudioReader(path, sample_rate=16000)
@@ -581,8 +641,7 @@ def build_waveform(
 
         if global_peak <= 0.0:
             result = ([0.0] * num_buckets, duration_s)
-            with _WAVEFORM_CACHE_LOCK:
-                _WAVEFORM_CACHE[cache_key] = result
+            _WAVEFORM_CACHE.put(cache_key, result)
             return result
 
         safe_counts = np.maximum(1, bucket_counts)
@@ -594,7 +653,6 @@ def build_waveform(
         waveform = [float(x) for x in envelope]
 
         result = (waveform, duration_s)
-        with _WAVEFORM_CACHE_LOCK:
-            _WAVEFORM_CACHE[cache_key] = result
+        _WAVEFORM_CACHE.put(cache_key, result)
         return result
 

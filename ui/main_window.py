@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout,
                              QSpinBox)
 from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, Signal, QPoint, QRect
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QIcon, QKeySequence, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QIcon, QImage, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_PATH = os.path.join(os.path.dirname(__file__), '..', 'app')
@@ -3777,8 +3777,13 @@ class VideoTranslatorGUI(QMainWindow):
             self._timeline_video_thumbnails = []
         else:
             pixmaps = []
-            for timestamp_s, output_path in list(thumbnails or []):
-                pixmap = QPixmap(str(output_path or ""))
+            for timestamp_s, item in list(thumbnails or []):
+                if isinstance(item, QPixmap):
+                    pixmap = item
+                elif isinstance(item, QImage):
+                    pixmap = QPixmap.fromImage(item)
+                else:
+                    pixmap = QPixmap(str(item or ""))
                 if not pixmap.isNull():
                     pixmaps.append((float(timestamp_s), pixmap))
             self._timeline_video_thumb_cache_key = request_signature

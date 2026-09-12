@@ -218,10 +218,127 @@ class TestTimelineVisuals(unittest.TestCase):
         self.assertEqual(sig, "req_test_thumbs")
         self.assertEqual(err, "")
         self.assertGreater(len(thumbs), 0)
-        for pts, path in thumbs:
-            self.assertTrue(os.path.exists(path))
-            self.assertGreater(os.path.getsize(path), 0)
+        from PySide6.QtGui import QImage
+        for pts, image in thumbs:
+            self.assertIsInstance(image, QImage)
+            self.assertFalse(image.isNull())
+            self.assertEqual(image.width(), 180)
+        # Verify no JPG files written to disk
+        created_files = os.listdir(thumb_dir) if os.path.exists(thumb_dir) else []
+        jpg_files = [f for f in created_files if f.lower().endswith(".jpg")]
+        self.assertEqual(len(jpg_files), 0)
+
+    def test_bounded_waveform_cache_lru_and_fingerprint(self):
+        """Ensure BoundedWaveformCache respects LRU eviction, byte budget, and fingerprint."""
+        from app.media_decode import BoundedWaveformCache, WAVEFORM_ALGO_VERSION
+
+        cache = BoundedWaveformCache(max_bytes=1000, max_entries=3)
+        audio_path = self._create_synthetic_audio(duration_s=1.0)
+        stat = os.stat(audio_path)
+
+        fp = cache.compute_fingerprint(audio_path, stat, 100, stream_index=0)
+        self.assertEqual(fp[0], WAVEFORM_ALGO_VERSION)
+        self.assertEqual(fp[1], os.path.abspath(audio_path))
+        self.assertEqual(fp[2], stat.st_size)
+        self.assertEqual(fp[3], getattr(stat, "st_mtime_ns", 0))
+        self.assertEqual(fp[4], 0)
+        self.assertEqual(fp[5], 100)
+
+        # Put entries
+        cache.put(("key1",), ([0.1] * 10, 1.0))
+        cache.put(("key2",), ([0.2] * 10, 1.0))
+        cache.put(("key3",), ([0.3] * 10, 1.0))
+        self.assertIsNotNone(cache.get(("key1",)))
+        self.assertIsNotNone(cache.get(("key2",)))
+        self.assertIsNotNone(cache.get(("key3",)))
+
+        # 4th entry should evict key1 (least recently used)
+        cache.put(("key4",), ([0.4] * 10, 1.0))
+        self.assertIsNone(cache.get(("key1",)))
+        self.assertIsNotNone(cache.get(("key4",)))
+
+    def test_launcher_project_card_non_blocking_and_async(self):
+        """Ensure ProjectCard shows placeholder immediately and extracts thumbnail in background with 0 CLI calls."""
+        import time
+        from PySide6.QtWidgets import QApplication
+
+        # Ensure ui and app are in sys.path
+        for p in ("ui", "app"):
+            full_p = os.path.join(PROJECT_ROOT, p)
+            if full_p not in sys.path:
+                sys.path.insert(0, full_p)
+        from views.launcher import ProjectCard
+
+        app = QApplication.instance() or QApplication([])
+        video_path = self._create_synthetic_video()
+        cache_dir = os.path.join(self.temp_dir, "thumb_cache")
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            card = ProjectCard(video_path, cache_dir)
+            # Immediate placeholder
+            self.assertEqual(card.thumb_label.text(), "No Preview")
+
+            # Allow background thread to process and deliver QImage via signal
+            deadline = time.time() + 2.0
+            while time.time() < deadline and card._orig_pixmap is None:
+                app.processEvents()
+                time.sleep(0.02)
+
+            self.assertIsNotNone(card._orig_pixmap)
+            self.assertFalse(card._orig_pixmap.isNull())
+
+    def test_launcher_accept_instant_non_blocking(self):
+        """Ensure LauncherWindow.accept() accepts immediately without 15s timeout or blocking UI."""
+        import time
+        from PySide6.QtWidgets import QApplication
+
+        for p in ("ui", "app"):
+            full_p = os.path.join(PROJECT_ROOT, p)
+            if full_p not in sys.path:
+                sys.path.insert(0, full_p)
+        from views.launcher import LauncherWindow
+
+        app = QApplication.instance() or QApplication([])
+        video_path = self._create_synthetic_video()
+
+        with patch.object(LauncherWindow, "_launch_resource_state", return_value=(True, [], [])):
+            launcher = LauncherWindow()
+            launcher.selected_video = video_path
+            accepted = []
+            launcher._finish_accept = lambda: accepted.append(True)
+
+            start_t = time.time()
+            launcher.accept()
+            elapsed = time.time() - start_t
+
+            self.assertEqual(accepted, [True])
+            self.assertLess(elapsed, 0.2)
+
+    def test_prepare_timeline_visual_cache_native_zero_jpg_files(self):
+        """Ensure _prepare_timeline_visual_cache on native path creates 0 JPG files on disk."""
+        for p in ("ui", "app"):
+            full_p = os.path.join(PROJECT_ROOT, p)
+            if full_p not in sys.path:
+                sys.path.insert(0, full_p)
+        from views.launcher import _prepare_timeline_visual_cache
+
+        video_path = self._create_synthetic_video()
+        temp_root = os.path.join(self.temp_dir, "launcher_temp")
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            _prepare_timeline_visual_cache(video_path, temp_root)
+
+        thumb_dir = os.path.join(temp_root, "timeline_thumbnails")
+        created_jpgs = [
+            f for f in (os.listdir(thumb_dir) if os.path.exists(thumb_dir) else [])
+            if f.lower().endswith(".jpg")
+        ]
+        self.assertEqual(len(created_jpgs), 0)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+

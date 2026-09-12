@@ -139,13 +139,35 @@ def change_pcm_speed(
     except Exception:
         pass
 
-    # Emergency fallback: resample
+    # Fallback to FFmpeg CLI pipe with atempo to preserve pitch (never resample!)
     try:
-        import scipy.signal
-        out_len = int(round(len(pcm) / ratio))
-        return scipy.signal.resample(pcm, out_len).astype(np.float32)
+        ffmpeg = _ffmpeg_path()
+        if os.path.exists(ffmpeg):
+            filter_chain = _build_atempo_filter(ratio)
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-loglevel", "error",
+                "-f", "f32le",
+                "-ar", str(sample_rate),
+                "-ac", "1",
+                "-i", "pipe:0",
+                "-filter:a", filter_chain,
+                "-f", "f32le",
+                "pipe:1",
+            ]
+            proc = subprocess.run(
+                cmd,
+                input=pcm.astype(np.float32).tobytes(),
+                capture_output=True,
+                **subprocess_hidden_kwargs(),
+            )
+            if proc.returncode == 0 and proc.stdout:
+                return np.frombuffer(proc.stdout, dtype=np.float32).copy()
     except Exception:
-        return pcm.copy()
+        pass
+
+    raise RuntimeError(f"Failed to change PCM speed by ratio {ratio}: atempo processing failed")
 
 
 def ffprobe_wav_duration(wav_path: str) -> float:

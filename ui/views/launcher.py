@@ -7,8 +7,10 @@ import shutil
 import hashlib
 import re
 
+import threading
+
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -124,10 +126,13 @@ MSG_STYLE = """
 
 
 class ProjectCard(QFrame):
+    thumb_ready = Signal(object)
+
     def __init__(self, video_path: str, thumbnail_cache_dir: str, parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self._orig_pixmap = None
+        self.thumb_ready.connect(self._on_thumb_ready)
         self.setObjectName("statusCard")
         self.setMinimumSize(180, 184)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -165,13 +170,46 @@ class ProjectCard(QFrame):
 
     def _load_thumb(self, cache_dir):
         thumb_path = os.path.join(cache_dir, _thumbnail_name(self.video_path))
-        if not os.path.exists(thumb_path):
-            thumb_path = _extract_thumbnail(self.video_path, thumb_path)
         if os.path.exists(thumb_path):
             self._orig_pixmap = QPixmap(thumb_path)
             self._update_thumb()
         else:
             self.thumb_label.setText(t("No Preview"))
+            self._start_async_thumb_extraction(thumb_path)
+
+    def _start_async_thumb_extraction(self, thumb_path: str):
+        video_path = self.video_path
+        if not video_path or not os.path.exists(video_path):
+            return
+
+        def _extract():
+            try:
+                import numpy as np
+                from app.media_decode import iter_video_thumbnails
+                for _pts, rgb in iter_video_thumbnails(video_path, [0.0], width=320):
+                    h, w, _ = rgb.shape
+                    rgb_contig = np.ascontiguousarray(rgb)
+                    qimg = QImage(rgb_contig.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                    self.thumb_ready.emit(qimg)
+                    return
+            except Exception:
+                pass
+            try:
+                res = _extract_thumbnail(video_path, thumb_path)
+                if res and os.path.exists(res):
+                    self.thumb_ready.emit(res)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_extract, name="launcher-card-thumb", daemon=True)
+        t.start()
+
+    def _on_thumb_ready(self, item):
+        if isinstance(item, QImage):
+            self._orig_pixmap = QPixmap.fromImage(item)
+        elif isinstance(item, str) and os.path.exists(item):
+            self._orig_pixmap = QPixmap(item)
+        self._update_thumb()
 
     def _update_thumb(self):
         if self._orig_pixmap is None or self._orig_pixmap.isNull():
@@ -291,25 +329,16 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str, progress_cb=
         # Try native in-process thumbnail and waveform generation
         native_done = False
         try:
-            from app.media_decode import build_waveform as native_build_waveform, iter_video_thumbnails
-            from PySide6.QtGui import QImage
+            from app.media_decode import build_waveform as native_build_waveform
 
             native_wf, native_dur = native_build_waveform(source)
-            native_thumbs = []
-            for idx, (pts, rgb) in enumerate(iter_video_thumbnails(source, timestamps, width=180)):
-                output_path = os.path.join(thumb_dir, f"launcher_{digest}_v4_{idx:03d}.jpg")
-                if not os.path.exists(output_path):
-                    h, w, _ = rgb.shape
-                    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
-                    qimg.save(output_path, "JPG", 75)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    native_thumbs.append([float(pts), output_path])
-
-            if native_thumbs:
-                waveform = native_wf
-                duration_s = max(duration_s, native_dur)
-                thumbnails = native_thumbs
-                native_done = True
+            waveform = native_wf
+            duration_s = max(duration_s, native_dur)
+            # In native mode, thumbnails are generated in RAM on-demand by TimelineThumbnailWorker.
+            # We preserve existing old JPG cache if available, but never generate new JPGs on disk.
+            existing_thumbs = existing.get("thumbnails", []) if "existing" in locals() and isinstance(existing, dict) else []
+            thumbnails = [t for t in existing_thumbs if os.path.exists(t[1])] if existing_thumbs else []
+            native_done = True
         except Exception as ex:
             print(f"[Launcher] Native visual prep error, falling back to FFmpeg: {ex}")
             native_done = False
@@ -850,29 +879,14 @@ class LauncherWindow(QDialog):
 
         self._set_selected_device(self.selected_device)
         self._save_device_env()
-        self.show_loading(self.selected_video)
-
-        from runtime_paths import workspace_root
-        temp_root = os.path.join(workspace_root(), "temp")
-
-        self._cache_worker = VisualCacheWorker(self.selected_video, temp_root, self)
-        self._cache_worker.progress.connect(self.update_loading_progress)
-
-        self._prep_timeout_timer = QTimer(self)
-        self._prep_timeout_timer.setSingleShot(True)
-        self._prep_timeout_timer.timeout.connect(self._on_prep_timeout)
-        self._prep_timeout_timer.start(15000)
-
-        self._cache_worker.finished_prep.connect(self._on_visual_cache_done)
-        self._cache_worker.start()
+        self._finish_accept()
 
     def _on_visual_cache_done(self):
         if hasattr(self, "_prep_timeout_timer"):
             self._prep_timeout_timer.stop()
-        QTimer.singleShot(150, self._finish_accept)
+        self._finish_accept()
 
     def _on_prep_timeout(self):
-        print("[Launcher] Visual cache preparation timed out; continuing to editor.")
         self._finish_accept()
 
     def _finish_accept(self):

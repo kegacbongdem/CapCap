@@ -1127,6 +1127,30 @@ class TestTask4NativeAudioProcessing(unittest.TestCase):
         part_files = [f for f in os.listdir(self.temp_dir) if ".part" in f]
         self.assertEqual(part_files, [])
 
+    def test_change_pcm_speed_fallback_pitch_preserved(self):
+        """Ensure change_pcm_speed fallback to FFmpeg pipe preserves pitch (440 Hz at 2.0x)."""
+        from app.audio_mixer import change_pcm_speed
+
+        sr = 16000
+        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
+        pcm = np.sin(2 * np.pi * 440.0 * t).astype(np.float32)
+
+        # Force PyAV filter graph to fail to trigger FFmpeg pipe fallback
+        with patch("av.filter.Graph", side_effect=RuntimeError("PyAV graph unavailable")):
+            out = change_pcm_speed(pcm, sample_rate=sr, speed_ratio=2.0)
+
+        # Output should be roughly half the length
+        self.assertAlmostEqual(len(out), len(pcm) // 2, delta=200)
+
+        # Detect dominant frequency using FFT
+        fft = np.abs(np.fft.rfft(out))
+        freqs = np.fft.rfftfreq(len(out), d=1.0 / sr)
+        dom_freq = freqs[np.argmax(fft)]
+
+        # Must be close to 440 Hz (NOT pitch shifted to 880 Hz)
+        self.assertAlmostEqual(dom_freq, 440.0, delta=5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

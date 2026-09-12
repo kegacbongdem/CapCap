@@ -415,3 +415,12 @@ class AudioReader:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+
+def convert_audio_to_wav_16k_mono(
+    source: Union[str, bytes, bytearray, io.BytesIO, os.PathLike],
+    wav_path: str,
+) -> str:
+    """Convert audio source (file path, bytes, or BytesIO) to 16kHz mono WAV atomically."""
+    from app.tts_processor import convert_audio_data_to_wav_16k_mono
+    return convert_audio_data_to_wav_16k_mono(source, wav_path)

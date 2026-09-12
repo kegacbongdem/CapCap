@@ -950,5 +950,183 @@ class TestPreviewAudioEngine(unittest.TestCase):
                     os.remove(p)
 
 
+class TestTask4NativeAudioProcessing(unittest.TestCase):
+    """Unit tests for Task 4: In-memory TTS conversion, native speed, fit, and silence trimming."""
+
+    def setUp(self):
+        import tempfile
+        self.temp_dir = tempfile.mkdtemp(prefix="test_task4_audio_")
+
+    def tearDown(self):
+        import shutil
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_change_pcm_speed_ratios(self):
+        """Ensure change_pcm_speed correctly alters tempo with PyAV in-process across speed ratios."""
+        from app.audio_mixer import change_pcm_speed
+
+        sr = 16000
+        # 1.0 second 440Hz sine wave
+        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
+        pcm = 0.5 * np.sin(2 * np.pi * 440 * t)
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            for speed in [0.5, 0.75, 1.25, 2.0, 3.0]:
+                out = change_pcm_speed(pcm, sample_rate=sr, speed_ratio=speed)
+                self.assertEqual(out.dtype, np.float32)
+                self.assertTrue(np.all(np.isfinite(out)))
+                expected_len = int(len(pcm) / speed)
+                # Allow tolerance for atempo filter buffer flush / grain alignment
+                self.assertAlmostEqual(len(out), expected_len, delta=int(0.1 * sr))
+
+    def test_change_wav_speed_native_no_subprocess(self):
+        """Ensure change_wav_speed adjusts WAV speed atomically without subprocess."""
+        from app.audio_mixer import change_wav_speed
+
+        sr = 16000
+        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
+        pcm = 0.5 * np.sin(2 * np.pi * 440 * t)
+        in_path = os.path.join(self.temp_dir, "input_tone.wav")
+        out_path = os.path.join(self.temp_dir, "output_speed.wav")
+        sf.write(in_path, pcm, sr, format="WAV", subtype="PCM_16")
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            res = change_wav_speed(input_wav_path=in_path, output_wav_path=out_path, speed_ratio=1.25)
+
+        self.assertEqual(res, out_path)
+        self.assertTrue(os.path.exists(out_path))
+        data, out_sr = sf.read(out_path)
+        self.assertEqual(out_sr, 16000)
+        expected_len = int(len(pcm) / 1.25)
+        self.assertAlmostEqual(len(data), expected_len, delta=int(0.1 * sr))
+
+    def test_fit_wav_to_duration_modes(self):
+        """Ensure fit_wav_to_duration handles timeline, smart, and force modes without subprocess."""
+        from app.audio_mixer import fit_wav_to_duration
+
+        sr = 16000
+        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
+        pcm = 0.5 * np.sin(2 * np.pi * 440 * t)
+        in_path = os.path.join(self.temp_dir, "input_fit.wav")
+        sf.write(in_path, pcm, sr, format="WAV", subtype="PCM_16")
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            # 1. Timeline mode: cut to target duration
+            out_timeline = os.path.join(self.temp_dir, "out_timeline.wav")
+            fit_wav_to_duration(
+                input_wav_path=in_path,
+                output_wav_path=out_timeline,
+                target_duration_seconds=0.5,
+                mode="timeline",
+            )
+            data, _ = sf.read(out_timeline)
+            self.assertAlmostEqual(len(data), int(0.5 * sr), delta=10)
+
+            # 2. Smart mode: audio is longer than target (1.0s vs 0.8s) -> stretch/speed up
+            out_smart = os.path.join(self.temp_dir, "out_smart.wav")
+            fit_wav_to_duration(
+                input_wav_path=in_path,
+                output_wav_path=out_smart,
+                target_duration_seconds=0.8,
+                mode="smart",
+            )
+            data, _ = sf.read(out_smart)
+            self.assertAlmostEqual(len(data), int(0.8 * sr), delta=int(0.08 * sr))
+
+            # 3. Smart mode: ratio < smart_min_ratio (0.77) -> returns original
+            res = fit_wav_to_duration(
+                input_wav_path=in_path,
+                output_wav_path=os.path.join(self.temp_dir, "out_smart_min.wav"),
+                target_duration_seconds=0.4,
+                mode="smart",
+            )
+            self.assertEqual(res, in_path)
+
+            # 4. Force mode: speed up to fit
+            out_force = os.path.join(self.temp_dir, "out_force.wav")
+            fit_wav_to_duration(
+                input_wav_path=in_path,
+                output_wav_path=out_force,
+                target_duration_seconds=0.8,
+                mode="force",
+            )
+            data, _ = sf.read(out_force)
+            self.assertAlmostEqual(len(data), int(0.8 * sr), delta=int(0.08 * sr))
+
+    def test_trim_trailing_silence_native(self):
+        """Ensure trim_trailing_silence detects trailing silence and trims without subprocess."""
+        from app.audio_mixer import trim_trailing_silence
+
+        sr = 16000
+        # 0.5s audio + 1.0s silence = 1.5s
+        t = np.linspace(0, 0.5, int(0.5 * sr), endpoint=False, dtype=np.float32)
+        tone = 0.5 * np.sin(2 * np.pi * 440 * t)
+        silence = np.zeros(int(1.0 * sr), dtype=np.float32)
+        audio = np.concatenate([tone, silence])
+
+        in_path = os.path.join(self.temp_dir, "with_silence.wav")
+        out_path = os.path.join(self.temp_dir, "trimmed.wav")
+        sf.write(in_path, audio, sr, format="WAV", subtype="PCM_16")
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            res = trim_trailing_silence(
+                input_wav_path=in_path,
+                output_wav_path=out_path,
+                silence_threshold=-40.0,
+                min_silence_duration=0.5,
+            )
+
+        self.assertEqual(res, out_path)
+        self.assertTrue(os.path.exists(out_path))
+        data, _ = sf.read(out_path)
+        # Expected: 0.5s tone + ~0.1s padding = ~0.6s
+        self.assertAlmostEqual(len(data), int(0.6 * sr), delta=int(0.05 * sr))
+
+        # Test audio without trailing silence: constant tone returns in_path
+        in_tone_path = os.path.join(self.temp_dir, "no_silence.wav")
+        sf.write(in_tone_path, tone, sr, format="WAV", subtype="PCM_16")
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            res_no_silence = trim_trailing_silence(
+                input_wav_path=in_tone_path,
+                output_wav_path=os.path.join(self.temp_dir, "should_not_trim.wav"),
+                silence_threshold=-40.0,
+                min_silence_duration=0.5,
+            )
+        self.assertEqual(res_no_silence, in_tone_path)
+
+    def test_convert_audio_to_wav_16k_mono_media_decode(self):
+        """Ensure convert_audio_to_wav_16k_mono in app.media_decode converts sources atomically."""
+        from app.media_decode import convert_audio_to_wav_16k_mono
+
+        sr = 16000
+        t = np.linspace(0, 0.5, int(0.5 * sr), endpoint=False, dtype=np.float32)
+        pcm = 0.4 * np.sin(2 * np.pi * 440 * t)
+
+        bio = io.BytesIO()
+        sf.write(bio, pcm, sr, format="WAV", subtype="PCM_16")
+        wav_bytes = bio.getvalue()
+
+        out_path = os.path.join(self.temp_dir, "converted_mono.wav")
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            res = convert_audio_to_wav_16k_mono(wav_bytes, out_path)
+
+        self.assertEqual(res, out_path)
+        self.assertTrue(os.path.exists(out_path))
+        data, out_sr = sf.read(out_path)
+        self.assertEqual(out_sr, 16000)
+        self.assertEqual(data.ndim, 1)
+        self.assertEqual(len(data), len(pcm))
+        # Ensure no .part files remain in directory
+        part_files = [f for f in os.listdir(self.temp_dir) if ".part" in f]
+        self.assertEqual(part_files, [])
+
+
 if __name__ == "__main__":
     unittest.main()

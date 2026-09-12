@@ -332,8 +332,20 @@ def _convert_mp3_to_wav_16k_mono(source: Any, wav_path: str) -> str:
             container.close()
             if parts:
                 out_pcm = np.concatenate(parts)
-                sf.write(wav_path, out_pcm, 16000, subtype="PCM_16")
-                return wav_path
+                part_path = f"{wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
+                try:
+                    sf.write(part_path, out_pcm, 16000, format="WAV", subtype="PCM_16")
+                    info = sf.info(part_path)
+                    if info.frames <= 0:
+                        raise RuntimeError(f"Generated WAV file is invalid: {part_path}")
+                    os.replace(part_path, wav_path)
+                    return wav_path
+                finally:
+                    if os.path.exists(part_path):
+                        try:
+                            os.remove(part_path)
+                        except OSError:
+                            pass
     except (ImportError, ModuleNotFoundError):
         pass
     except (av.FFmpegError, av.error.InvalidDataError):
@@ -351,6 +363,7 @@ def _convert_mp3_to_wav_16k_mono(source: Any, wav_path: str) -> str:
     ) if is_bytes else None
     input_arg = "pipe:0" if is_bytes else str(source)
 
+    part_path = f"{wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
     cmd = [
         ffmpeg,
         "-y",
@@ -360,18 +373,26 @@ def _convert_mp3_to_wav_16k_mono(source: Any, wav_path: str) -> str:
         "-ac", "1",
         "-ar", "16000",
         "-c:a", "pcm_s16le",
-        wav_path,
+        part_path,
     ]
-    proc = subprocess.run(
-        cmd,
-        input=raw_input_bytes,
-        capture_output=True,
-        **subprocess_hidden_kwargs(),
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
-        raise RuntimeError(f"FFmpeg conversion failed:\n{err}")
-    return wav_path
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=raw_input_bytes,
+            capture_output=True,
+            **subprocess_hidden_kwargs(),
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+            raise RuntimeError(f"FFmpeg conversion failed:\n{err}")
+        os.replace(part_path, wav_path)
+        return wav_path
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
 
 
 def synthesize_capcut_tts_batch(

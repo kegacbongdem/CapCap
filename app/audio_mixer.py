@@ -1,11 +1,12 @@
 import os
 import subprocess
+import uuid
 import wave
 
 import numpy as np
 import soundfile as sf
 
-from runtime_paths import bin_path, subprocess_text_kwargs
+from runtime_paths import bin_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 
 
 def _ffmpeg_path():
@@ -27,10 +28,124 @@ def _subprocess_run_kwargs() -> dict:
 
 
 def _probe_wav_duration_seconds(wav_path: str) -> float:
-    with wave.open(wav_path, "rb") as wav_file:
-        frame_rate = wav_file.getframerate() or 16000
-        frame_count = wav_file.getnframes()
-    return max(0.0, float(frame_count) / float(frame_rate))
+    if not wav_path or not os.path.exists(wav_path):
+        return 0.0
+    try:
+        info = sf.info(wav_path)
+        return max(0.0, float(info.duration))
+    except Exception:
+        pass
+    try:
+        with wave.open(wav_path, "rb") as wav_file:
+            frame_rate = wav_file.getframerate() or 16000
+            frame_count = wav_file.getnframes()
+        return max(0.0, float(frame_count) / float(frame_rate))
+    except Exception:
+        return 0.0
+
+
+def _atomic_write_wav(output_wav_path: str, data: np.ndarray, sample_rate: int = 16000) -> str:
+    os.makedirs(os.path.dirname(os.path.abspath(output_wav_path)) or ".", exist_ok=True)
+    part_path = f"{output_wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
+    try:
+        sf.write(part_path, data, sample_rate, format="WAV", subtype="PCM_16")
+        info = sf.info(part_path)
+        if info.frames < 0:
+            raise RuntimeError(f"Generated WAV file is invalid: {part_path}")
+        os.replace(part_path, output_wav_path)
+        return output_wav_path
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+
+
+def change_pcm_speed(
+    pcm: np.ndarray,
+    sample_rate: int = 16000,
+    speed_ratio: float = 1.0,
+) -> np.ndarray:
+    """Change playback speed of 1D float32 mono PCM audio using PyAV atempo filter graph.
+    Preserves pitch and flushes graph completely.
+    """
+    ratio = max(0.01, float(speed_ratio))
+    if abs(ratio - 1.0) < 0.001 or len(pcm) == 0:
+        return pcm.copy()
+
+    try:
+        import av
+        from fractions import Fraction
+
+        # Build chained atempo filter ratios (each must be 0.5 <= r <= 2.0)
+        r = ratio
+        sub_ratios = []
+        while r < 0.5 or r > 2.0:
+            if r < 0.5:
+                sub_ratios.append(0.5)
+                r /= 0.5
+            else:
+                sub_ratios.append(2.0)
+                r /= 2.0
+        sub_ratios.append(r)
+
+        graph = av.filter.Graph()
+        source = graph.add_abuffer(
+            sample_rate=sample_rate,
+            format="flt",
+            layout="mono",
+            time_base=Fraction(1, sample_rate),
+        )
+        prev_node = source
+        for sub_r in sub_ratios:
+            tempo_node = graph.add("atempo", f"{sub_r:.6f}")
+            prev_node.link_to(tempo_node)
+            prev_node = tempo_node
+        sink = graph.add("abuffersink")
+        prev_node.link_to(sink)
+        graph.configure()
+
+        out_parts = []
+        chunk_size = 2048
+        pts = 0
+        mono_pcm = pcm.astype(np.float32)
+        for i in range(0, len(mono_pcm), chunk_size):
+            chunk = mono_pcm[i : i + chunk_size]
+            frame = av.AudioFrame(format="flt", layout="mono", samples=len(chunk))
+            frame.sample_rate = sample_rate
+            frame.pts = pts
+            pts += len(chunk)
+            frame.planes[0].update(chunk.tobytes())
+            source.push(frame)
+            while True:
+                try:
+                    of = sink.pull()
+                    out_parts.append(of.to_ndarray().flatten().astype(np.float32))
+                except (av.FFmpegError, EOFError, StopIteration):
+                    break
+
+        source.push(None)
+        while True:
+            try:
+                of = sink.pull()
+                out_parts.append(of.to_ndarray().flatten().astype(np.float32))
+            except (av.FFmpegError, EOFError, StopIteration):
+                break
+
+        if out_parts:
+            return np.concatenate(out_parts)
+        return np.empty(0, dtype=np.float32)
+    except Exception:
+        pass
+
+    # Emergency fallback: resample
+    try:
+        import scipy.signal
+        out_len = int(round(len(pcm) / ratio))
+        return scipy.signal.resample(pcm, out_len).astype(np.float32)
+    except Exception:
+        return pcm.copy()
 
 
 def ffprobe_wav_duration(wav_path: str) -> float:
@@ -99,33 +214,66 @@ def fit_wav_to_duration(
         return input_wav_path
 
     fit_ratio = target_duration / source_duration
+
+    # In-process native execution via SoundFile + change_pcm_speed
+    try:
+        data, sr = sf.read(input_wav_path, dtype="float32")
+        mono = np.mean(data, axis=1) if data.ndim == 2 else data
+
+        if mode_key == "timeline":
+            if abs(fit_ratio - 1.0) < 0.02:
+                return input_wav_path
+            target_samples = max(1, int(round(target_duration * sr)))
+            out_pcm = mono[:target_samples]
+            return _atomic_write_wav(output_wav_path, out_pcm, sample_rate=sr)
+
+        elif mode_key == "smart":
+            if abs(fit_ratio - 1.0) < 0.02:
+                return input_wav_path
+            if fit_ratio < 1.0:
+                if fit_ratio < smart_min_ratio:
+                    return input_wav_path
+                atempo_ratio = 1.0 / fit_ratio
+                out_pcm = change_pcm_speed(mono, sample_rate=sr, speed_ratio=atempo_ratio)
+                return _atomic_write_wav(output_wav_path, out_pcm, sample_rate=sr)
+            else:
+                target_samples = max(1, int(round(target_duration * sr)))
+                out_pcm = mono[:target_samples]
+                return _atomic_write_wav(output_wav_path, out_pcm, sample_rate=sr)
+
+        else:
+            # force mode
+            if abs(fit_ratio - 1.0) < 0.02:
+                return input_wav_path
+            if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
+                return input_wav_path
+            atempo_ratio = 1.0 / fit_ratio
+            out_pcm = change_pcm_speed(mono, sample_rate=sr, speed_ratio=atempo_ratio)
+            return _atomic_write_wav(output_wav_path, out_pcm, sample_rate=sr)
+    except Exception:
+        pass
+
+    # Fallback to FFmpeg CLI
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    part_path = f"{output_wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
 
     if mode_key == "timeline":
-        # Timeline Priority: always cut the audio to the segment
-        # window. The end of the speech may be skipped if it exceeds
-        # the segment duration — playback continues with the next
-        # segment immediately after. No atempo, no early return.
         if abs(fit_ratio - 1.0) < 0.02:
             return input_wav_path
         cmd = [
             ffmpeg, "-y", "-i", input_wav_path,
             "-t", str(target_duration),
             "-ar", "16000", "-ac", "1",
-            output_wav_path,
+            part_path,
         ]
     elif mode_key == "smart":
-        # Smart mode: when the audio is too long, TRIM (cut) it to
-        # match the target duration instead of speeding it up. When it's
-        # too short, stretch (atempo) up to the safe range.
         if abs(fit_ratio - 1.0) < 0.02:
             return input_wav_path
         if fit_ratio < 1.0:
-            # Audio shorter than target — stretch to fit.
             if fit_ratio < smart_min_ratio:
                 return input_wav_path
             atempo_ratio = 1.0 / fit_ratio
@@ -134,20 +282,16 @@ def fit_wav_to_duration(
                 ffmpeg, "-y", "-i", input_wav_path,
                 "-filter:a", filter_chain,
                 "-ar", "16000", "-ac", "1",
-                output_wav_path,
+                part_path,
             ]
         else:
-            # Audio longer than target — TRIM (cut) to fit, no speed
-            # change. Use ffmpeg's `-t` flag to set the output duration.
             cmd = [
                 ffmpeg, "-y", "-i", input_wav_path,
                 "-t", str(target_duration),
                 "-ar", "16000", "-ac", "1",
-                output_wav_path,
+                part_path,
             ]
     else:
-        # Force mode: use atempo to speed up the audio so it fits the
-        # target duration. This is the legacy behaviour.
         if abs(fit_ratio - 1.0) < 0.02:
             return input_wav_path
         if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
@@ -157,13 +301,21 @@ def fit_wav_to_duration(
             ffmpeg, "-y", "-i", input_wav_path,
             "-filter:a", filter_chain,
             "-ar", "16000", "-ac", "1",
-            output_wav_path,
+            part_path,
         ]
 
-    proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg fit failed:\n{proc.stderr or proc.stdout}")
-    return output_wav_path
+    try:
+        proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
+        if proc.returncode != 0:
+            raise RuntimeError(f"FFmpeg fit failed:\n{proc.stderr or proc.stdout}")
+        os.replace(part_path, output_wav_path)
+        return output_wav_path
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
 
 
 def change_wav_speed(
@@ -179,29 +331,44 @@ def change_wav_speed(
     if abs(ratio - 1.0) < 0.02:
         return input_wav_path
 
+    # Try in-process PyAV atempo first
+    try:
+        data, sr = sf.read(input_wav_path, dtype="float32")
+        mono = np.mean(data, axis=1) if data.ndim == 2 else data
+        speed_data = change_pcm_speed(mono, sample_rate=sr, speed_ratio=ratio)
+        return _atomic_write_wav(output_wav_path, speed_data, sample_rate=sr)
+    except Exception:
+        pass
+
+    # Fallback to FFmpeg CLI if PyAV fails
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
     filter_chain = _build_atempo_filter(ratio)
+    part_path = f"{output_wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
     cmd = [
         ffmpeg,
         "-y",
-        "-i",
-        input_wav_path,
-        "-filter:a",
-        filter_chain,
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        output_wav_path,
+        "-i", input_wav_path,
+        "-filter:a", filter_chain,
+        "-ar", "16000",
+        "-ac", "1",
+        part_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg speed adjustment failed:\n{proc.stderr or proc.stdout}")
-    return output_wav_path
+    try:
+        proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
+        if proc.returncode != 0:
+            raise RuntimeError(f"FFmpeg speed adjustment failed:\n{proc.stderr or proc.stdout}")
+        os.replace(part_path, output_wav_path)
+        return output_wav_path
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
 
 
 def trim_trailing_silence(
@@ -211,13 +378,41 @@ def trim_trailing_silence(
     silence_threshold: float = -40.0,
     min_silence_duration: float = 0.5,
 ) -> str:
-    """Remove trailing silence from a wav file using ffmpeg
-    silencedetect. Keeps audio up to the last detected sound, then
-    trims after a short padding. Returns output_wav_path if trimming
-    was applied, or input_wav_path if the file has no trailing silence.
+    """Remove trailing silence from a wav file using in-memory PCM energy detection.
+    Keeps audio up to the last detected sound, plus 100ms padding.
+    Returns output_wav_path if trimming was applied, or input_wav_path if no trailing silence.
     """
     if not os.path.exists(input_wav_path):
         return input_wav_path
+
+    # Try in-process SoundFile / NumPy first
+    try:
+        data, sr = sf.read(input_wav_path, dtype="float32")
+        mono = np.mean(data, axis=1) if data.ndim == 2 else data
+
+        threshold_amp = 10.0 ** (float(silence_threshold) / 20.0)
+        block_size = int(sr * 0.01)  # 10ms block
+        if block_size > 0 and len(mono) >= block_size:
+            num_blocks = len(mono) // block_size
+            blocks = mono[: num_blocks * block_size].reshape(num_blocks, block_size)
+            rms = np.sqrt(np.mean(blocks ** 2, axis=1))
+            active_indices = np.where(rms > threshold_amp)[0]
+
+            if len(active_indices) > 0:
+                last_active_block = active_indices[-1]
+                last_sound_sample = min(len(mono), (last_active_block + 1) * block_size)
+                trailing_silence_duration = (len(mono) - last_sound_sample) / float(sr)
+
+                if trailing_silence_duration >= min_silence_duration:
+                    padding_samples = int(0.1 * sr)
+                    trim_end = min(len(mono), last_sound_sample + padding_samples)
+                    trimmed_pcm = data[:trim_end] if data.ndim == 2 else mono[:trim_end]
+                    return _atomic_write_wav(output_wav_path, trimmed_pcm, sample_rate=sr)
+            return input_wav_path
+    except Exception:
+        pass
+
+    # Fallback to FFmpeg CLI silencedetect
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         return input_wav_path
@@ -253,16 +448,25 @@ def trim_trailing_silence(
 
     padding = 0.1
     trim_to = last_end + padding
+    part_path = f"{output_wav_path}.{uuid.uuid4().hex[:8]}.part.wav"
     cmd = [
         ffmpeg, "-y", "-i", input_wav_path,
         "-t", str(trim_to),
         "-ar", "16000", "-ac", "1",
-        output_wav_path,
+        part_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
-    if proc.returncode != 0:
-        return input_wav_path
-    return output_wav_path
+    try:
+        proc = subprocess.run(cmd, capture_output=True, **subprocess_text_kwargs())
+        if proc.returncode != 0:
+            return input_wav_path
+        os.replace(part_path, output_wav_path)
+        return output_wav_path
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
 
 
 def _require_pydub():

@@ -322,8 +322,8 @@ class TestTimelineVisuals(unittest.TestCase):
             self.assertIsNotNone(card._orig_pixmap)
             self.assertFalse(card._orig_pixmap.isNull())
 
-    def test_launcher_accept_instant_non_blocking(self):
-        """Ensure LauncherWindow.accept() accepts immediately without 15s timeout or blocking UI."""
+    def test_launcher_accept_shows_loading_card_and_finishes(self):
+        """Ensure LauncherWindow.accept() shows loading card immediately and finishes cache prep."""
         import time
         from PySide6.QtWidgets import QApplication
 
@@ -342,12 +342,19 @@ class TestTimelineVisuals(unittest.TestCase):
             accepted = []
             launcher._finish_accept = lambda: accepted.append(True)
 
-            start_t = time.time()
             launcher.accept()
-            elapsed = time.time() - start_t
+
+            # Loading card must be displayed immediately
+            self.assertFalse(launcher.loading_container.isHidden())
+            self.assertFalse(launcher.loading_panel.isHidden())
+
+            # Background cache worker should complete and trigger accept
+            deadline = time.time() + 4.0
+            while time.time() < deadline and not accepted:
+                app.processEvents()
+                time.sleep(0.02)
 
             self.assertEqual(accepted, [True])
-            self.assertLess(elapsed, 0.2)
 
     def test_prepare_timeline_visual_cache_native_zero_jpg_files(self):
         """Ensure _prepare_timeline_visual_cache on native path creates 0 JPG files on disk."""

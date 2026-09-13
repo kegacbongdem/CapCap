@@ -893,14 +893,29 @@ class LauncherWindow(QDialog):
 
         self._set_selected_device(self.selected_device)
         self._save_device_env()
-        self._finish_accept()
+        self.show_loading(self.selected_video)
+
+        from runtime_paths import workspace_root
+        temp_root = os.path.join(workspace_root(), "temp")
+
+        self._cache_worker = VisualCacheWorker(self.selected_video, temp_root, self)
+        self._cache_worker.progress.connect(self.update_loading_progress)
+
+        self._prep_timeout_timer = QTimer(self)
+        self._prep_timeout_timer.setSingleShot(True)
+        self._prep_timeout_timer.timeout.connect(self._on_prep_timeout)
+        self._prep_timeout_timer.start(15000)
+
+        self._cache_worker.finished_prep.connect(self._on_visual_cache_done)
+        self._cache_worker.start()
 
     def _on_visual_cache_done(self):
         if hasattr(self, "_prep_timeout_timer"):
             self._prep_timeout_timer.stop()
-        self._finish_accept()
+        QTimer.singleShot(150, self._finish_accept)
 
     def _on_prep_timeout(self):
+        print("[Launcher] Visual cache preparation timed out; continuing to editor.")
         self._finish_accept()
 
     def _finish_accept(self):

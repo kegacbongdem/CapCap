@@ -751,6 +751,74 @@ class TestPreviewAudioEngine(unittest.TestCase):
         finally:
             worker.close()
 
+    def test_audio_worker_audible_position_reflects_buffer_drain(self):
+        """Ensure _timeline_pos_ms computes audible position accounting for buffered data."""
+        from unittest.mock import MagicMock
+        from ui.utils.preview_audio import _PreviewAudioWorker
+        from PySide6.QtMultimedia import QAudioSink
+
+        worker = _PreviewAudioWorker(sample_rate=48000, block_size=480)
+        try:
+            worker._sink_sr = 48000
+            worker._sink_channels = 2
+            worker._sink_is_float = True
+            worker._is_playing = True
+            worker._playback_rate = 1.0
+
+            mock_sink = MagicMock(spec=QAudioSink)
+            mock_sink.bufferSize.return_value = 96000  # 250 ms at 48kHz stereo float32
+            mock_sink.bytesFree.return_value = 57600  # 38400 bytes buffered = 100 ms
+
+            worker._sink = mock_sink
+            # Set write cursor to 1000 ms
+            worker._timeline_pos_exact_ms = 1000.0
+
+            # Audible position should be 1000 ms - 100 ms buffered = 900 ms
+            self.assertEqual(worker._timeline_pos_ms, 900)
+
+            # When paused, _timeline_pos_ms returns exact position
+            worker._is_playing = False
+            self.assertEqual(worker._timeline_pos_ms, 1000)
+        finally:
+            worker.close()
+
+    def test_sync_audio_to_video_tolerance_threshold(self):
+        """Ensure media_backend desync tolerance avoids seeking unless desync > 300ms."""
+        from unittest.mock import MagicMock
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "test.mp4"
+        backend._video_frozen = False
+        backend._last_seek_mono = 0.0
+        backend._native_audio_active = True
+        backend._original_loaded_path = ""
+        backend._dubbed_loaded_path = ""
+        backend._video_time_warps = []
+
+        mock_player = MagicMock()
+        mock_player.time_pos = 10.0  # 10,000 ms
+        mock_player.pause = False
+        backend._player = mock_player
+
+        mock_engine = MagicMock()
+        backend._native_audio_engine = mock_engine
+
+        # Case 1: Audio is at 9850 ms (150 ms desync) -> should NOT seek
+        mock_engine.timeline_position_ms.return_value = 9850
+        backend._sync_audio_to_video()
+        mock_engine.seek.assert_not_called()
+
+        # Case 2: Audio is at 9750 ms (250 ms desync) -> should NOT seek
+        mock_engine.timeline_position_ms.return_value = 9750
+        backend._sync_audio_to_video()
+        mock_engine.seek.assert_not_called()
+
+        # Case 3: Audio is at 9600 ms (400 ms desync) -> SHOULD seek
+        mock_engine.timeline_position_ms.return_value = 9600
+        backend._sync_audio_to_video()
+        mock_engine.seek.assert_called_once_with(10000)
+
     def test_pyav_audio_reader_seek_past_eof_and_gap(self):
         """Ensure AudioReader seeking past EOF or over gaps does not raise EOFError or TypeError."""
         import av

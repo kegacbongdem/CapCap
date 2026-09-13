@@ -1557,7 +1557,7 @@ class MpvMediaPlayerBackend(QObject):
             else:
                 expected_a_pos_ms = v_pos_ms
 
-            if abs(expected_a_pos_ms - a_pos) > 100:
+            if abs(expected_a_pos_ms - a_pos) > 300:
                 self._native_audio_engine.seek(expected_a_pos_ms)
             return
 

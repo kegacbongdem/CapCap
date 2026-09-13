@@ -123,6 +123,19 @@ class _PreviewAudioWorker(QObject):
 
     @property
     def _timeline_pos_ms(self) -> int:
+        if self._is_playing and isinstance(self._sink, QAudioSink):
+            try:
+                buf_size = self._sink.bufferSize()
+                if buf_size > 0:
+                    free_bytes = self._sink.bytesFree()
+                    buffered_bytes = max(0, buf_size - free_bytes) + len(self._pending_write_bytes)
+                    bytes_per_sample = 4 if self._sink_is_float else 2
+                    bytes_per_frame = bytes_per_sample * self._sink_channels
+                    buffered_ms = (buffered_bytes / bytes_per_frame) * 1000.0 / self._sink_sr
+                    audible_ms = self._timeline_pos_exact_ms - (buffered_ms * self._playback_rate)
+                    return max(0, int(round(audible_ms)))
+            except Exception:
+                pass
         return int(round(self._timeline_pos_exact_ms))
 
     @_timeline_pos_ms.setter
@@ -155,10 +168,30 @@ class _PreviewAudioWorker(QObject):
 
             self._output_format = fmt
             self._sink = QAudioSink(device, fmt, self)
-            # Request small ~40ms output buffer for low latency
+            # Use ~200ms output buffer to prevent underruns on Windows while keeping instant pause/seek response
             bytes_per_sample = 4 if self._sink_is_float else 2
-            buffer_target = int(self._sink_sr * self._sink_channels * bytes_per_sample * 0.04)
-            self._sink.setBufferSize(max(buffer_target, 2048))
+            bytes_per_frame = bytes_per_sample * self._sink_channels
+            buffer_target = int(self._sink_sr * bytes_per_frame * 0.20)
+            self._sink.setBufferSize(max(buffer_target, 16384))
+
+            # Match internal processing sample rate to sink native rate to avoid lossy downsampling/upsampling
+            self.internal_sr = self._sink_sr
+            self.block_size = int(round(self._sink_sr * 0.01))  # 10ms block (e.g. 480 at 48k)
+            self.block_duration_ms = int(round(self.block_size * 1000.0 / self.internal_sr))
+
+            # If tracks were configured prior to sink initialization, reopen readers with native sample rate
+            if self._tracks and self._readers:
+                self._pcm_cache.clear()
+                for p, reader in list(self._readers.items()):
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+                self._readers = {
+                    t["path"]: AudioReader(t["path"], sample_rate=self.internal_sr)
+                    for t in self._tracks
+                    if os.path.exists(t["path"])
+                }
 
             self._io_device = self._sink.start()
 
@@ -271,6 +304,7 @@ class _PreviewAudioWorker(QObject):
     def pause(self) -> None:
         """Pause audio playback."""
         if self._is_playing:
+            audible_pos = self._timeline_pos_ms
             self._is_playing = False
             if self._timer and self._timer.isActive():
                 self._timer.stop()
@@ -281,6 +315,9 @@ class _PreviewAudioWorker(QObject):
             self._sink_resampler = None
             if self._sink:
                 self._sink.reset()
+            self._timeline_pos_exact_ms = float(audible_pos)
+            self._media_read_sample = int(round(audible_pos * self.internal_sr / 1000.0))
+            self.positionChanged.emit(audible_pos)
             self.stateChanged.emit(2)
 
     @Slot()
@@ -385,7 +422,7 @@ class _PreviewAudioWorker(QObject):
                 self._pcm_cache.put(cache_key, block)
 
             # Apply smooth 5ms ramp toward target gain
-            ramp_len = min(80, self.block_size)
+            ramp_len = min(max(1, int(round(self.internal_sr * 0.005))), self.block_size)
             cur_g = track["current_gain"]
             target_g = track["target_gain"]
 
@@ -411,12 +448,13 @@ class _PreviewAudioWorker(QObject):
         if not self._is_playing or self._io_device is None or self._sink is None:
             return
 
+        bytes_per_sample = 4 if self._sink_is_float else 2
+        bytes_per_frame = bytes_per_sample * self._sink_channels
+
         # 1. Flush any pending leftover bytes from previous tick first
         if self._pending_write_bytes:
             bytes_written = self._io_device.write(self._pending_write_bytes)
             if bytes_written > 0:
-                bytes_per_sample = 4 if self._sink_is_float else 2
-                bytes_per_frame = bytes_per_sample * self._sink_channels
                 frames_written = bytes_written // bytes_per_frame
                 ms_written = frames_written * 1000.0 / self._sink_sr
                 self._timeline_pos_exact_ms += ms_written * self._playback_rate
@@ -424,117 +462,131 @@ class _PreviewAudioWorker(QObject):
                 self._pending_write_bytes = self._pending_write_bytes[bytes_written:]
             return
 
-        free_bytes = self._sink.bytesFree()
-        bytes_per_sample = 4 if self._sink_is_float else 2
         gcd = math.gcd(self.internal_sr, self._sink_sr)
         up = self._sink_sr // gcd
         down = self.internal_sr // gcd
         out_samples_per_block = int(round(self.block_size * up / down))
-        out_bytes_per_block = out_samples_per_block * self._sink_channels * bytes_per_sample
+        out_bytes_per_block = out_samples_per_block * bytes_per_frame
 
-        if free_bytes < out_bytes_per_block:
-            return
+        is_real_sink = isinstance(self._sink, QAudioSink)
+        target_buffer_bytes = int(self._sink_sr * bytes_per_frame * 0.20) if is_real_sink else 0
+        max_blocks_per_tick = 12 if is_real_sink else 1
 
-        # Keep media read sample aligned to timeline when playing 1.0x
-        if abs(self._playback_rate - 1.0) <= 0.01:
-            self._media_read_sample = int(round(self._timeline_pos_exact_ms * self.internal_sr / 1000.0))
+        blocks_written = 0
+        while blocks_written < max_blocks_per_tick and self._is_playing:
+            free_bytes = self._sink.bytesFree()
+            if free_bytes < out_bytes_per_block:
+                break
 
-        # 2. Generate 16kHz audio block (applying atempo filter if rate != 1.0)
-        if abs(self._playback_rate - 1.0) > 0.01 and av is not None:
-            try:
-                if getattr(self, "_tempo_graph", None) is None:
-                    g = av.filter.Graph()
-                    src = g.add_abuffer(format='flt', sample_rate=self.internal_sr, layout='mono', time_base=f'1/{self.internal_sr}')
-                    tempo = g.add('atempo', f'{self._playback_rate:.4f}')
-                    sink = g.add('abuffersink')
-                    src.link_to(tempo)
-                    tempo.link_to(sink)
-                    g.configure()
-                    self._tempo_graph = (g, src, sink)
-                    self._tempo_in_pts = 0
-                _, t_src, t_sink = self._tempo_graph
+            if is_real_sink and target_buffer_bytes > 0:
+                buf_size = self._sink.bufferSize()
+                buffered_bytes = max(0, buf_size - free_bytes)
+                if buffered_bytes >= target_buffer_bytes:
+                    break
 
-                max_feed_iterations = 20
-                iter_count = 0
-                while len(self._tempo_fifo) < self.block_size and iter_count < max_feed_iterations:
-                    iter_count += 1
-                    chunk = self._read_mixed_block(self._media_read_sample)
-                    self._media_read_sample += len(chunk)
-                    f = av.AudioFrame(format='flt', layout='mono', samples=len(chunk))
-                    f.sample_rate = self.internal_sr
-                    f.pts = self._tempo_in_pts
-                    self._tempo_in_pts += len(chunk)
-                    f.planes[0].update(chunk.astype(np.float32).tobytes())
-                    t_src.push(f)
-                    while True:
-                        try:
-                            of = t_sink.pull()
-                            arr = of.to_ndarray().flatten().astype(np.float32)
-                            self._tempo_fifo = np.concatenate([self._tempo_fifo, arr]) if len(self._tempo_fifo) else arr
-                        except Exception:
-                            break
+            # Keep media read sample aligned to write cursor when playing 1.0x
+            if abs(self._playback_rate - 1.0) <= 0.01:
+                self._media_read_sample = int(round(self._timeline_pos_exact_ms * self.internal_sr / 1000.0))
 
-                if len(self._tempo_fifo) >= self.block_size:
-                    mixed_16k = self._tempo_fifo[:self.block_size]
-                    self._tempo_fifo = self._tempo_fifo[self.block_size:]
-                elif len(self._tempo_fifo) > 0:
-                    pad = np.zeros(self.block_size - len(self._tempo_fifo), dtype=np.float32)
-                    mixed_16k = np.concatenate([self._tempo_fifo, pad])
-                    self._tempo_fifo = np.empty(0, dtype=np.float32)
-                else:
-                    mixed_16k = np.zeros(self.block_size, dtype=np.float32)
-            except Exception:
-                mixed_16k = self._read_mixed_block(self._media_read_sample)
-                self._media_read_sample += len(mixed_16k)
-        else:
-            mixed_16k = self._read_mixed_block(self._media_read_sample)
-            self._media_read_sample += len(mixed_16k)
+            # 2. Generate audio block (applying atempo filter if rate != 1.0)
+            if abs(self._playback_rate - 1.0) > 0.01 and av is not None:
+                try:
+                    if getattr(self, "_tempo_graph", None) is None:
+                        g = av.filter.Graph()
+                        src = g.add_abuffer(format='flt', sample_rate=self.internal_sr, layout='mono', time_base=f'1/{self.internal_sr}')
+                        tempo = g.add('atempo', f'{self._playback_rate:.4f}')
+                        sink = g.add('abuffersink')
+                        src.link_to(tempo)
+                        tempo.link_to(sink)
+                        g.configure()
+                        self._tempo_graph = (g, src, sink)
+                        self._tempo_in_pts = 0
+                    _, t_src, t_sink = self._tempo_graph
 
-        # 3. Resample to output sink sample rate preserving filter continuity across blocks
-        if self._sink_sr == self.internal_sr:
-            out_mono = mixed_16k
-        elif av is not None:
-            if getattr(self, "_sink_resampler", None) is None:
-                self._sink_resampler = av.AudioResampler(format="flt", layout="mono", rate=self._sink_sr)
-            f = av.AudioFrame(format="flt", layout="mono", samples=len(mixed_16k))
-            f.sample_rate = self.internal_sr
-            f.planes[0].update(mixed_16k.astype(np.float32).tobytes())
-            out_frames = self._sink_resampler.resample(f)
-            if out_frames:
-                out_mono = np.concatenate([of.to_ndarray().flatten() for of in out_frames])
+                    max_feed_iterations = 20
+                    iter_count = 0
+                    while len(self._tempo_fifo) < self.block_size and iter_count < max_feed_iterations:
+                        iter_count += 1
+                        chunk = self._read_mixed_block(self._media_read_sample)
+                        self._media_read_sample += len(chunk)
+                        f = av.AudioFrame(format='flt', layout='mono', samples=len(chunk))
+                        f.sample_rate = self.internal_sr
+                        f.pts = self._tempo_in_pts
+                        self._tempo_in_pts += len(chunk)
+                        f.planes[0].update(chunk.astype(np.float32).tobytes())
+                        t_src.push(f)
+                        while True:
+                            try:
+                                of = t_sink.pull()
+                                arr = of.to_ndarray().flatten().astype(np.float32)
+                                self._tempo_fifo = np.concatenate([self._tempo_fifo, arr]) if len(self._tempo_fifo) else arr
+                            except Exception:
+                                break
+
+                    if len(self._tempo_fifo) >= self.block_size:
+                        mixed_pcm = self._tempo_fifo[:self.block_size]
+                        self._tempo_fifo = self._tempo_fifo[self.block_size:]
+                    elif len(self._tempo_fifo) > 0:
+                        pad = np.zeros(self.block_size - len(self._tempo_fifo), dtype=np.float32)
+                        mixed_pcm = np.concatenate([self._tempo_fifo, pad])
+                        self._tempo_fifo = np.empty(0, dtype=np.float32)
+                    else:
+                        mixed_pcm = np.zeros(self.block_size, dtype=np.float32)
+                except Exception:
+                    mixed_pcm = self._read_mixed_block(self._media_read_sample)
+                    self._media_read_sample += len(mixed_pcm)
             else:
-                out_mono = np.empty(0, dtype=np.float32)
-        else:
-            out_mono = scipy.signal.resample_poly(mixed_16k, up, down).astype(np.float32)
+                mixed_pcm = self._read_mixed_block(self._media_read_sample)
+                self._media_read_sample += len(mixed_pcm)
 
-        if len(out_mono) == 0:
-            return
+            # 3. Resample to output sink sample rate preserving filter continuity across blocks
+            if self._sink_sr == self.internal_sr:
+                out_mono = mixed_pcm
+            elif av is not None:
+                if getattr(self, "_sink_resampler", None) is None:
+                    self._sink_resampler = av.AudioResampler(format="flt", layout="mono", rate=self._sink_sr)
+                f = av.AudioFrame(format="flt", layout="mono", samples=len(mixed_pcm))
+                f.sample_rate = self.internal_sr
+                f.planes[0].update(mixed_pcm.astype(np.float32).tobytes())
+                out_frames = self._sink_resampler.resample(f)
+                if out_frames:
+                    out_mono = np.concatenate([of.to_ndarray().flatten() for of in out_frames])
+                else:
+                    out_mono = np.empty(0, dtype=np.float32)
+            else:
+                out_mono = scipy.signal.resample_poly(mixed_pcm, up, down).astype(np.float32)
 
-        # 4. Expand channels (mono -> stereo / multi-channel surround if needed)
-        if self._sink_channels > 1:
-            out_audio = np.tile(out_mono[:, None], (1, self._sink_channels))
-        else:
-            out_audio = out_mono
+            if len(out_mono) == 0:
+                break
 
-        # 5. Convert to target format bytes
-        if self._sink_is_float:
-            data_bytes = out_audio.astype(np.float32).tobytes()
-        else:
-            data_bytes = (out_audio * 32767.0).clip(-32768.0, 32767.0).astype(np.int16).tobytes()
+            # 4. Expand channels (mono -> stereo / multi-channel surround if needed)
+            if self._sink_channels > 1:
+                out_audio = np.tile(out_mono[:, None], (1, self._sink_channels))
+            else:
+                out_audio = out_mono
 
-        # 6. Push to sink and advance clock only by actual written bytes
-        bytes_written = self._io_device.write(data_bytes)
-        if bytes_written > 0:
-            bytes_per_sample = 4 if self._sink_is_float else 2
-            bytes_per_frame = bytes_per_sample * self._sink_channels
-            frames_written = bytes_written // bytes_per_frame
-            ms_written = frames_written * 1000.0 / self._sink_sr
-            self._timeline_pos_exact_ms += ms_written * self._playback_rate
-            self.positionChanged.emit(self._timeline_pos_ms)
-            if bytes_written < len(data_bytes):
-                self._pending_write_bytes = data_bytes[bytes_written:]
-        else:
-            self._pending_write_bytes = data_bytes
+            # 5. Convert to target format bytes
+            if self._sink_is_float:
+                data_bytes = out_audio.astype(np.float32).tobytes()
+            else:
+                data_bytes = (out_audio * 32767.0).clip(-32768.0, 32767.0).astype(np.int16).tobytes()
+
+            # 6. Push to sink and advance clock only by actual written bytes
+            bytes_written = self._io_device.write(data_bytes)
+            if bytes_written > 0:
+                frames_written = bytes_written // bytes_per_frame
+                ms_written = frames_written * 1000.0 / self._sink_sr
+                self._timeline_pos_exact_ms += ms_written * self._playback_rate
+                if bytes_written < len(data_bytes):
+                    self._pending_write_bytes = data_bytes[bytes_written:]
+                    break
+            else:
+                self._pending_write_bytes = data_bytes
+                break
+
+            blocks_written += 1
+
+        self.positionChanged.emit(self._timeline_pos_ms)
 
     @Slot()
     def close(self) -> None:

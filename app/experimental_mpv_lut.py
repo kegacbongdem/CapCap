@@ -134,11 +134,54 @@ class CubeLutCache:
 class MpvGpuLutPrototype:
     """Apply GPU color parameters and native LUT blending through MPV gpu-next.
 
-    When ``use_gpu_shaders`` is False (default for stability until visual parity is verified),
-    LUT blend uses the legacy blended .cube path.
-    When ``use_gpu_shaders`` is True (opt-in via CAPCAP_GPU_COLOR_SHADERS=1 or parameter),
-    the 3D LUT is loaded once and blend strength is controlled via GPU shader parameters.
+    When ``use_gpu_shaders`` is False (default for stability):
+    LUT blend uses the legacy blended .cube path, and color adjustments use reference
+    lavfi filters, guaranteeing exact parity with export.
+
+    When ``use_gpu_shaders`` is True (opt-in experimental prototype):
+    Capability Assessment:
+    - Bundled libmpv-2.dll (mpv v0.41.0 / libplacebo v7.362): libplacebo's custom shader
+      parser (custom_mpv.c) rejects //!PARAM directives. In-memory dynamic parameters
+      without disk I/O and SPIR-V recompilation are NOT supported by the DLL.
+    - Versioned shader text synchronization (_sync_gpu_shader) demonstrates pixel rendering
+      on paused frames, but writes versioned .glsl files to disk and triggers recompilation.
+    - Strict visual parity (MAE <= 2/255, p99 <= 6/255):
+      * Tone curves (shadows/highlights) and LUT blending meet the strict threshold.
+      * Composite color adjustments (hue, saturation, temp) exceed the strict threshold
+        due to RGB vs YUV differences and must fall back to the reference pipeline.
     """
+
+    @classmethod
+    def get_capabilities(cls) -> Dict[str, Any]:
+        """Return the capability and visual parity matrix for the bundled MPV GPU environment."""
+        return {
+            "dynamic_shader_params": False,  # Bundled libmpv-2.dll lacks //!PARAM / dynamic uniform API
+            "tone_curves_parity": True,       # Meets strict MAE <= 2/255, p99 <= 6/255
+            "lut_blend_parity": True,         # Meets strict MAE <= 2/255, p99 <= 6/255
+            "composite_color_parity": False,  # Exceeds 2/255 threshold on multi-color gradient
+            "recommended_pipeline": "legacy_blended_cube",
+        }
+
+    @classmethod
+    def can_handle_color_state(cls, state: Optional[dict]) -> bool:
+        """Return True if the color state only uses adjustments meeting strict parity (MAE <= 2/255)."""
+        if not isinstance(state, dict):
+            return True
+        source = state.get("final", state) if isinstance(state, dict) else {}
+        if not isinstance(source, dict):
+            return True
+
+        # Non-curve adjustments (hue, saturation, temp, contrast, brightness, gamma)
+        # diverge from FFmpeg's YUV filter graph beyond the 2/255 threshold.
+        discrepant_fields = ("hue", "saturation", "temperature", "contrast", "brightness", "gamma")
+        for field in discrepant_fields:
+            try:
+                val = float(source.get(field, 0.0) or 0.0)
+                if abs(val) > 0.01:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        return True
 
     def __init__(
         self,

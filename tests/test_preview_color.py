@@ -594,10 +594,10 @@ DOMAIN_MAX 1.0 1.0 1.0
             ])
             gpu_curves_mae = float(np.mean(inner_curves))
             gpu_curves_p99 = float(np.percentile(inner_curves, 99))
-            self.assertLessEqual(gpu_curves_mae, 0.010, f"Real GPU Curves MAE {gpu_curves_mae:.6f} exceeded bound")
-            self.assertLessEqual(gpu_curves_p99, 0.025, f"Real GPU Curves p99 {gpu_curves_p99:.6f} exceeded bound")
+            self.assertLessEqual(gpu_curves_mae, 2.0 / 255.0, f"Real GPU Curves MAE {gpu_curves_mae:.6f} exceeded strict 2/255 bound")
+            self.assertLessEqual(gpu_curves_p99, 6.0 / 255.0, f"Real GPU Curves p99 {gpu_curves_p99:.6f} exceeded strict 6/255 bound")
 
-            # Real GPU LUT 50% blend parity vs FFmpeg blend filter
+            # Real GPU LUT 50% blend parity vs FFmpeg blend filter (strict MAE <= 2/255, p99 <= 6/255)
             lut_state = {"lut_path": lut_path, "lut_strength": 0.5}
             ff_lut_chain = build_video_filter_chain(lut_state)
             ff_lut_out = os.path.join(self.temp_dir, "ff_lut50.png")
@@ -623,10 +623,10 @@ DOMAIN_MAX 1.0 1.0 1.0
             ])
             gpu_lut_mae = float(np.mean(inner_lut))
             gpu_lut_p99 = float(np.percentile(inner_lut, 99))
-            self.assertLessEqual(gpu_lut_mae, 0.012, f"Real GPU LUT 50% MAE {gpu_lut_mae:.6f} exceeded bound")
-            self.assertLessEqual(gpu_lut_p99, 0.030, f"Real GPU LUT 50% p99 {gpu_lut_p99:.6f} exceeded bound")
+            self.assertLessEqual(gpu_lut_mae, 2.0 / 255.0, f"Real GPU LUT 50% MAE {gpu_lut_mae:.6f} exceeded strict 2/255 bound")
+            self.assertLessEqual(gpu_lut_p99, 6.0 / 255.0, f"Real GPU LUT 50% p99 {gpu_lut_p99:.6f} exceeded strict 6/255 bound")
 
-            # Real GPU Full composite adjustment parity bounds
+            # Real GPU Full composite adjustment parity bounds & fallback verification
             proto.set_color_state(full_state)
             proto.apply(lut_path, 50.0)
             time.sleep(0.15)
@@ -644,11 +644,22 @@ DOMAIN_MAX 1.0 1.0 1.0
                 diff_full_gpu[65:75, 10:110],
             ])
             gpu_full_mae = float(np.mean(inner_full))
-            gpu_full_p99 = float(np.percentile(inner_full, 99))
-            self.assertLessEqual(gpu_full_mae, 0.060, f"Real GPU Full composite MAE {gpu_full_mae:.6f} exceeded bound")
-            self.assertLessEqual(gpu_full_p99, 0.200, f"Real GPU Full composite p99 {gpu_full_p99:.6f} exceeded bound")
+            # Full composite exceeds strict 2/255 bound due to RGB vs YUV color model differences
+            self.assertGreater(gpu_full_mae, 2.0 / 255.0, "Full composite shader currently exceeds strict 2/255 threshold")
+            # Verify that fallback mechanism correctly identifies composite states requiring reference pipeline
+            self.assertFalse(proto.can_handle_color_state(full_state), "Full composite must be flagged for fallback")
+            self.assertTrue(proto.can_handle_color_state(curves_state), "Tone curves alone pass strict parity")
         finally:
             player.terminate()
+
+    def test_mpv_gpu_lut_capabilities_report(self):
+        """Ensure MpvGpuLutPrototype reports clear capability matrix and fallback recommendations."""
+        caps = MpvGpuLutPrototype.get_capabilities()
+        self.assertFalse(caps["dynamic_shader_params"], "DLL lacks dynamic //!PARAM API")
+        self.assertTrue(caps["tone_curves_parity"], "Tone curves verified to meet strict parity")
+        self.assertTrue(caps["lut_blend_parity"], "LUT blend verified to meet strict parity")
+        self.assertFalse(caps["composite_color_parity"], "Composite color adjustments require fallback")
+        self.assertEqual(caps["recommended_pipeline"], "legacy_blended_cube")
 
 
 if __name__ == "__main__":

@@ -260,6 +260,11 @@ class MpvGpuLutPrototype:
         if not self.use_gpu_shaders:
             # Legacy verified default path
             target = self.cache.blended_path(abs_lut, strength)
+            if self._current_lut_mtime > 0 and self._current_lut_mtime != mtime:
+                try:
+                    self.player.command("set", "lut", "")
+                except Exception:
+                    pass
             self.player.command("set", "lut", target)
             self._current_lut_path = abs_lut
             self._current_lut_mtime = mtime
@@ -268,6 +273,8 @@ class MpvGpuLutPrototype:
         # Opt-in GPU shader path
         if self._current_lut_path != abs_lut or self._current_lut_mtime != mtime:
             try:
+                if self._current_lut_mtime > 0 and self._current_lut_mtime != mtime:
+                    self.player.command("set", "lut", "")
                 self.player.command("set", "lut", abs_lut)
                 self._current_lut_path = abs_lut
                 self._current_lut_mtime = mtime

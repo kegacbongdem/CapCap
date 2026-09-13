@@ -208,7 +208,7 @@ class TestTimelineVisuals(unittest.TestCase):
         )
 
         results = []
-        worker.finished.connect(lambda sig, thumbs, err: results.append((sig, thumbs, err)))
+        worker.completed.connect(lambda sig, thumbs, err: results.append((sig, thumbs, err)))
 
         with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
              patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
@@ -506,12 +506,35 @@ class TestTimelineVisuals(unittest.TestCase):
         worker.requestInterruption()
         # Since interruption was requested, worker.run() must exit promptly with empty thumbnails and "interrupted" error
         results = []
-        worker.finished.connect(lambda sig, t, e: results.append((sig, t, e)))
+        worker.completed.connect(lambda sig, t, e: results.append((sig, t, e)))
         worker.run()
         self.assertEqual(len(results), 1)
         sig, thumbs, err = results[0]
         self.assertEqual(thumbs, [], "Interrupted worker must not decode thumbnails")
         self.assertEqual(err, "interrupted")
+
+    def test_timeline_thumbnail_worker_native_finished_lifecycle(self):
+        """Ensure TimelineThumbnailWorker completed is separate from native QThread.finished."""
+        from ui.worker_adapters.processing_workers import TimelineThumbnailWorker
+
+        video_path = self._create_synthetic_video()
+        worker = TimelineThumbnailWorker("req_cycle", video_path, 1.0, self.temp_dir)
+
+        completed_events = []
+        finished_events = []
+
+        worker.completed.connect(lambda sig, thumbs, err: completed_events.append((sig, len(thumbs), err)))
+        worker.finished.connect(lambda: finished_events.append("finished"))
+
+        # Run worker in real QThread execution
+        worker.start()
+        worker.wait(5000)
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        self.assertEqual(len(completed_events), 1)
+        self.assertEqual(completed_events[0][0], "req_cycle")
+        self.assertEqual(len(finished_events), 1, "Native QThread.finished must be emitted")
 
 
 if __name__ == "__main__":

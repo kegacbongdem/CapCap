@@ -3723,6 +3723,12 @@ class VideoTranslatorGUI(QMainWindow):
             self._timeline_video_thumbnails = []
             self._desired_timeline_thumbnail_request = None
             self.timeline.set_video_thumbnails([])
+            worker = self._timeline_thumbnail_worker
+            if worker is not None and worker.isRunning():
+                try:
+                    worker.requestInterruption()
+                except Exception:
+                    pass
             return
 
         self._desired_timeline_thumbnail_request = request_signature
@@ -3772,14 +3778,25 @@ class VideoTranslatorGUI(QMainWindow):
         video_path = self._normalize_local_file_path(self.video_path_edit.text().strip())
         thumb_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_thumbnails")
         worker = TimelineThumbnailWorker(request_signature, video_path, duration_s, thumb_dir)
-        worker.finished.connect(self._on_timeline_video_thumbnails_ready)
+        worker.setParent(self)
+        worker.completed.connect(self._on_timeline_video_thumbnails_ready)
+        worker.finished.connect(self._on_timeline_thumbnail_worker_finished)
         self._timeline_thumbnail_worker = worker
         worker.start()
 
-    def _on_timeline_video_thumbnails_ready(self, request_signature, thumbnails, error):
+    def _on_timeline_thumbnail_worker_finished(self):
+        worker = getattr(self, "_timeline_thumbnail_worker", None)
         self._timeline_thumbnail_worker = None
-        if request_signature != self._desired_timeline_thumbnail_request:
+        if worker is not None:
+            worker.deleteLater()
+        if (
+            self._desired_timeline_thumbnail_request
+            and self._desired_timeline_thumbnail_request != self._timeline_video_thumb_cache_key
+        ):
             self.refresh_timeline_video_thumbnails()
+
+    def _on_timeline_video_thumbnails_ready(self, request_signature, thumbnails, error):
+        if request_signature != self._desired_timeline_thumbnail_request:
             return
         if error:
             print(f"[Timeline] thumbnail generation failed: {error}")

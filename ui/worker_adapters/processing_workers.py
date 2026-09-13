@@ -599,7 +599,9 @@ class TimelineWaveformWorker(QThread):
 
 
 class TimelineThumbnailWorker(QThread):
-    finished = Signal(object, object, str)
+    # Do not shadow QThread.finished. The native signal is needed to retain
+    # and safely dispose of the worker only after run() has actually exited.
+    completed = Signal(object, object, str)
 
     def __init__(self, request_signature, video_path, duration_s, thumb_dir):
         super().__init__()
@@ -628,17 +630,17 @@ class TimelineThumbnailWorker(QThread):
         emitted = False
         try:
             if self.isInterruptionRequested():
-                self.finished.emit(self.request_signature, [], "interrupted")
+                self.completed.emit(self.request_signature, [], "interrupted")
                 emitted = True
                 return
             max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
             if self.duration_s > max_visual_dur:
-                self.finished.emit(self.request_signature, [], "")
+                self.completed.emit(self.request_signature, [], "")
                 emitted = True
                 return
 
             if not self.video_path or not os.path.exists(self.video_path) or self.duration_s <= 0.0:
-                self.finished.emit(self.request_signature, [], "")
+                self.completed.emit(self.request_signature, [], "")
                 emitted = True
                 return
 
@@ -673,7 +675,7 @@ class TimelineThumbnailWorker(QThread):
                 thumbnails = []
                 for idx, (actual_pts, rgb) in enumerate(iter_video_thumbnails(self.video_path, timestamps, width=180)):
                     if self.isInterruptionRequested():
-                        self.finished.emit(self.request_signature, [], "interrupted")
+                        self.completed.emit(self.request_signature, [], "interrupted")
                         emitted = True
                         return
                     h, w, _ = rgb.shape
@@ -682,11 +684,11 @@ class TimelineThumbnailWorker(QThread):
                     thumbnails.append((float(actual_pts), image))
 
                 if self.isInterruptionRequested():
-                    self.finished.emit(self.request_signature, [], "interrupted")
+                    self.completed.emit(self.request_signature, [], "interrupted")
                     emitted = True
                     return
                 if thumbnails:
-                    self.finished.emit(self.request_signature, thumbnails, "")
+                    self.completed.emit(self.request_signature, thumbnails, "")
                     emitted = True
                     return
             except Exception:
@@ -706,7 +708,8 @@ class TimelineThumbnailWorker(QThread):
                     break
 
             if not ffmpeg_path:
-                self.finished.emit(self.request_signature, [], "")
+                self.completed.emit(self.request_signature, [], "")
+                emitted = True
                 return
 
             startupinfo = None
@@ -750,15 +753,15 @@ class TimelineThumbnailWorker(QThread):
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     thumbnails.append((float(timestamp_s), output_path))
 
-            self.finished.emit(self.request_signature, thumbnails, "")
+            self.completed.emit(self.request_signature, thumbnails, "")
             emitted = True
         except Exception as exc:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
-            self.finished.emit(self.request_signature, [], details or str(exc))
+            self.completed.emit(self.request_signature, [], details or str(exc))
             emitted = True
         finally:
             if not emitted:
-                self.finished.emit(self.request_signature, [], "interrupted" if self.isInterruptionRequested() else "")
+                self.completed.emit(self.request_signature, [], "interrupted" if self.isInterruptionRequested() else "")
 
 
 class PrepareWorkflowWorker(QThread):

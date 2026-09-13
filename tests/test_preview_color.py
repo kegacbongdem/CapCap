@@ -221,24 +221,16 @@ DOMAIN_MAX 1.0 1.0 1.0
         self.assertEqual(opts["capcap_saturation"], "1.1800")
         self.assertEqual(opts["capcap_hue"], "45.000")
 
-    def test_real_mpv_render_playback_with_shader_and_lut(self):
-        """Ensure real bundled libmpv executes playback with preview_color.glsl and 3D LUT."""
-        mpv_dll_dir = os.path.join(PROJECT_ROOT, "bin", "mpv")
-        if not os.path.exists(os.path.join(mpv_dll_dir, "libmpv-2.dll")):
-            self.skipTest("Bundled libmpv-2.dll not found")
-
-        os.environ["PATH"] = mpv_dll_dir + ";" + os.environ.get("PATH", "")
-        import mpv
+    def _create_synthetic_video(self, rgb_val: int = 100, filename: str = "render_test.mp4") -> str:
         import av
         import numpy as np
 
-        # Create a small 5-frame synthetic video
-        video_path = os.path.join(self.temp_dir, "render_test.mp4")
+        video_path = os.path.join(self.temp_dir, filename)
         container = av.open(video_path, mode="w", format="mp4")
         stream = container.add_stream("h264", rate=25)
-        stream.width, stream.height, stream.pix_fmt = 160, 120, "yuv420p"
-        for i in range(5):
-            arr = np.full((120, 160, 3), 120, dtype=np.uint8)
+        stream.width, stream.height, stream.pix_fmt = 64, 64, "yuv420p"
+        for i in range(25):
+            arr = np.full((64, 64, 3), rgb_val, dtype=np.uint8)
             frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
             frame.pts = i
             for pkt in stream.encode(frame):
@@ -246,26 +238,151 @@ DOMAIN_MAX 1.0 1.0 1.0
         for pkt in stream.encode(None):
             container.mux(pkt)
         container.close()
+        return video_path
 
-        # Create a test 2x2x2 identity cube
-        cube_path = self._create_cube_file(
-            "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
-            "render_test.cube"
-        )
+    def _create_mpv_player(self):
+        mpv_dll_dir = os.path.join(PROJECT_ROOT, "bin", "mpv")
+        if not os.path.exists(os.path.join(mpv_dll_dir, "libmpv-2.dll")):
+            self.skipTest("Bundled libmpv-2.dll not found")
 
-        shader_path = os.path.join(PROJECT_ROOT, "assets", "shaders", "preview_color.glsl")
-        self.assertTrue(os.path.exists(shader_path), f"Shader not found: {shader_path}")
-
-        player = mpv.MPV(vo="null")
+        os.environ["PATH"] = mpv_dll_dir + ";" + os.environ.get("PATH", "")
+        import mpv
         try:
-            prototype = MpvGpuLutPrototype(player, self.temp_dir, shader_path=shader_path, use_gpu_shaders=True)
-            prototype.apply(cube_path, 75.0)
-            prototype.set_color_state({"brightness": 10.0, "contrast": 15.0})
+            player = mpv.MPV(vo="gpu-next", gpu_context="d3d11")
+        except Exception as exc:
+            self.skipTest(f"MPV gpu-next d3d11 context unavailable: {exc}")
+        return player
 
-            # Play the synthetic video through the pipeline
+    def test_real_gpu_render_lut_paused_and_strength_change(self):
+        """Ensure real MPV gpu-next with d3d11 updates frame immediately while paused on LUT strength adjustment."""
+        player = self._create_mpv_player()
+        video_path = self._create_synthetic_video(rgb_val=100, filename="strength_test.mp4")
+        lut_path = self._create_cube_file(
+            "LUT_3D_SIZE 2\n0.2 0.2 0.2\n1.0 0.2 0.2\n0.2 1.0 0.2\n1.0 1.0 0.2\n"
+            "0.2 0.2 1.0\n1.0 0.2 1.0\n0.2 1.0 1.0\n1.0 1.0 1.0\n",
+            "shift.cube"
+        )
+        try:
+            player.pause = True
+            proto = MpvGpuLutPrototype(player, self.temp_dir, use_gpu_shaders=False)
             player.play(video_path)
-            player.wait_for_playback()
-            prototype.clear()
+            time.sleep(0.3)
+
+            from PIL import Image
+            import numpy as np
+
+            # 0% strength -> identity (original ~100)
+            proto.apply(lut_path, 0.0)
+            time.sleep(0.1)
+            shot_0 = os.path.join(self.temp_dir, "shot_0.png")
+            player.screenshot_to_file(shot_0)
+            img_0 = np.array(Image.open(shot_0))[..., :3]
+            mean_0 = float(np.mean(img_0[32, 32]))
+            self.assertAlmostEqual(mean_0, 100.0, delta=2.0)
+
+            # 50% strength while paused -> intermediate (~116)
+            proto.apply(lut_path, 50.0)
+            time.sleep(0.1)
+            shot_50 = os.path.join(self.temp_dir, "shot_50.png")
+            player.screenshot_to_file(shot_50)
+            img_50 = np.array(Image.open(shot_50))[..., :3]
+            mean_50 = float(np.mean(img_50[32, 32]))
+            self.assertAlmostEqual(mean_50, 116.0, delta=2.0)
+
+            # 100% strength while paused -> full LUT shift (~131)
+            proto.apply(lut_path, 100.0)
+            time.sleep(0.1)
+            shot_100 = os.path.join(self.temp_dir, "shot_100.png")
+            player.screenshot_to_file(shot_100)
+            img_100 = np.array(Image.open(shot_100))[..., :3]
+            mean_100 = float(np.mean(img_100[32, 32]))
+            self.assertAlmostEqual(mean_100, 131.0, delta=2.0)
+        finally:
+            player.terminate()
+
+    def test_real_gpu_render_lut_visual_parity_vs_ffmpeg(self):
+        """Ensure rendered MPV pixels match FFmpeg lut3d reference within MAE <= 2/255 and p99 <= 6/255."""
+        import subprocess
+        from PIL import Image
+        import numpy as np
+
+        player = self._create_mpv_player()
+        video_path = self._create_synthetic_video(rgb_val=100, filename="parity_test.mp4")
+        lut_path = self._create_cube_file(
+            "LUT_3D_SIZE 2\n0.2 0.2 0.2\n1.0 0.2 0.2\n0.2 1.0 0.2\n1.0 1.0 0.2\n"
+            "0.2 0.2 1.0\n1.0 0.2 1.0\n0.2 1.0 1.0\n1.0 1.0 1.0\n",
+            "parity.cube"
+        )
+        ff_shot = os.path.join(self.temp_dir, "ff_parity.png")
+        escaped_lut = lut_path.replace("\\", "/").replace(":", "\\:")
+        cmd = ["ffmpeg", "-y", "-ss", "0.1", "-i", video_path, "-vf", f"lut3d=file='{escaped_lut}'", "-vframes", "1", ff_shot]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            ff_img = np.array(Image.open(ff_shot))[..., :3]
+
+            player.pause = True
+            proto = MpvGpuLutPrototype(player, self.temp_dir, use_gpu_shaders=False)
+            player.play(video_path)
+            time.sleep(0.3)
+            proto.apply(lut_path, 100.0)
+            time.sleep(0.1)
+
+            mpv_shot = os.path.join(self.temp_dir, "mpv_parity.png")
+            player.screenshot_to_file(mpv_shot)
+            mpv_img = np.array(Image.open(mpv_shot))[..., :3]
+
+            diff = np.abs(mpv_img.astype(float) - ff_img.astype(float))
+            mae = float(np.mean(diff) / 255.0)
+            p99 = float(np.percentile(diff, 99) / 255.0)
+
+            # Parity checks against strict spec
+            self.assertLessEqual(mae, 2.0 / 255.0, f"MAE {mae:.6f} exceeded threshold 2/255")
+            self.assertLessEqual(p99, 6.0 / 255.0, f"p99 {p99:.6f} exceeded threshold 6/255")
+        finally:
+            player.terminate()
+
+    def test_real_gpu_render_mtime_invalidation(self):
+        """Ensure modifying .cube file on disk triggers mtime cache invalidation and GPU render update."""
+        player = self._create_mpv_player()
+        video_path = self._create_synthetic_video(rgb_val=100, filename="mtime_test.mp4")
+        lut_path = self._create_cube_file(
+            "LUT_3D_SIZE 2\n0.2 0.2 0.2\n1.0 0.2 0.2\n0.2 1.0 0.2\n1.0 1.0 0.2\n"
+            "0.2 0.2 1.0\n1.0 0.2 1.0\n0.2 1.0 1.0\n1.0 1.0 1.0\n",
+            "live_update.cube"
+        )
+        try:
+            player.pause = True
+            proto = MpvGpuLutPrototype(player, self.temp_dir, use_gpu_shaders=False)
+            player.play(video_path)
+            time.sleep(0.3)
+            proto.apply(lut_path, 100.0)
+            time.sleep(0.1)
+
+            shot_1 = os.path.join(self.temp_dir, "mtime_1.png")
+            player.screenshot_to_file(shot_1)
+            from PIL import Image
+            import numpy as np
+            img_1 = np.array(Image.open(shot_1))[..., :3]
+            self.assertAlmostEqual(float(np.mean(img_1[32, 32])), 131.0, delta=2.0)
+
+            # Overwrite .cube file with a new transformation mapping 100 -> ~177.5
+            time.sleep(0.05)
+            with open(lut_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "LUT_3D_SIZE 2\n0.5 0.5 0.5\n1.0 0.5 0.5\n0.5 1.0 0.5\n1.0 1.0 0.5\n"
+                    "0.5 0.5 1.0\n1.0 0.5 1.0\n0.5 1.0 1.0\n1.0 1.0 1.0\n"
+                )
+            new_mtime = time.time() + 1.0
+            os.utime(lut_path, (new_mtime, new_mtime))
+
+            # Re-apply LUT: cache must invalidate and apply the new file contents
+            proto.apply(lut_path, 100.0)
+            time.sleep(0.1)
+
+            shot_2 = os.path.join(self.temp_dir, "mtime_2.png")
+            player.screenshot_to_file(shot_2)
+            img_2 = np.array(Image.open(shot_2))[..., :3]
+            self.assertAlmostEqual(float(np.mean(img_2[32, 32])), 177.5, delta=3.0)
         finally:
             player.terminate()
 

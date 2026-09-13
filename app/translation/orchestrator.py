@@ -3,13 +3,19 @@ import math
 import os
 import re
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from .context_analyzer import (
     RollingContextLedger,
     build_rolling_context_guidance,
     learn_dialogue_context,
     update_ledger_from_batch,
 )
-from .errors import TranslationValidationError
+from .errors import TranslationConfigError, TranslationValidationError
 from .models import TranslationResult
 from .prompt_loader import render_prompt
 from .providers import (
@@ -39,6 +45,7 @@ class TranslationOrchestrator:
         polish_batch_size: int = 80,
         style_instruction: str = "",
         custom_system_prompt: str = "",
+        context_guidance: str = "",
         override_provider: str = "",
         batch_callback=None,
     ) -> TranslationResult:
@@ -109,8 +116,12 @@ class TranslationOrchestrator:
                     print(f"[AI Translation] Auto Dialogue Context: {'ENABLED (Pass 1 active)' if auto_context_enabled else 'DISABLED'}")
                     print("=" * 60)
 
-                    context_guidance = ""
-                    if auto_context_enabled:
+                    if context_guidance == "__SKIP__":
+                        print("[AI Translation] Dialogue context & address rules explicitly skipped by user.")
+                        context_guidance = ""
+                    elif context_guidance and str(context_guidance).strip():
+                        print(f"[AI Translation] Using user-provided dialogue context & address rules ({len(context_guidance.splitlines())} lines).")
+                    elif auto_context_enabled:
                         print("[AI Translation] Learning dialogue context & address rules from transcript...")
                         context_guidance = learn_dialogue_context(
                             source_segments=segments,
@@ -124,6 +135,8 @@ class TranslationOrchestrator:
                             for line in context_guidance.splitlines():
                                 if line.strip():
                                     print(f"  | {line}")
+                    else:
+                        context_guidance = ""
 
                     translated_texts, providers_used, batch_warnings = self._run_ai_batches(
                         polisher=polisher,
@@ -301,6 +314,34 @@ class TranslationOrchestrator:
 
     def result_to_srt(self, result: TranslationResult) -> str:
         return to_srt(result.segments)
+
+    def extract_dialogue_context(
+        self,
+        segments: list[dict],
+        src_lang: str = "zh-Hans",
+        target_lang: str = "vi",
+        override_provider: str = "",
+        user_guidance: str = "",
+        existing_context: str = "",
+    ) -> str:
+        """Analyze dialogue context and character address rules without translating."""
+        if not segments:
+            return ""
+        provider_type, polisher = self._resolve_ai_provider(override_provider)
+        if not polisher or not getattr(polisher, "is_configured", lambda: False)():
+            raise TranslationConfigError(
+                f"AI Provider '{provider_type}' is not configured. Please set API key or check Settings."
+            )
+        normalized_src = self._normalize_source_language(src_lang)
+        return learn_dialogue_context(
+            source_segments=segments,
+            polisher=polisher,
+            src_lang=normalized_src,
+            target_lang=target_lang,
+            max_cues=300,
+            user_guidance=user_guidance,
+            existing_context=existing_context,
+        )
 
     def _normalize_source_language(self, src_lang: str) -> str:
         mapping = {

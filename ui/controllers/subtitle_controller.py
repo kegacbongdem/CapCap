@@ -1,13 +1,15 @@
 import os
 import time
 
-from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtCore import Qt, QTimer, QSettings, QEventLoop
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -19,9 +21,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
+from worker_adapters import ContextExtractionWorker, RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
 from translation import (
     TranslationOrchestrator,
+    clean_dialogue_context,
     get_preset_by_id,
     load_prompt_options,
     load_translation_presets,
@@ -140,18 +143,30 @@ class TranslationPromptDialog(QDialog):
         layout.addWidget(self.preset_combo)
 
         # Auto-detect dialogue context & pronouns checkbox
-        self.auto_context_cb = QCheckBox("Auto-detect dialogue context & pronouns")
+        self.auto_context_cb = QCheckBox(t("Auto-detect dialogue context & pronouns"))
         saved_auto = self.settings.value("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
         is_checked = str(saved_auto).strip().lower() not in ("0", "false", "no")
         self.auto_context_cb.setChecked(is_checked)
         self.auto_context_cb.setToolTip(
-            "AI analyzes the full script for short videos or the opening lines for long videos to build character, "
-            "role, and two-way address_rules profiles for consistent pronouns."
+            t("AI analyzes the full script for short videos or the opening lines for long videos to build character, "
+              "role, and two-way address_rules profiles for consistent pronouns.")
         )
         layout.addWidget(self.auto_context_cb)
 
+        # Review character profiles & address rules checkbox
+        self.review_context_cb = QCheckBox(t("Review character & pronoun rules before translating"))
+        saved_review = self.settings.value("review_translation_context", os.getenv("CAPCAP_REVIEW_TRANSLATION_CONTEXT", "1"))
+        is_review_checked = str(saved_review).strip().lower() not in ("0", "false", "no")
+        self.review_context_cb.setChecked(is_review_checked)
+        self.review_context_cb.setEnabled(self.auto_context_cb.isChecked())
+        self.review_context_cb.setToolTip(
+            t("Pause after AI analyzes characters and pronouns to let you review and adjust them before translating batches.")
+        )
+        self.auto_context_cb.toggled.connect(lambda checked: self.review_context_cb.setEnabled(checked))
+        layout.addWidget(self.review_context_cb)
+
         # Prompt editor
-        prompt_box_label = QLabel("System Prompt (Editable):")
+        prompt_box_label = QLabel(t("System Prompt (Editable):"))
         prompt_box_label.setObjectName("fieldLabel")
         layout.addWidget(prompt_box_label)
 
@@ -188,11 +203,13 @@ class TranslationPromptDialog(QDialog):
             self.prompt_edit.setEnabled(False)
             self.preset_combo.setEnabled(False)
             self.auto_context_cb.setEnabled(False)
+            self.review_context_cb.setEnabled(False)
         else:
             self.provider_hint.setText("")
             self.prompt_edit.setEnabled(True)
             self.preset_combo.setEnabled(True)
             self.auto_context_cb.setEnabled(True)
+            self.review_context_cb.setEnabled(self.auto_context_cb.isChecked())
 
     def _on_preset_changed(self):
         preset_id = self.preset_combo.currentData() or "general_default"
@@ -221,6 +238,13 @@ class TranslationPromptDialog(QDialog):
         self.settings.setValue("auto_translation_context", auto_val)
         os.environ["CAPCAP_AUTO_TRANSLATION_CONTEXT"] = auto_val
 
+        review_val = "1" if (self.review_context_cb.isChecked() and self.auto_context_cb.isChecked()) else "0"
+        self.settings.setValue("review_translation_context", review_val)
+        os.environ["CAPCAP_REVIEW_TRANSLATION_CONTEXT"] = review_val
+
+        self.selected_auto_context = bool(self.auto_context_cb.isChecked())
+        self.selected_review_context = bool(self.review_context_cb.isChecked() and self.auto_context_cb.isChecked())
+
         self.settings.setValue("translation_preset_id", self.selected_preset_id)
         os.environ["CAPCAP_TRANSLATION_PRESET_ID"] = self.selected_preset_id
 
@@ -228,6 +252,7 @@ class TranslationPromptDialog(QDialog):
         legacy_s = QSettings("CapCap", "CapCap")
         legacy_s.setValue("translation_preset_id", self.selected_preset_id)
         legacy_s.setValue("auto_translation_context", auto_val)
+        legacy_s.setValue("review_translation_context", review_val)
 
         self.accept()
 
@@ -310,6 +335,275 @@ class TranslationPromptDialog(QDialog):
             }
             QPushButton:hover {
                 background: #475569;
+            }
+            QPushButton#primaryBtn {
+                background: #0284c7;
+                color: #ffffff;
+                border: none;
+                font-weight: 600;
+                padding: 8px 24px;
+            }
+            QPushButton#primaryBtn:hover {
+                background: #0369a1;
+            }
+        """)
+
+
+class DialogueContextReviewDialog(QDialog):
+    """Modal dialog allowing the user to review, edit, re-analyze, or skip character address rules."""
+
+    def __init__(
+        self,
+        parent=None,
+        initial_context: str = "",
+        segments=None,
+        src_lang: str = "zh-Hans",
+        target_lang: str = "vi",
+        provider: str = "",
+        error_hint: str = "",
+    ):
+        super().__init__(parent)
+        self.settings = getattr(parent, "settings", None) or QSettings("CapCap", "CapCap")
+        self.setWindowTitle(t("Review Character Profiles & Addressing Rules"))
+        self.setMinimumWidth(660)
+        self.setMinimumHeight(500)
+        self.resize(700, 520)
+
+        self.segments = segments or []
+        self.src_lang = str(src_lang or "zh-Hans")
+        self.target_lang = str(target_lang or "vi")
+        self.provider = str(provider or "")
+        self.error_hint = str(error_hint or "").strip()
+
+        self.result_context: str = initial_context or ""
+        self.skipped: bool = False
+        self._reanalyze_worker = None
+
+        self._init_ui(initial_context)
+        self._apply_styles()
+
+    def _init_ui(self, initial_context: str):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        title_label = QLabel(t("Confirm & Edit Character Profiles & Addressing Rules"))
+        title_label.setObjectName("dialogTitle")
+        layout.addWidget(title_label)
+
+        desc_label = QLabel(
+            t(
+                "AI has analyzed the dialogue cues and established the following character roles and pronoun rules.\n"
+                "Please review and edit them if needed to ensure 100% correct addressing across all dialogue."
+            )
+        )
+        desc_label.setObjectName("dialogSubtitle")
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setPlainText(clean_dialogue_context(initial_context) if initial_context else "")
+        self.text_edit.setPlaceholderText(
+            t("Enter character profiles and address rules (e.g. A calls B as anh, self as em)...")
+        )
+        layout.addWidget(self.text_edit, stretch=1)
+
+        # Feedback section for guiding AI re-analysis
+        feedback_box = QVBoxLayout()
+        feedback_box.setSpacing(4)
+
+        feedback_label = QLabel(t("Optional guidance / corrections for AI to re-analyze:"))
+        feedback_label.setObjectName("dialogSubtitle")
+        feedback_box.addWidget(feedback_label)
+
+        feedback_row = QHBoxLayout()
+        feedback_row.setSpacing(8)
+
+        self.feedback_input = QLineEdit()
+        self.feedback_input.setPlaceholderText(
+            t("Enter tips or corrections (e.g. Triều Tịch is female; stalker calls mày-tao)...")
+        )
+        self.feedback_input.returnPressed.connect(self._on_reanalyze)
+        feedback_row.addWidget(self.feedback_input, stretch=1)
+
+        self.reanalyze_btn = QPushButton(t("🔄 Re-analyze with Feedback"))
+        self.reanalyze_btn.setObjectName("reanalyzeBtn")
+        self.reanalyze_btn.setToolTip(t("Re-run AI dialogue analysis incorporating your custom feedback or guidance."))
+        self.reanalyze_btn.clicked.connect(self._on_reanalyze)
+        feedback_row.addWidget(self.reanalyze_btn)
+
+        feedback_box.addLayout(feedback_row)
+        layout.addLayout(feedback_box)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("fieldHint")
+        if not (initial_context and initial_context.strip()):
+            if self.error_hint:
+                self.status_label.setText(f"⚠️ {self.error_hint}")
+            else:
+                self.status_label.setText(t("⚠️ AI could not auto-detect characters. You can enter rules manually or click '🔄 Re-analyze'."))
+        layout.addWidget(self.status_label)
+
+        self.dont_show_again_cb = QCheckBox(
+            t("Do not show this confirmation dialog again (can be re-enabled in Translation settings)")
+        )
+        layout.addWidget(self.dont_show_again_cb)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.skip_btn = QPushButton(t("Skip Rules"))
+        self.skip_btn.setToolTip(t("Do not enforce any character pronoun rules for this translation."))
+        self.skip_btn.clicked.connect(self._on_skip)
+        btn_layout.addWidget(self.skip_btn)
+
+        btn_layout.addStretch()
+
+        self.cancel_btn = QPushButton(t("Cancel"))
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+
+        self.continue_btn = QPushButton(t("Continue Translation"))
+        self.continue_btn.setObjectName("primaryBtn")
+        self.continue_btn.clicked.connect(self._on_continue)
+        btn_layout.addWidget(self.continue_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _persist_dont_show_preference(self):
+        if self.dont_show_again_cb.isChecked():
+            self.settings.setValue("review_translation_context", "0")
+            os.environ["CAPCAP_REVIEW_TRANSLATION_CONTEXT"] = "0"
+            legacy_s = QSettings("CapCap", "CapCap")
+            legacy_s.setValue("review_translation_context", "0")
+
+    def _on_continue(self):
+        self._persist_dont_show_preference()
+        self.result_context = self.text_edit.toPlainText().strip()
+        self.skipped = False
+        self.accept()
+
+    def _on_skip(self):
+        self._persist_dont_show_preference()
+        self.result_context = "__SKIP__"
+        self.skipped = True
+        self.accept()
+
+    def _on_reanalyze(self):
+        if not self.segments:
+            self.status_label.setText(t("No dialogue segments available to analyze."))
+            return
+
+        feedback = self.feedback_input.text().strip() if hasattr(self, "feedback_input") else ""
+        existing_context = self.text_edit.toPlainText().strip() if hasattr(self, "text_edit") else ""
+        self.reanalyze_btn.setEnabled(False)
+        self.continue_btn.setEnabled(False)
+        self.skip_btn.setEnabled(False)
+        if feedback:
+            self.status_label.setText(t("Re-analyzing dialogue context with user guidance..."))
+        else:
+            self.status_label.setText(t("Re-analyzing dialogue context..."))
+
+        self._reanalyze_worker = ContextExtractionWorker(
+            self.segments,
+            self.src_lang,
+            self.target_lang,
+            self.provider,
+            self,
+            user_guidance=feedback,
+            existing_context=existing_context,
+        )
+
+        def _on_ready(ctx: str):
+            cleaned = clean_dialogue_context(ctx) if ctx else ""
+            self.text_edit.setPlainText(cleaned)
+            if cleaned and cleaned.strip():
+                self.status_label.setText(t("✓ Re-analysis complete."))
+            else:
+                self.status_label.setText(t("⚠️ AI returned empty character rules."))
+            self.reanalyze_btn.setEnabled(True)
+            self.continue_btn.setEnabled(True)
+            self.skip_btn.setEnabled(True)
+
+        def _on_fail(err: str):
+            self.status_label.setText(f"{t('Re-analysis failed')}: {err}")
+            self.reanalyze_btn.setEnabled(True)
+            self.continue_btn.setEnabled(True)
+            self.skip_btn.setEnabled(True)
+
+        self._reanalyze_worker.context_ready.connect(_on_ready)
+        self._reanalyze_worker.failed.connect(_on_fail)
+        self._reanalyze_worker.start()
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog {
+                background: #0f1724;
+                color: #e8f0fa;
+            }
+            QLabel#dialogTitle {
+                color: #f1f5f9;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QLabel#dialogSubtitle {
+                color: #94a3b8;
+                font-size: 12px;
+                line-height: 1.4;
+            }
+            QLabel#fieldHint {
+                color: #38bdf8;
+                font-size: 12px;
+            }
+            QPlainTextEdit {
+                background: #1e293b;
+                color: #cbd5e1;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+            QPlainTextEdit:focus {
+                border: 1px solid #38bdf8;
+            }
+            QLineEdit {
+                background: #1e293b;
+                color: #f1f5f9;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #38bdf8;
+            }
+            QCheckBox {
+                color: #cbd5e1;
+                font-size: 12px;
+            }
+            QPushButton {
+                background: #334155;
+                color: #f8fafc;
+                border: 1px solid #475569;
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #475569;
+            }
+            QPushButton#reanalyzeBtn {
+                background: #1e293b;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                font-weight: 600;
+            }
+            QPushButton#reanalyzeBtn:hover {
+                background: #0369a1;
+                color: #ffffff;
             }
             QPushButton#primaryBtn {
                 background: #0284c7;
@@ -597,6 +891,8 @@ class SubtitleController:
         chosen_provider = ""
         chosen_batch_size = None
         chosen_prompt = ""
+        chosen_auto_context = True
+        chosen_review_context = False
 
         if show_prompt_dialog:
             dialog = TranslationPromptDialog(self.gui, src_lang=src_lang, target_lang=target_lang)
@@ -606,6 +902,18 @@ class SubtitleController:
             chosen_provider = dialog.selected_provider
             chosen_batch_size = getattr(dialog, "selected_batch_size", None)
             chosen_prompt = dialog.selected_prompt
+            chosen_auto_context = getattr(dialog, "selected_auto_context", True)
+            chosen_review_context = getattr(dialog, "selected_review_context", False)
+        else:
+            settings = getattr(self.gui, "settings", None) or QSettings("CapCap", "CapCap")
+            saved_auto = settings.value("auto_translation_context", os.getenv("CAPCAP_AUTO_TRANSLATION_CONTEXT", "1"))
+            chosen_auto_context = str(saved_auto).strip().lower() not in ("0", "false", "no")
+            saved_review = settings.value("review_translation_context", os.getenv("CAPCAP_REVIEW_TRANSLATION_CONTEXT", "1"))
+            chosen_review_context = chosen_auto_context and (str(saved_review).strip().lower() not in ("0", "false", "no"))
+
+        if chosen_provider == "google":
+            chosen_auto_context = False
+            chosen_review_context = False
 
         chosen_preset_id = os.getenv("CAPCAP_TRANSLATION_PRESET_ID") or "general_default"
         has_diarization = False
@@ -617,6 +925,11 @@ class SubtitleController:
                 else (seg if isinstance(seg, dict) else getattr(seg, "__dict__", {}))
                 for seg in self.gui.current_segments
             ]
+        if not source_segments and srt_source:
+            from translation.srt_utils import parse_srt
+            source_segments = parse_srt(srt_source)
+
+        if source_segments:
             speakers = {
                 str(s.get("metadata", {}).get("speaker") or s.get("speaker") or "").strip()
                 for s in source_segments
@@ -625,6 +938,18 @@ class SubtitleController:
             if speakers:
                 has_diarization = True
                 speaker_count = len(speakers)
+
+        confirmed_context = ""
+        if chosen_provider != "google" and chosen_auto_context and chosen_review_context and source_segments:
+            confirmed_context = self._extract_and_review_context(
+                source_segments=source_segments,
+                src_lang=src_lang,
+                target_lang=target_lang,
+                provider=chosen_provider,
+            )
+            if confirmed_context is None:
+                # User canceled during context extraction or review
+                return
 
         diarize_label = f"ON ({speaker_count} speakers)" if has_diarization else "OFF"
         prompt_label = f"'{chosen_preset_id}' (Customized)" if chosen_prompt else f"'{chosen_preset_id}'"
@@ -651,11 +976,114 @@ class SubtitleController:
             batch_size=chosen_batch_size,
             custom_prompt=chosen_prompt,
             segments=source_segments,
+            context_guidance=confirmed_context,
         )
         self.gui.translation_thread.finished.connect(self.gui.on_translation_finished)
         self.gui.translation_thread.progress.connect(self.on_translation_progress)
         self.gui.translation_thread.batch_ready.connect(self.on_translation_batch_ready)
         self.gui.translation_thread.start()
+
+    def _extract_and_review_context(
+        self,
+        source_segments: list[dict],
+        src_lang: str,
+        target_lang: str,
+        provider: str,
+    ) -> str | None:
+        """Extract dialogue context via background worker with progress dialog, then open review dialog.
+
+        Returns:
+            - str (rules or empty or "__SKIP__") if user confirms / skips.
+            - None if user canceled (aborts translation).
+        """
+        if not source_segments:
+            return ""
+
+        progress = QProgressDialog(
+            t("Analyzing dialogue & establishing pronoun rules..."),
+            t("Cancel"),
+            0,
+            0,
+            self.gui,
+        )
+        progress.setWindowTitle(t("Dialogue Analysis"))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.setStyleSheet(
+            "QProgressDialog { background-color: #101826; color: #e6eef9; }"
+            "QLabel { color: #e6eef9; }"
+            "QPushButton { background: #22344c; color: #e6eef9; border: 1px solid #36516f; border-radius: 6px; padding: 5px 14px; }"
+        )
+
+        extracted = {"text": "", "error": "", "done": False, "canceled": False}
+
+        worker = ContextExtractionWorker(source_segments, src_lang, target_lang, provider, parent=self.gui)
+
+        def on_ready(ctx: str):
+            extracted["text"] = ctx
+            extracted["done"] = True
+            try:
+                progress.canceled.disconnect(on_canceled)
+            except Exception:
+                pass
+            progress.close()
+
+        def on_failed(err: str):
+            extracted["error"] = err
+            extracted["done"] = True
+            try:
+                progress.canceled.disconnect(on_canceled)
+            except Exception:
+                pass
+            progress.close()
+
+        def on_canceled():
+            if not extracted["done"]:
+                extracted["canceled"] = True
+
+        worker.context_ready.connect(on_ready)
+        worker.failed.connect(on_failed)
+        progress.canceled.connect(on_canceled)
+
+        worker.start()
+        progress.show()
+
+        while not extracted["done"] and not extracted["canceled"]:
+            QApplication.processEvents(QEventLoop.AllEvents, 50)
+            if not worker.isRunning() and not extracted["done"]:
+                QApplication.processEvents(QEventLoop.AllEvents, 50)
+                break
+
+        if extracted["canceled"] and not extracted["done"]:
+            self.gui.log("[Translation] Pronoun context extraction canceled by user.")
+            return None
+
+        if extracted["error"]:
+            self.gui.log(f"[Translation] Pronoun rules analysis notice: {extracted['error']}")
+
+        # Step 2: Open DialogueContextReviewDialog
+        initial_text = extracted["text"]
+        review_dialog = DialogueContextReviewDialog(
+            parent=self.gui,
+            initial_context=initial_text,
+            segments=source_segments,
+            src_lang=src_lang,
+            target_lang=target_lang,
+            provider=provider,
+            error_hint=extracted.get("error", ""),
+        )
+        if review_dialog.exec() != QDialog.Accepted:
+            self.gui.log("[Translation] Translation canceled during pronoun rules review.")
+            return None
+
+        if review_dialog.skipped:
+            self.gui.log("[Translation] Pronoun rules skipped by user.")
+            return "__SKIP__"
+
+        result = review_dialog.result_context or ""
+        self.gui.log(f"[Translation] Confirmed pronoun rules ({len(result.splitlines())} lines).")
+        return result
 
     def on_translation_progress(self, completed: int, total: int):
         if total <= 0:

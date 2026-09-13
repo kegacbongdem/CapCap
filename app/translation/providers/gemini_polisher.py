@@ -1,6 +1,12 @@
 import os
 import time
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from openai import OpenAI
 
 from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError

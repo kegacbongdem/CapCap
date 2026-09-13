@@ -6,6 +6,8 @@ cues across sequential batches when translating long videos that exceed a single
 
 from __future__ import annotations
 
+import re
+
 
 class RollingContextLedger:
     """Maintains narrative context, confirmed character address rules, and boundary dialogue cues across sequential batches."""
@@ -145,6 +147,8 @@ def learn_dialogue_context(
     src_lang: str = "zh-Hans",
     target_lang: str = "vi",
     max_cues: int = 300,
+    user_guidance: str = "",
+    existing_context: str = "",
 ) -> str:
     """Extract durable character profiles and strict two-way address rules (address_rules).
 
@@ -152,6 +156,8 @@ def learn_dialogue_context(
     - If video has <= max_cues (default 300), analyzes 100% of the transcript.
     - If video has > max_cues, samples the first 200 cues to establish initial ground truth.
     - If Speaker Diarization tags ([SPEAKER_XX]) are present, maps speaker IDs directly to character profiles.
+    - If user_guidance is provided, injects explicit user corrections and instructions into the prompt.
+    - If existing_context is provided, provides the previous draft to let AI revise based on feedback.
     """
     if not source_segments or len(source_segments) < 3 or not hasattr(polisher, "generate_text"):
         return ""
@@ -180,13 +186,37 @@ def learn_dialogue_context(
         else "Identify all interacting characters, their genders, and social roles from dialogue cues.\n"
     )
 
+    feedback_and_context_clause = ""
+    clean_guidance = str(user_guidance or "").strip()
+    clean_existing = str(existing_context or "").strip()
+
+    if clean_existing:
+        feedback_and_context_clause += f"""
+PREVIOUS DRAFT OF CHARACTER PROFILES (TO BE REVISED):
+\"\"\"
+{clean_existing}
+\"\"\"
+"""
+
+    if clean_guidance:
+        feedback_and_context_clause += f"""
+CRITICAL USER CORRECTIONS & GUIDANCE (HIGHEST PRIORITY):
+The user reviewed the character profiles and provided the following instruction:
+"{clean_guidance}"
+
+MANDATORY RULES FOR APPLYING USER FEEDBACK:
+- You MUST strictly follow and prioritize the user's guidance above all else.
+- If the user indicates that two characters or their roles/genders are reversed or swapped (e.g. "ngược", "đảo lại", "hoán đổi"), SWAP their roles, genders, and addressing rules completely!
+- Override any previous inferences with the user's explicit corrections.
+
+"""
+
     system_prompt = f"""You are an expert dialogue and script analyzer.
 Analyze these {src_lang}->{target_lang} subtitle cues to extract a durable Character Profile and strict Two-Way Address Rules (quy tắc xưng hô 2 chiều) to ensure 100% address consistency.
 
-{speaker_clause}
-Extract:
+{speaker_clause}{feedback_and_context_clause}Extract:
 1. CHARACTERS & ROLES:
-   - Identify Name / Title / Nickname (standard Hán-Việt for Chinese names, e.g. 潮汐 -> Triều Tịch, 刘佳玉 -> Lưu Giai Ngọc)
+   - Identify Name / Title / Nickname (standard Hán-Việt for Chinese names, e.g. 张伟 -> Trương Vỹ, 李明 -> Lý Minh)
    - Gender & social role: Nam/Nữ, e.g. Sinh viên năm 3 (học trưởng), năm 1 (học muội), bạn trai cũ / kẻ bám đuôi (antagonist), sếp, đồng nghiệp...
    - Distinguish if multiple characters of the same gender share a speaker tag.
 
@@ -203,6 +233,7 @@ Extract:
 
 OUTPUT FORMAT:
 Return ONLY concise, clear rules in {target_lang} (under 250 words), starting immediately with '### Hồ sơ nhân vật & Quy tắc xưng hô bắt buộc:'. No greetings, no preamble, no markdown backticks.
+IMPORTANT: Do NOT use LaTeX math symbols, math mode, or dollar signs (NO $\\leftrightarrow$, NO $\\rightarrow$, NO $\\to$). Always use standard arrows like '↔' or '->'.
 """
 
     try:
@@ -212,8 +243,33 @@ Return ONLY concise, clear rules in {target_lang} (under 250 words), starting im
             max_tokens=600,
             timeout=45,
         )
-        return context.strip()
+        return clean_dialogue_context(context)
     except Exception as e:
         print(f"[AI Translation] Warning: Dialogue learning failed ({e}), continuing with standard translation.")
         return ""
+
+
+def clean_dialogue_context(text: str) -> str:
+    """Clean up LaTeX math symbols like $\\leftrightarrow$ or $\\rightarrow$ that LLMs sometimes generate."""
+    if not text:
+        return ""
+    replacements = [
+        (r"\$\s*\\(?:long)?leftrightarrow\s*\$", " ↔ "),
+        (r"\\(?:long)?leftrightarrow", " ↔ "),
+        (r"\$\s*\\(?:long)?rightarrow\s*\$", " → "),
+        (r"\\(?:long)?rightarrow", " → "),
+        (r"\$\s*\\to\s*\$", " → "),
+        (r"\\to\b", " → "),
+        (r"\$\s*\\(?:long)?leftarrow\s*\$", " ← "),
+        (r"\\(?:long)?leftarrow", " ← "),
+        (r"\$\s*\\(?:Rightarrow|implies)\s*\$", " ⇒ "),
+        (r"\\(?:Rightarrow|implies)", " ⇒ "),
+        (r"\$\s*\\Leftarrow\s*\$", " ⇐ "),
+        (r"\\Leftarrow", " ⇐ "),
+    ]
+    result = text
+    for pat, rep in replacements:
+        result = re.sub(pat, rep, result)
+    result = re.sub(r" {2,}", " ", result)
+    return result.strip()
 

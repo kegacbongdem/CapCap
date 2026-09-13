@@ -9,6 +9,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 APP_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "app")
 if APP_PATH not in sys.path:
     sys.path.insert(0, APP_PATH)
@@ -190,6 +196,7 @@ class TranslationWorker(QThread):
         batch_size: int = None,
         custom_prompt: str = "",
         segments=None,
+        context_guidance: str = "",
     ):
         super().__init__()
         self.srt_text = srt_text
@@ -201,6 +208,7 @@ class TranslationWorker(QThread):
         self.batch_size = int(batch_size) if batch_size and int(batch_size) > 0 else None
         self.custom_prompt = str(custom_prompt or "").strip()
         self.segments = segments
+        self.context_guidance = str(context_guidance or "").strip()
 
     def run(self):
         try:
@@ -220,6 +228,8 @@ class TranslationWorker(QThread):
                     translate_kwargs["polish_batch_size"] = self.batch_size
                 if self.custom_prompt:
                     translate_kwargs["custom_system_prompt"] = self.custom_prompt
+                if self.context_guidance:
+                    translate_kwargs["context_guidance"] = self.context_guidance
 
                 total_cues = len(self.segments) if self.segments else 0
                 if not total_cues and self.srt_text:
@@ -254,6 +264,56 @@ class TranslationWorker(QThread):
         except Exception as exc:
             print(f"Translation Thread Error: {exc}")
             self.finished.emit("", str(exc), "")
+
+
+class ContextExtractionWorker(QThread):
+    """Analyze dialogue context and character address rules in a non-blocking background thread."""
+    context_ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        segments,
+        src_lang: str,
+        target_lang: str,
+        provider: str = "",
+        parent=None,
+        user_guidance: str = "",
+        existing_context: str = "",
+    ):
+        super().__init__(parent)
+        self.segments = segments
+        self.src_lang = str(src_lang or "zh-Hans")
+        self.target_lang = str(target_lang or "vi")
+        self.provider = str(provider or "")
+        self.user_guidance = str(user_guidance or "").strip()
+        self.existing_context = str(existing_context or "").strip()
+
+    def run(self):
+        try:
+            from translation import TranslationOrchestrator
+            orch = TranslationOrchestrator()
+            segments_to_analyze = self.segments
+            if isinstance(segments_to_analyze, str) and segments_to_analyze.strip():
+                from translation.srt_utils import parse_srt
+                segments_to_analyze = parse_srt(segments_to_analyze)
+            elif isinstance(segments_to_analyze, list):
+                segments_to_analyze = [
+                    seg.to_original_subtitle_dict() if hasattr(seg, "to_original_subtitle_dict")
+                    else (seg if isinstance(seg, dict) else getattr(seg, "__dict__", {}))
+                    for seg in segments_to_analyze
+                ]
+            context = orch.extract_dialogue_context(
+                segments=segments_to_analyze,
+                src_lang=self.src_lang,
+                target_lang=self.target_lang,
+                override_provider=self.provider,
+                user_guidance=self.user_guidance,
+                existing_context=self.existing_context,
+            )
+            self.context_ready.emit(context or "")
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class OllamaStatusWorker(QThread):

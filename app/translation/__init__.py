@@ -1,3 +1,4 @@
+from .context_analyzer import clean_dialogue_context
 from .orchestrator import TranslationOrchestrator
 from .models import TranslationResult
 from .prompt_loader import (
@@ -12,6 +13,7 @@ from .prompt_loader import (
 __all__ = [
     "TranslationOrchestrator",
     "TranslationResult",
+    "clean_dialogue_context",
     "load_prompt_options",
     "load_translation_presets",
     "get_preset_by_id",

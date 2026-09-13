@@ -325,6 +325,9 @@ def stop_video(gui):
 
 
 def position_changed(gui, position):
+    if getattr(gui, "_is_scrubbing", False):
+        return
+
     if _is_warped_preview(gui):
         tl_position = position
         total_duration = gui.media_player.duration()

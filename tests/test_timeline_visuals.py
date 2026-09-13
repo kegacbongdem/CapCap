@@ -167,6 +167,35 @@ class TestTimelineVisuals(unittest.TestCase):
         self.assertEqual(wf_none, [])
         self.assertEqual(dur_none, 0.0)
 
+    def test_build_waveform_video_with_audio(self):
+        """Ensure build_waveform decodes video audio via linear streaming fast path."""
+        from fractions import Fraction
+        video_path = os.path.join(self.temp_dir, "video_audio.mp4")
+        container = av.open(video_path, mode="w", format="mp4")
+        astream = container.add_stream("aac", rate=48000)
+        astream.time_base = Fraction(1, 48000)
+        t = np.linspace(0, 1.0, 1024, endpoint=False, dtype=np.float32)
+        frame_data = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        pts = 0
+        for _ in range(94):
+            frame = av.AudioFrame.from_ndarray(frame_data.reshape(1, -1), format="fltp", layout="mono")
+            frame.rate = 48000
+            frame.pts = pts
+            pts += 1024
+            for p in astream.encode(frame):
+                container.mux(p)
+        for p in astream.encode(None):
+            container.mux(p)
+        container.close()
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            wf, dur = build_waveform(video_path, bucket_count=300)
+
+        self.assertAlmostEqual(dur, 2.0, delta=0.1)
+        self.assertGreater(len(wf), 0)
+        self.assertTrue(all(0.0 <= x <= 1.0 for x in wf))
+
     def test_timeline_waveform_worker_native(self):
         """Ensure TimelineWaveformWorker runs in-process without invoking FFmpeg CLI."""
         from ui.worker_adapters.processing_workers import TimelineWaveformWorker

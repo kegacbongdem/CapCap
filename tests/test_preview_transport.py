@@ -710,6 +710,134 @@ class TestPreviewTransport(unittest.TestCase):
             self.assertFalse(track_by_id["TS1"]["muted"])
             self.assertFalse(track_by_id["m1"]["muted"])
 
+    def test_poll_state_guards_transient_none_and_seeking(self):
+        """Verify _poll_state does not emit 0 when time-pos is None or seeking."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "video.mp4"
+        backend._video_frozen = False
+        backend._native_audio_active = False
+        backend._state = QMediaPlayer.PausedState
+        backend._position_ms = 5000
+        backend._duration_ms = 10000
+        backend.positionChanged = MagicMock()
+        backend.durationChanged = MagicMock()
+        backend.stateChanged = MagicMock()
+
+        # 1. When time_pos is None (mpv seeking), positionChanged should NOT be emitted with 0
+        backend._read_property = lambda name, fallback=None, default=None: {
+            "time-pos": None,
+            "duration": 10.0,
+            "pause": True,
+            "eof-reached": False,
+            "core-idle": False,
+            "seeking": False,
+        }.get(name, default)
+
+        backend._poll_state()
+        backend.positionChanged.emit.assert_not_called()
+        self.assertEqual(backend._position_ms, 5000)
+
+        # 2. When seeking is True, positionChanged should NOT be emitted
+        backend._read_property = lambda name, fallback=None, default=None: {
+            "time-pos": 0.0,
+            "duration": 10.0,
+            "pause": True,
+            "eof-reached": False,
+            "core-idle": False,
+            "seeking": True,
+        }.get(name, default)
+
+        backend._poll_state()
+        backend.positionChanged.emit.assert_not_called()
+        self.assertEqual(backend._position_ms, 5000)
+
+    def test_sync_audio_to_video_guards_none_time_pos(self):
+        """Verify _sync_audio_to_video returns early when mpv time_pos is None."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "video.mp4"
+        backend._video_frozen = False
+        backend._last_seek_mono = 0.0
+        backend._player = MagicMock()
+        backend._player.time_pos = None  # transient seek state
+        backend._player.pause = False
+        backend._native_audio_active = True
+        backend._native_audio_engine = MagicMock()
+
+        backend._sync_audio_to_video()
+        # Native audio engine seek should NOT be called with 0
+        backend._native_audio_engine.seek.assert_not_called()
+
+    def test_position_changed_suppressed_during_scrub(self):
+        """Verify position_changed in media_utils ignores updates while scrubbing."""
+        from ui.utils.media_utils import position_changed
+
+        gui = MagicMock()
+        gui._is_scrubbing = True
+        gui.timeline = MagicMock()
+        gui.media_player = MagicMock()
+
+        position_changed(gui, 0)
+        gui.timeline.set_position.assert_not_called()
+
+    def test_timeline_set_position_suppressed_during_scrub_drag(self):
+        """Verify EditorTimeline.set_position does not overwrite playhead while dragging."""
+        from ui.views.editor.timeline import EditorTimeline
+
+        timeline = EditorTimeline.__new__(EditorTimeline)
+        timeline._selection_drag = {"mode": "scrub"}
+        timeline._playhead = 5.0
+        timeline.set_playhead = MagicMock()
+
+        timeline.set_position(0)
+        timeline.set_playhead.assert_not_called()
+        self.assertEqual(timeline._playhead, 5.0)
+
+    def test_playback_highlight_no_jump_between_segments(self):
+        """Verify update_playback_subtitle_highlight does not select segment 0 when in gap."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui._preview_is_playing.return_value = True
+        gui.live_preview_segments = []
+        gui.get_active_segments.return_value = []
+        gui._find_active_segment_index.return_value = -1
+        gui._subtitle_track_preview_visible = True
+        gui._is_subtitle_inspector_details_visible.return_value = False
+        gui.timeline = MagicMock()
+        gui.timeline._timeline = MagicMock()
+        track = MagicMock()
+        track.type.value = "subtitle"
+        track.layers = [MagicMock(id="layer_seg_0")]
+        gui.timeline._timeline.tracks = [track]
+        gui.timeline._selected_layer_id = ""
+        gui.timeline._segment_indices = {"layer_seg_0": 0}
+
+        VideoTranslatorGUI.update_playback_subtitle_highlight(gui, 3500)
+        # on_timeline_layer_selected should NOT have been called with layer_seg_0
+        gui.on_timeline_layer_selected.assert_not_called()
+
+    def test_volume_changed_does_not_schedule_refresh_in_native_mode(self):
+        """Verify volume changes do not schedule sidecar refresh when native audio is active."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui.media_player = MagicMock()
+        gui.media_player._native_audio_active = True
+        gui.audio_a2_volume_label = MagicMock()
+        gui.audio_music_volume_label = MagicMock()
+        gui._music_audio_tracks.return_value = [{"id": "m1"}]
+
+        VideoTranslatorGUI.on_audio_a2_volume_changed(gui, 75)
+        gui._schedule_preview_audio_refresh.assert_not_called()
+
+        VideoTranslatorGUI.on_audio_music_volume_changed(gui, 50)
+        gui._schedule_preview_audio_refresh.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -532,6 +532,8 @@ class EditorTimeline(QGraphicsView):
         self.viewport().update()
 
     def set_position(self, ms: int) -> None:
+        if self._selection_drag is not None and self._selection_drag.get("mode") == "scrub":
+            return
         self.set_playhead(ms / 1000.0)
 
     def _follow_playhead_during_playback(self) -> None:

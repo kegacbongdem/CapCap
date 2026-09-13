@@ -2,6 +2,7 @@ import os
 import math
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -663,8 +664,8 @@ class MpvMediaPlayerBackend(QObject):
         if getattr(self, "_video_frozen", False):
             return
         try:
-            time_pos = self._read_property("time-pos", "time_pos", 0.0)
-            duration = self._read_property("duration", default=0.0)
+            time_pos = self._read_property("time-pos", "time_pos", default=None)
+            duration = self._read_property("duration", default=None)
             pause = bool(self._read_property("pause", default=True))
             # `eof-reached` is mpv's authoritative end-of-stream flag.
             # It stays reliable even when a vf change transiently
@@ -672,19 +673,26 @@ class MpvMediaPlayerBackend(QObject):
             # mask filter) — Bug 2 / "video plays past duration".
             eof = bool(self._read_property("eof-reached", "eof_reached", False))
             core_idle = bool(self._read_property("core-idle", "core_idle", False))
+            seeking = bool(self._read_property("seeking", default=False))
         except Exception:
             return
 
-        next_position = int(float(time_pos or 0.0) * 1000)
-        next_duration = int(float(duration or 0.0) * 1000)
+        is_seeking_grace = (time.monotonic() - getattr(self, "_last_seek_mono", 0.0)) < 0.25
+        if not (seeking or is_seeking_grace):
+            if time_pos is not None:
+                next_position = int(float(time_pos) * 1000)
+                if not (self._native_audio_active and self._state == QMediaPlayer.PlayingState):
+                    if next_position != self._position_ms:
+                        self._position_ms = next_position
+                        self.positionChanged.emit(next_position)
+
+        if duration is not None:
+            next_duration = int(float(duration) * 1000)
+            if next_duration != self._duration_ms:
+                self._duration_ms = next_duration
+                self.durationChanged.emit(next_duration)
+
         next_state = QMediaPlayer.PausedState if pause else QMediaPlayer.PlayingState
-        if not (self._native_audio_active and self._state == QMediaPlayer.PlayingState):
-            if next_position != self._position_ms:
-                self._position_ms = next_position
-                self.positionChanged.emit(next_position)
-        if next_duration != self._duration_ms:
-            self._duration_ms = next_duration
-            self.durationChanged.emit(next_duration)
         prev_state = self._state
         self._state = next_state
         # Surface EOF per the end-file event handler as well, but the
@@ -911,6 +919,7 @@ class MpvMediaPlayerBackend(QObject):
     def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
         self._video_frozen = False
         self._position_ms = int(position)
+        self._last_seek_mono = time.monotonic()
         if not self._source_path:
             self.positionChanged.emit(self._position_ms)
             return
@@ -1508,8 +1517,13 @@ class MpvMediaPlayerBackend(QObject):
             return
         if getattr(self, "_video_frozen", False):
             return
+        if (time.monotonic() - getattr(self, "_last_seek_mono", 0.0)) < 0.25:
+            return
         try:
-            v_pos_ms = int(float(self._player.time_pos or 0) * 1000)
+            v_time = self._player.time_pos
+            if v_time is None:
+                return
+            v_pos_ms = int(float(v_time) * 1000)
         except Exception:
             return
         try:

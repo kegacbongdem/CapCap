@@ -8721,21 +8721,20 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "audio_a2_volume_label"):
             self.audio_a2_volume_label.setText(f"{int(value)}%")
         self._sync_audio_track_volume("TS1", int(value))
-        # Music is composed into the dubbed sidecar.  Changing the TTS level
-        # must rebuild that sidecar even when the TTS level becomes 0%, so the
-        # music-only result is loaded instead of leaving the previous render.
-        if self._music_audio_tracks():
-            self._schedule_preview_audio_refresh(force=True)
+        # When native audio is active, set_track_gain dynamically updates
+        # the gain in-memory with smooth ramping without rebuilding sidecar files.
+        # Only legacy sidecar mode requires rebuilding the composed WAV.
+        if not getattr(getattr(self, "media_player", None), "_native_audio_active", False):
+            if self._music_audio_tracks():
+                self._schedule_preview_audio_refresh(force=False)
         self._set_audio_mix_preset_custom()
 
     def on_audio_music_volume_changed(self, value: int):
         if hasattr(self, "audio_music_volume_label"):
             self.audio_music_volume_label.setText(f"{int(value)}%")
         self._sync_audio_track_volume("A2 Music", int(value))
-        # The music level is baked into the composed dubbed sidecar. Refresh
-        # immediately so a prior original-only sidecar cannot remain audible
-        # after the user enables/raises Music.
-        self._schedule_preview_audio_refresh(force=True)
+        if not getattr(getattr(self, "media_player", None), "_native_audio_active", False):
+            self._schedule_preview_audio_refresh(force=False)
 
     def _apply_audio_mix_to_tracks(self, a1_val: int, a2_val: int):
         self._sync_audio_track_volume("A1 Audio", a1_val)
@@ -13899,14 +13898,6 @@ class VideoTranslatorGUI(QMainWindow):
                     for layer_id, segment_index in getattr(self.timeline, "_segment_indices", {}).items():
                         if int(segment_index) == int(active_index):
                             subtitle_layer_id = str(layer_id)
-                            break
-                if not subtitle_layer_id:
-                    for track in self.timeline._timeline.tracks:
-                        track_type = str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower()
-                        if track_type not in {"subtitle", "dub_subtitle"} and str(getattr(track, "name", "")) != "TS1":
-                            continue
-                        if track.layers:
-                            subtitle_layer_id = str(getattr(track.layers[0], "id", "") or "")
                             break
                 if subtitle_layer_id and str(getattr(self.timeline, "_selected_layer_id", "") or "") != subtitle_layer_id:
                     self.timeline._selected_layer_id = subtitle_layer_id

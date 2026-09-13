@@ -632,6 +632,156 @@ def build_waveform(
     if cached is not None:
         return cached
 
+    # 1. Fast path: direct SoundFile reading for WAV, FLAC, OGG, etc.
+    try:
+        import soundfile as sf
+        with sf.SoundFile(path) as sf_file:
+            total_samples = len(sf_file)
+            sr = sf_file.samplerate
+            duration_s = total_samples / float(sr) if sr > 0 else 0.0
+            if total_samples <= 0 or duration_s <= 0.0:
+                result = ([], duration_s)
+                _WAVEFORM_CACHE.put(cache_key, result)
+                return result
+
+            actual_buckets = int(min(bucket_count, max(240, round(duration_s * 12.0))))
+            chunk_size = max(256, int(np.ceil(total_samples / max(1, actual_buckets))))
+            num_buckets = int(np.ceil(total_samples / chunk_size))
+
+            bucket_peaks = np.zeros(num_buckets, dtype=np.float32)
+            bucket_sum_sq = np.zeros(num_buckets, dtype=np.float64)
+            bucket_counts = np.zeros(num_buckets, dtype=np.int64)
+
+            block_size = max(chunk_size, 65536)
+            global_peak = 0.0
+            offset = 0
+
+            while offset < total_samples:
+                count = min(block_size, total_samples - offset)
+                block = sf_file.read(count, dtype="float32")
+                if len(block) == 0:
+                    break
+                if block.ndim > 1:
+                    block = _downmix_to_mono(block)
+
+                abs_block = np.abs(block)
+                block_peak = float(np.max(abs_block)) if len(abs_block) > 0 else 0.0
+                if block_peak > global_peak:
+                    global_peak = block_peak
+
+                sample_indices = offset + np.arange(len(block))
+                bucket_indices = np.minimum(num_buckets - 1, sample_indices // chunk_size)
+
+                np.maximum.at(bucket_peaks, bucket_indices, abs_block)
+                np.add.at(bucket_sum_sq, bucket_indices, block.astype(np.float64) ** 2)
+                np.add.at(bucket_counts, bucket_indices, 1)
+
+                offset += count
+
+            if global_peak <= 0.0:
+                result = ([0.0] * num_buckets, duration_s)
+                _WAVEFORM_CACHE.put(cache_key, result)
+                return result
+
+            safe_counts = np.maximum(1, bucket_counts)
+            norm_peaks = bucket_peaks / global_peak
+            rms = np.sqrt(bucket_sum_sq / safe_counts) / global_peak
+
+            values = np.maximum(norm_peaks, rms * 1.15)
+            envelope = np.clip(values ** 0.85, 0.03, 1.0)
+            waveform = [float(x) for x in envelope]
+
+            result = (waveform, duration_s)
+            _WAVEFORM_CACHE.put(cache_key, result)
+            return result
+    except Exception:
+        # Not an audio file SoundFile can open (e.g. video container), proceed to PyAV streaming
+        pass
+
+    # 2. Fast path: linear PyAV stream decoding without resampling or seek churn
+    if av is not None:
+        try:
+            container = av.open(path)
+            if not container.streams.audio:
+                dur_s = float(container.duration) / 1000000.0 if container.duration is not None else 0.0
+                container.close()
+                result = ([], dur_s)
+                _WAVEFORM_CACHE.put(cache_key, result)
+                return result
+
+            astream = container.streams.audio[0]
+            if astream.duration and astream.time_base:
+                duration_s = float(astream.duration * astream.time_base)
+            elif container.duration:
+                duration_s = float(container.duration) / 1000000.0
+            else:
+                duration_s = 0.0
+
+            sr = astream.rate or 48000
+            total_samples = int(round(duration_s * sr)) if duration_s > 0 else 0
+            actual_buckets = int(min(bucket_count, max(240, round(duration_s * 12.0)))) if duration_s > 0 else bucket_count
+            actual_buckets = max(1, actual_buckets)
+            chunk_size = max(256, int(np.ceil(total_samples / max(1, actual_buckets)))) if total_samples > 0 else 256
+            num_buckets = int(np.ceil(total_samples / chunk_size)) if total_samples > 0 else actual_buckets
+            num_buckets = max(actual_buckets, num_buckets)
+
+            bucket_peaks = np.zeros(num_buckets, dtype=np.float32)
+            bucket_sum_sq = np.zeros(num_buckets, dtype=np.float64)
+            bucket_counts = np.zeros(num_buckets, dtype=np.int64)
+
+            global_peak = 0.0
+            sample_offset = 0
+
+            for frame in container.decode(astream):
+                arr = frame.to_ndarray()
+                if arr.ndim == 2:
+                    arr = np.mean(arr, axis=0, dtype=np.float32)
+                else:
+                    arr = arr.flatten().astype(np.float32)
+
+                n = len(arr)
+                if n == 0:
+                    continue
+
+                abs_arr = np.abs(arr)
+                pk = float(np.max(abs_arr))
+                if pk > global_peak:
+                    global_peak = pk
+
+                s_indices = sample_offset + np.arange(n)
+                b_indices = np.minimum(num_buckets - 1, s_indices // chunk_size)
+
+                np.maximum.at(bucket_peaks, b_indices, abs_arr)
+                np.add.at(bucket_sum_sq, b_indices, arr.astype(np.float64) ** 2)
+                np.add.at(bucket_counts, b_indices, 1)
+
+                sample_offset += n
+
+            container.close()
+
+            if sample_offset > 0 and duration_s <= 0.0:
+                duration_s = sample_offset / float(sr)
+
+            if global_peak <= 0.0:
+                result = ([0.0] * num_buckets, duration_s)
+                _WAVEFORM_CACHE.put(cache_key, result)
+                return result
+
+            safe_counts = np.maximum(1, bucket_counts)
+            norm_peaks = bucket_peaks / global_peak
+            rms = np.sqrt(bucket_sum_sq / safe_counts) / global_peak
+
+            values = np.maximum(norm_peaks, rms * 1.15)
+            envelope = np.clip(values ** 0.85, 0.03, 1.0)
+            waveform = [float(x) for x in envelope]
+
+            result = (waveform, duration_s)
+            _WAVEFORM_CACHE.put(cache_key, result)
+            return result
+        except Exception:
+            pass
+
+    # 3. Fallback: AudioReader windowed stream
     try:
         reader = AudioReader(path, sample_rate=16000)
     except Exception:

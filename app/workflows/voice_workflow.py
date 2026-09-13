@@ -494,14 +494,14 @@ class VoiceWorkflow:
 
     def _should_use_speedup_before_rewrite(self, *, duration_sec: float, speech_cost: int, ratio: float) -> bool:
         ratio_value = float(ratio or 0.0)
-        if ratio_value <= 1.05:
+        if ratio_value <= 1.02:
             return False
         if duration_sec < 1.8 or speech_cost >= 4:
             return False
         return ratio_value <= 1.15
 
     def _should_allow_post_rewrite_speedup(self, *, ratio: float) -> bool:
-        return 1.05 < float(ratio or 0.0) <= 1.15
+        return 1.02 < float(ratio or 0.0) <= 1.25
 
     def _is_target_ratio_band(self, ratio: float) -> bool:
         ratio_value = float(ratio or 0.0)

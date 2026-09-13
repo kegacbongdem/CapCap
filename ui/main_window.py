@@ -3768,9 +3768,7 @@ class VideoTranslatorGUI(QMainWindow):
                     worker.requestInterruption()
                 except Exception:
                     pass
-                self._timeline_thumbnail_worker = None
-            else:
-                return
+            return
         video_path = self._normalize_local_file_path(self.video_path_edit.text().strip())
         thumb_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_thumbnails")
         worker = TimelineThumbnailWorker(request_signature, video_path, duration_s, thumb_dir)

@@ -504,11 +504,14 @@ class TestTimelineVisuals(unittest.TestCase):
         from ui.worker_adapters.processing_workers import TimelineThumbnailWorker
         worker = TimelineThumbnailWorker("req_switch", video_path_2, 2.0, self.temp_dir)
         worker.requestInterruption()
-        # Since interruption was requested, worker.run() should return early without emitting
+        # Since interruption was requested, worker.run() must exit promptly with empty thumbnails and "interrupted" error
         results = []
-        worker.finished.connect(lambda sig, t, e: results.append(sig))
+        worker.finished.connect(lambda sig, t, e: results.append((sig, t, e)))
         worker.run()
-        self.assertEqual(len(results), 0, "Interrupted worker should not emit finished results")
+        self.assertEqual(len(results), 1)
+        sig, thumbs, err = results[0]
+        self.assertEqual(thumbs, [], "Interrupted worker must not decode thumbnails")
+        self.assertEqual(err, "interrupted")
 
 
 if __name__ == "__main__":

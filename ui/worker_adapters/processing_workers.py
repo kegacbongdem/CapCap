@@ -625,16 +625,21 @@ class TimelineThumbnailWorker(QThread):
             return False
 
     def run(self):
+        emitted = False
         try:
             if self.isInterruptionRequested():
+                self.finished.emit(self.request_signature, [], "interrupted")
+                emitted = True
                 return
             max_visual_dur = float(os.environ.get("CAPCAP_TIMELINE_VISUALS_MAX_DURATION", 3600.0))
             if self.duration_s > max_visual_dur:
                 self.finished.emit(self.request_signature, [], "")
+                emitted = True
                 return
 
             if not self.video_path or not os.path.exists(self.video_path) or self.duration_s <= 0.0:
                 self.finished.emit(self.request_signature, [], "")
+                emitted = True
                 return
 
             # Adapt density to media length: short clips need frequent visual
@@ -668,6 +673,8 @@ class TimelineThumbnailWorker(QThread):
                 thumbnails = []
                 for idx, (actual_pts, rgb) in enumerate(iter_video_thumbnails(self.video_path, timestamps, width=180)):
                     if self.isInterruptionRequested():
+                        self.finished.emit(self.request_signature, [], "interrupted")
+                        emitted = True
                         return
                     h, w, _ = rgb.shape
                     rgb_contig = np.ascontiguousarray(rgb)
@@ -675,9 +682,12 @@ class TimelineThumbnailWorker(QThread):
                     thumbnails.append((float(actual_pts), image))
 
                 if self.isInterruptionRequested():
+                    self.finished.emit(self.request_signature, [], "interrupted")
+                    emitted = True
                     return
                 if thumbnails:
                     self.finished.emit(self.request_signature, thumbnails, "")
+                    emitted = True
                     return
             except Exception:
                 pass
@@ -741,9 +751,14 @@ class TimelineThumbnailWorker(QThread):
                     thumbnails.append((float(timestamp_s), output_path))
 
             self.finished.emit(self.request_signature, thumbnails, "")
+            emitted = True
         except Exception as exc:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             self.finished.emit(self.request_signature, [], details or str(exc))
+            emitted = True
+        finally:
+            if not emitted:
+                self.finished.emit(self.request_signature, [], "interrupted" if self.isInterruptionRequested() else "")
 
 
 class PrepareWorkflowWorker(QThread):

@@ -997,12 +997,11 @@ class VoiceWorkflow:
                 speed_ratio = min(1.15, max(1.0, ratio))
                 if abs(speed_ratio - 1.0) >= 0.02:
                     adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_polish_speed.wav")
-                    wav_path = self.engine_runtime.change_wav_speed(
-                        input_wav_path=wav_path,
+                    polished_wavs[idx] = self.engine_runtime.change_wav_speed(
+                        input_wav_path=polished_wavs[idx],
                         output_wav_path=adjusted_path,
                         speed_ratio=speed_ratio,
                     )
-                    polished_wavs[idx] = wav_path
                     seg["action_taken"] = "speed_light"
                     metrics = dict(seg.get("_tts_metrics") or {})
                     metrics["action_taken"] = "speed_light"

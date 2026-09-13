@@ -11361,29 +11361,13 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _resolve_segment_wav_path(self, seg: dict, idx: int, tts_dir: str = "") -> str:
         w = seg.get("_wav_path", "")
-        if w and os.path.exists(w):
+        if w and not w.endswith("_base.wav") and os.path.exists(w):
             return w
 
         if not tts_dir:
             tts_dir = self._resolve_tts_temp_dir()
         if not tts_dir or not os.path.exists(tts_dir):
             return ""
-
-        manifest_path = os.path.join(tts_dir, "tts_cache_manifest.json")
-        if not hasattr(self, "_cached_tts_manifest") or getattr(self, "_cached_tts_manifest_path", "") != manifest_path:
-            self._cached_tts_manifest = {}
-            self._cached_tts_manifest_path = manifest_path
-            if os.path.exists(manifest_path):
-                try:
-                    with open(manifest_path, "r", encoding="utf-8") as f:
-                        self._cached_tts_manifest = json.load(f)
-                except Exception:
-                    pass
-
-        mw = self._cached_tts_manifest.get("segments", {}).get(str(idx), {}).get("wav_path", "")
-        if mw and os.path.exists(mw):
-            seg["_wav_path"] = mw
-            return mw
 
         candidates = [
             f"seg_{idx:04d}_smartfit.wav",
@@ -11401,6 +11385,23 @@ class VideoTranslatorGUI(QMainWindow):
             if os.path.exists(p):
                 seg["_wav_path"] = p
                 return p
+
+        manifest_path = os.path.join(tts_dir, "tts_cache_manifest.json")
+        if not hasattr(self, "_cached_tts_manifest") or getattr(self, "_cached_tts_manifest_path", "") != manifest_path:
+            self._cached_tts_manifest = {}
+            self._cached_tts_manifest_path = manifest_path
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        self._cached_tts_manifest = json.load(f)
+                except Exception:
+                    pass
+
+        mw = self._cached_tts_manifest.get("segments", {}).get(str(idx), {}).get("wav_path", "")
+        if mw and os.path.exists(mw):
+            seg["_wav_path"] = mw
+            return mw
+
         return ""
 
     def _get_segment_audio_end(self, seg: dict, idx: int) -> float:

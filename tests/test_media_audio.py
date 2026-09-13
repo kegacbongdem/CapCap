@@ -1218,7 +1218,46 @@ class TestTask4NativeAudioProcessing(unittest.TestCase):
         # Must be close to 440 Hz (NOT pitch shifted to 880 Hz)
         self.assertAlmostEqual(dom_freq, 440.0, delta=5.0)
 
+    def test_resolve_segment_wav_path_prefers_smartfit_over_base(self):
+        """Ensure _resolve_segment_wav_path prioritizes smartfit / speed adjusted files
+        over raw base wav recorded in tts_cache_manifest.json.
+        """
+        import json
+        from ui.main_window import VideoTranslatorGUI
+
+        class MockGUI:
+            def _resolve_tts_temp_dir(self):
+                return self.td
+
+        gui = MockGUI()
+        gui.td = self.temp_dir
+        gui._resolve_segment_wav_path = VideoTranslatorGUI._resolve_segment_wav_path.__get__(gui)
+
+        manifest_path = os.path.join(self.temp_dir, "tts_cache_manifest.json")
+        base_wav = os.path.join(self.temp_dir, "seg_0000_base.wav")
+        smart_wav = os.path.join(self.temp_dir, "seg_0000_smartfit.wav")
+        with open(base_wav, "w") as f:
+            f.write("base")
+        with open(smart_wav, "w") as f:
+            f.write("smart")
+
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"segments": {"0": {"wav_path": base_wav}}}, f)
+
+        # 1. Empty seg dict should resolve smartfit
+        seg = {}
+        res = gui._resolve_segment_wav_path(seg, 0, tts_dir=self.temp_dir)
+        self.assertEqual(res, smart_wav)
+        self.assertEqual(seg.get("_wav_path"), smart_wav)
+
+        # 2. Seg dict previously pointing to _base.wav should upgrade to smartfit
+        seg2 = {"_wav_path": base_wav}
+        res2 = gui._resolve_segment_wav_path(seg2, 0, tts_dir=self.temp_dir)
+        self.assertEqual(res2, smart_wav)
+        self.assertEqual(seg2.get("_wav_path"), smart_wav)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

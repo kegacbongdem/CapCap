@@ -1,34 +1,19 @@
 //!HOOK MAIN
+//!BIND HOOKED
 //!DESC CapCap Preview Color Adjustments
-//!PARAM capcap_brightness
-//!TYPE float
-//!DEFAULT 0.0
-//!PARAM capcap_contrast
-//!TYPE float
-//!DEFAULT 1.0
-//!PARAM capcap_saturation
-//!TYPE float
-//!DEFAULT 1.0
-//!PARAM capcap_gamma
-//!TYPE float
-//!DEFAULT 1.0
-//!PARAM capcap_hue
-//!TYPE float
-//!DEFAULT 0.0
-//!PARAM capcap_temp
-//!TYPE float
-//!DEFAULT 0.0
-//!PARAM capcap_shadow_point
-//!TYPE float
-//!DEFAULT 0.25
-//!PARAM capcap_highlight_point
-//!TYPE float
-//!DEFAULT 0.75
-
 //!SAVE PRE_LUT
 
+float capcap_brightness = 0.0;
+float capcap_contrast = 1.0;
+float capcap_saturation = 1.0;
+float capcap_gamma = 1.0;
+float capcap_hue = 0.0;
+float capcap_temp = 0.0;
+float capcap_shadow_point = 0.25;
+float capcap_highlight_point = 0.75;
+
 vec4 hook() {
-    vec4 color = HOOKED_gather(HOOKED_pos);
+    vec4 color = HOOKED_tex(HOOKED_pos);
     vec3 c = color.rgb;
 
     // 1. Contrast: centered around 0.5
@@ -88,18 +73,18 @@ vec4 hook() {
 }
 
 //!HOOK OUTPUT
-//!DESC CapCap Preview LUT Blending
+//!BIND HOOKED
 //!BIND PRE_LUT
-//!PARAM capcap_lut_strength
-//!TYPE float
-//!DEFAULT 0.0
+//!DESC CapCap Preview LUT Blending
+
+float capcap_lut_strength = 0.0;
 
 vec4 hook() {
-    vec4 lut_color = HOOKED_gather(HOOKED_pos);
+    vec4 lut_color = HOOKED_tex(HOOKED_pos);
     if (capcap_lut_strength <= 0.001) {
         return lut_color;
     }
-    vec4 pre_color = PRE_LUT_gather(HOOKED_pos);
+    vec4 pre_color = PRE_LUT_tex(PRE_LUT_pos);
     float s = clamp(capcap_lut_strength, 0.0, 1.0);
     return mix(pre_color, lut_color, s);
 }

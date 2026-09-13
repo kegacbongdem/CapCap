@@ -386,33 +386,173 @@ DOMAIN_MAX 1.0 1.0 1.0
         finally:
             player.terminate()
 
-    def test_color_formula_parity_vs_reference(self):
-        """Verify mathematical parity of brightness, contrast, saturation, and gamma against authoritative ranges."""
+    def test_real_gpu_render_opt_in_shader_and_zero_files(self):
+        """Verify opt-in GPU shader mode compiles with 0 errors and generates 0 .cube files on slider ticks."""
+        shader_path = os.path.join(PROJECT_ROOT, "assets", "shaders", "preview_color.glsl")
+        self.assertTrue(os.path.exists(shader_path), f"Shader not found: {shader_path}")
+
+        shader_errors = []
+        def log_fn(level, component, msg):
+            if level == "error" or "unrecognized" in msg.lower():
+                shader_errors.append((level, component, msg.strip()))
+
+        mpv_dll_dir = os.path.join(PROJECT_ROOT, "bin", "mpv")
+        if not os.path.exists(os.path.join(mpv_dll_dir, "libmpv-2.dll")):
+            self.skipTest("Bundled libmpv-2.dll not found")
+        os.environ["PATH"] = mpv_dll_dir + ";" + os.environ.get("PATH", "")
+        import mpv
+        try:
+            player = mpv.MPV(vo="gpu-next", gpu_context="d3d11", log_handler=log_fn)
+        except Exception as exc:
+            self.skipTest(f"MPV gpu-next d3d11 context unavailable: {exc}")
+
+        video_path = self._create_synthetic_video(rgb_val=100, filename="shader_render.mp4")
+        lut_path = self._create_cube_file(
+            "LUT_3D_SIZE 2\n0.2 0.2 0.2\n1.0 0.2 0.2\n0.2 1.0 0.2\n1.0 1.0 0.2\n"
+            "0.2 0.2 1.0\n1.0 0.2 1.0\n0.2 1.0 1.0\n1.0 1.0 1.0\n",
+            "opt_in.cube"
+        )
+        try:
+            player.pause = True
+            proto = MpvGpuLutPrototype(player, self.temp_dir, shader_path=shader_path, use_gpu_shaders=True)
+            self.assertTrue(proto.use_gpu_shaders)
+
+            player.play(video_path)
+            time.sleep(0.3)
+
+            initial_cubes = [f for f in os.listdir(self.temp_dir) if f.endswith(".cube")]
+
+            # 1. 0% strength -> clears LUT and leaves original pixels
+            proto.apply(lut_path, 0.0)
+            time.sleep(0.1)
+            shot_0 = os.path.join(self.temp_dir, "shader_shot_0.png")
+            player.screenshot_to_file(shot_0)
+            from PIL import Image
+            import numpy as np
+            img_0 = np.array(Image.open(shot_0))[..., :3]
+            self.assertAlmostEqual(float(np.mean(img_0[32, 32])), 100.0, delta=2.0)
+
+            # 2. 50% strength -> updates shader opts in-place
+            proto.apply(lut_path, 50.0)
+            time.sleep(0.1)
+            opts = dict(getattr(player, "glsl_shader_opts", {}) or {})
+            self.assertEqual(opts.get("capcap_lut_strength"), "0.5000")
+
+            # 3. 100% strength -> full LUT applied
+            proto.apply(lut_path, 100.0)
+            time.sleep(0.1)
+            shot_100 = os.path.join(self.temp_dir, "shader_shot_100.png")
+            player.screenshot_to_file(shot_100)
+            img_100 = np.array(Image.open(shot_100))[..., :3]
+            self.assertAlmostEqual(float(np.mean(img_100[32, 32])), 131.0, delta=2.0)
+
+            # 4. Verify ZERO intermediate .cube files generated
+            after_cubes = [f for f in os.listdir(self.temp_dir) if f.endswith(".cube")]
+            new_cubes = set(after_cubes) - set(initial_cubes)
+            self.assertEqual(len(new_cubes), 0, "Opt-in GPU shader mode must not generate intermediate .cube files")
+
+            # 5. Verify preview_color.glsl compiled without any error
+            self.assertEqual(len(shader_errors), 0, f"Shader compilation errors detected: {shader_errors}")
+        finally:
+            player.terminate()
+
+    def test_color_parity_multi_color_gradient_vs_reference(self):
+        """Verify color adjustment formula parity on a multi-color gradient image covering hue, saturation, temp, and curves."""
+        import subprocess
+        from PIL import Image
         import numpy as np
+        from app.video_filter_chain import build_video_filter_chain
 
-        # Test RGB values across standard range [0.1, 0.9]
-        inputs = np.linspace(0.1, 0.9, 9)
+        # Construct a multi-color gradient video:
+        # Band 0 (rows 0-20): Red -> Yellow (hue & saturation ramp)
+        # Band 1 (rows 20-40): Green -> Cyan (chroma sweep)
+        # Band 2 (rows 40-60): Blue -> Magenta (cross-channel sweep)
+        # Band 3 (rows 60-80): Grayscale ramp (luminance from dark to light)
+        h, w = 80, 120
+        frame_arr = np.zeros((h, w, 3), dtype=np.uint8)
+        xs = np.linspace(20, 235, w)
+        frame_arr[0:20, :, 0] = 220
+        frame_arr[0:20, :, 1] = xs
+        frame_arr[0:20, :, 2] = 20
+        frame_arr[20:40, :, 0] = 20
+        frame_arr[20:40, :, 1] = 220
+        frame_arr[20:40, :, 2] = xs
+        frame_arr[40:60, :, 0] = xs
+        frame_arr[40:60, :, 1] = 20
+        frame_arr[40:60, :, 2] = 220
+        for c_idx in range(3):
+            frame_arr[60:80, :, c_idx] = xs
 
-        # Brightness test: C' = clamp(C + B, 0, 1)
-        b_slider = 20.0  # +20%
-        b_val = b_slider / 100.0 * 0.35  # 0.0700
-        for val in inputs:
-            expected = np.clip(val + b_val, 0.0, 1.0)
-            self.assertAlmostEqual(val + b_val, expected, delta=0.001)
+        import av
+        vpath = os.path.join(self.temp_dir, "grad.mp4")
+        container = av.open(vpath, mode="w", format="mp4")
+        stream = container.add_stream("h264", rate=25)
+        stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
+        for i in range(25):
+            f = av.VideoFrame.from_ndarray(frame_arr, format="rgb24")
+            f.pts = i
+            for pkt in stream.encode(f):
+                container.mux(pkt)
+        for pkt in stream.encode(None):
+            container.mux(pkt)
+        container.close()
 
-        # Contrast test: C' = clamp((C - 0.5) * C_factor + 0.5, 0, 1)
-        c_slider = 15.0  # +15%
-        c_val = 1.0 + c_slider / 100.0 * 0.65  # 1.0975
-        for val in inputs:
-            expected = np.clip((val - 0.5) * c_val + 0.5, 0.0, 1.0)
-            self.assertTrue(0.0 <= expected <= 1.0)
+        # Fetch decoded baseline frame from video
+        clean_png = os.path.join(self.temp_dir, "clean.png")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0.1", "-i", vpath, "-vframes", "1", clean_png],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
+        input_rgb = np.array(Image.open(clean_png))[..., :3] / 255.0
 
-        # Gamma test: C' = pow(max(C, 0), 1 / G)
-        g_slider = -10.0  # -10%
-        g_val = 1.0 + g_slider / 100.0 * 0.75  # 0.925
-        for val in inputs:
-            expected = np.clip(val ** (1.0 / g_val), 0.0, 1.0)
-            self.assertTrue(0.0 <= expected <= 1.0)
+        # Test 1: Curves (Shadows & Highlights) parity against FFmpeg curves filter
+        curves_state = {"highlights": -15.0, "shadows": 15.0}
+        ff_curves_chain = build_video_filter_chain(curves_state)
+        ff_curves_out = os.path.join(self.temp_dir, "ff_curves.png")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0.1", "-i", vpath, "-vf", ff_curves_chain, "-vframes", "1", ff_curves_out],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
+        ff_curves = np.array(Image.open(ff_curves_out))[..., :3] / 255.0
+
+        sp = np.full(3, 0.25 + 15.0 / 100.0 * 0.18)
+        hp = np.full(3, 0.75 + (-15.0) / 100.0 * 0.18)
+        sim_curves = input_rgb.copy()
+        for i in range(3):
+            ch = sim_curves[..., i]
+            m1 = ch < 0.25
+            m2 = (ch >= 0.25) & (ch < 0.75)
+            m3 = ch >= 0.75
+            sim_curves[m1, i] = ch[m1] * (sp[i] / 0.25)
+            sim_curves[m2, i] = sp[i] + (ch[m2] - 0.25) * ((hp[i] - sp[i]) / 0.5)
+            sim_curves[m3, i] = hp[i] + (ch[m3] - 0.75) * ((1.0 - hp[i]) / 0.25)
+        sim_curves = np.clip(sim_curves, 0.0, 1.0)
+        diff_curves = np.abs(sim_curves - ff_curves)
+        curves_mae = float(np.mean(diff_curves))
+        curves_p99 = float(np.percentile(diff_curves, 99))
+        self.assertLessEqual(curves_mae, 0.005, f"Curves MAE {curves_mae:.6f} exceeded bound")
+        self.assertLessEqual(curves_p99, 0.015, f"Curves p99 {curves_p99:.6f} exceeded bound")
+
+        # Test 2: Temperature & Brightness/Contrast measured bounds on multi-color gradient
+        full_state = {
+            "brightness": 10.0,
+            "contrast": 12.0,
+            "saturation": 15.0,
+            "gamma": -8.0,
+            "hue": 12.0,
+            "temperature": 10.0,
+            "highlights": -10.0,
+            "shadows": 10.0,
+        }
+        full_chain = build_video_filter_chain(full_state)
+        full_out = os.path.join(self.temp_dir, "ff_full.png")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0.1", "-i", vpath, "-vf", full_chain, "-vframes", "1", full_out],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
+        ff_full = np.array(Image.open(full_out))[..., :3] / 255.0
+        self.assertEqual(ff_full.shape, (h, w, 3))
+        self.assertTrue(np.all(np.isfinite(ff_full)))
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@
   - `TimeWarpService.media_to_timeline_time(media_time: float, warps: list[dict]) -> float`
   - `TimeWarpService.build_ffmpeg_timewarp_filtergraph(video_stream, warps, total_media_duration, fps=30.0, audio_stream=None)` (kèm alias `build_ffmpeg_freeze_filtergraph`)
 
-- [ ] **Step 1: Viết unit test cho TimeWarpService với Slow-Motion**
+- [x] **Step 1: Viết unit test cho TimeWarpService với Slow-Motion**
   Tạo hoặc cập nhật `tests/test_time_warp_service.py`:
   - Test `create_time_warp` với `warp_type="slow"` và `speed`.
   - Test `apply_segment_extension` tính đúng `speed = orig_dur / (orig_dur + delta)`.
@@ -40,23 +40,23 @@
   - Test `media_to_timeline_time`: ánh xạ ngược chính xác.
   - Test `build_ffmpeg_timewarp_filtergraph`: sinh đúng `setpts=(1/speed)*(PTS-STARTPTS)` cho slow slice và `loop` cho freeze slice.
 
-- [ ] **Step 2: Chạy test để xác nhận test thất bại (Red)**
+- [x] **Step 2: Chạy test để xác nhận test thất bại (Red)**
   ```powershell
   .\.venv\Scripts\python.exe -m unittest tests/test_time_warp_service.py
   ```
 
-- [ ] **Step 3: Cập nhật `app/services/time_warp_service.py`**
+- [x] **Step 3: Cập nhật `app/services/time_warp_service.py`**
   - Mở rộng `create_time_warp`: thêm các trường `speed`, `media_start`, `media_end`.
   - Cập nhật `apply_segment_extension`: nhận `warp_type="slow"`, tính `D_orig = orig_end - orig_start`, tính `speed = round(D_orig / (D_orig + delta), 3)`. Ghi nhận vào metadata của target segment: `target_seg["warp_type"] = warp_type`, `target_seg["warp_speed"] = speed`.
   - Cập nhật `timeline_to_media_time` & `media_to_timeline_time` xử lý đúng logic hàm bậc nhất cho slow warp.
   - Mở rộng filtergraph export hỗ trợ cả slow (`setpts`, `atempo`) và freeze (`loop`, silence).
 
-- [ ] **Step 4: Chạy test để xác nhận test thành công (Green)**
+- [x] **Step 4: Chạy test để xác nhận test thành công (Green)**
   ```powershell
   .\.venv\Scripts\python.exe -m unittest tests/test_time_warp_service.py
   ```
 
-- [ ] **Step 5: Commit thay đổi Task 1**
+- [x] **Step 5: Commit thay đổi Task 1**
   ```powershell
   git add app/services/time_warp_service.py tests/test_time_warp_service.py
   git commit -m "feat(timewarp): add slow-motion support and time mapping in TimeWarpService"
@@ -78,17 +78,17 @@
   - Hàm `_draw_video_timewarp_overlays(painter, x, bar_y, w, bar_h, view_w)` trên track V1.
   - Cập nhật `_draw_standard_layer_bar` hỗ trợ vẽ extension tail màu tím cho `slow` và màu cyan cho `freeze`.
 
-- [ ] **Step 1: Viết unit test cho hiển thị visual timewarp trên timeline**
+- [x] **Step 1: Viết unit test cho hiển thị visual timewarp trên timeline**
   Tạo `tests/test_timeline_timewarp_visuals.py` kiểm tra:
   - Phân loại màu sắc và icon badge: `slow` -> tím / `🐢`, `freeze` -> cyan / `⏸`.
   - Tính toán tọa độ pixel `(x, w)` tương ứng với start/end của warps.
 
-- [ ] **Step 2: Chạy test để xác nhận test thất bại (Red)**
+- [x] **Step 2: Chạy test để xác nhận test thất bại (Red)**
   ```powershell
   .\.venv\Scripts\python.exe -m unittest tests/test_timeline_timewarp_visuals.py
   ```
 
-- [ ] **Step 3: Triển khai vẽ trên `ui/views/editor/timeline.py`**
+- [x] **Step 3: Triển khai vẽ trên `ui/views/editor/timeline.py`**
   - Thêm thuộc tính `set_video_time_warps(warps)` vào `EditorTimeline`.
   - Trong `_draw_track_layers` khi `track.type == LayerType.VIDEO`:
     - Sau khi gọi `_draw_video_thumbnails`: gọi `self._draw_video_timewarp_overlays(painter, x, bar_y, w, bar_h, view_w)`.
@@ -98,12 +98,12 @@
     - Nếu là `slow`: vẽ đuôi mở rộng màu tím `QColor(76, 29, 149)` kèm hatch tím `QColor(167, 139, 250, 60)` và badge `🐢 {speed:.2f}x` hoặc `🐢 +{ext:.1f}s`.
     - Nếu là `freeze`: giữ nguyên màu cyan `⏸ +{ext:.1f}s`.
 
-- [ ] **Step 4: Chạy test để xác nhận test thành công (Green)**
+- [x] **Step 4: Chạy test để xác nhận test thành công (Green)**
   ```powershell
   .\.venv\Scripts\python.exe -m unittest tests/test_timeline_timewarp_visuals.py
   ```
 
-- [ ] **Step 5: Commit thay đổi Task 2**
+- [x] **Step 5: Commit thay đổi Task 2**
   ```powershell
   git add ui/views/editor/timeline.py tests/test_timeline_timewarp_visuals.py
   git commit -m "feat(timeline): render virtual cuts, color ribbon and badges for slow/freeze on V1 and TS1"
@@ -126,12 +126,12 @@
   - UI nút `⚡ Fit Voice (Slow)` và tùy chọn `+ Freeze` / `+ Slow`.
   - Badge trạng thái `[🐢 Slow 0.85x (+0.8s)]` và `Revert`.
 
-- [ ] **Step 1: Cập nhật hàm `extend_segment_video` và `revert_segment_video_extension` trong `ui/main_window.py`**
+- [x] **Step 1: Cập nhật hàm `extend_segment_video` và `revert_segment_video_extension` trong `ui/main_window.py`**
   - Nhận tham số `warp_type: str = "slow"`.
   - Truyền `warp_type` vào `TimeWarpService.apply_segment_extension`.
   - Truyền `self.video_time_warps` vào `self.timeline.set_video_time_warps(self.video_time_warps)`.
 
-- [ ] **Step 2: Cập nhật giao diện Segment Inspector Row**
+- [x] **Step 2: Cập nhật giao diện Segment Inspector Row**
   - Khi chưa warp:
     - Nút `fit_voice_btn`: Đổi label thành `⚡ Fit Voice (Slow)` (hoặc `⚡ Fit Voice (+Xs)` với tooltip giải thích là làm chậm video để khớp giọng).
     - Cung cấp thêm lựa chọn `+ Freeze` hoặc `+ Slow` tùy chỉnh.
@@ -139,12 +139,12 @@
     - Đọc `warp_type`: nếu là slow, hiển thị badge `🐢 Slow {speed:.2f}x (+{dur:.1f}s)`; nếu là freeze, hiển thị `⏸ Frozen (+{dur:.1f}s)`.
     - Nút `Revert` khôi phục về $1.0\times$.
 
-- [ ] **Step 3: Chạy unit tests và toàn bộ test suite (Full Regression Check)**
+- [x] **Step 3: Chạy unit tests và toàn bộ test suite (Full Regression Check)**
   ```powershell
   .\.venv\Scripts\python.exe -m unittest discover tests
   ```
 
-- [ ] **Step 4: Commit thay đổi Task 3**
+- [x] **Step 4: Commit thay đổi Task 3**
   ```powershell
   git add ui/main_window.py
   git commit -m "feat(ui): add slow-motion fit voice action and status badges in segment inspector"

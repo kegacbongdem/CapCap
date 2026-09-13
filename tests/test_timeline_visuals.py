@@ -298,6 +298,10 @@ class TestTimelineVisuals(unittest.TestCase):
             if full_p not in sys.path:
                 sys.path.insert(0, full_p)
         from views.launcher import ProjectCard
+        try:
+            from i18n import t
+        except ImportError:
+            from ui.i18n import t
 
         app = QApplication.instance() or QApplication([])
         video_path = self._create_synthetic_video()
@@ -307,7 +311,7 @@ class TestTimelineVisuals(unittest.TestCase):
              patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
             card = ProjectCard(video_path, cache_dir)
             # Immediate placeholder
-            self.assertEqual(card.thumb_label.text(), "No Preview")
+            self.assertEqual(card.thumb_label.text(), t("No Preview"))
 
             # Allow background thread to process and deliver QImage via signal
             deadline = time.time() + 2.0

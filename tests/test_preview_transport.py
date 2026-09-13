@@ -667,6 +667,49 @@ class TestPreviewTransport(unittest.TestCase):
             self.assertTrue(is_muted)
             mock_dubbed.assert_not_called()
 
+    def test_native_preview_audio_mode_original_vs_dubbed_snapshot_mutes(self):
+        """Verify original vs dubbed audio mode correctly sets mute flags in native tracks snapshot."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui._preview_audio_track_switching = False
+        gui.media_player = MagicMock()
+        gui.media_player._native_audio_active = True
+        gui._resolve_preview_original_video_path.return_value = "video.mp4"
+        gui._resolve_preview_original_audio_path.return_value = "orig.wav"
+        gui._resolve_preview_voice_only_audio_path.return_value = "voice.wav"
+        gui._compute_audio_track_volume.return_value = 100.0
+        gui._get_audio_track_gain_db.return_value = 0.0
+        gui._audio_total_duration_ms.return_value = 10000
+        gui._is_audio_track_muted.return_value = False
+        gui.video_time_warps = []
+        music_tracks = [{"id": "m1", "path": "music.mp3", "muted": False, "volume": 100.0}]
+        gui._music_audio_tracks.return_value = music_tracks
+
+        with patch("os.path.exists", return_value=True):
+            # 1. When mode is "original", TS1 and Music should be muted in snapshot
+            gui._preferred_preview_audio_track_mode.return_value = "original"
+            gui._preview_audio_track_mode = "original"
+            VideoTranslatorGUI._apply_preview_audio_track_selection(gui)
+
+            snapshot, _warps = gui.media_player.set_audio_tracks_snapshot.call_args[0]
+            track_by_id = {t["id"]: t for t in snapshot}
+            self.assertFalse(track_by_id["A1 Audio"]["muted"])
+            self.assertTrue(track_by_id["TS1"]["muted"])
+            self.assertTrue(track_by_id["m1"]["muted"])
+
+            # 2. When mode is "dubbed", TS1 and Music should follow their own unmuted state
+            gui.media_player.set_audio_tracks_snapshot.reset_mock()
+            gui._preferred_preview_audio_track_mode.return_value = "dubbed"
+            gui._preview_audio_track_mode = "dubbed"
+            VideoTranslatorGUI._apply_preview_audio_track_selection(gui)
+
+            snapshot, _warps = gui.media_player.set_audio_tracks_snapshot.call_args[0]
+            track_by_id = {t["id"]: t for t in snapshot}
+            self.assertFalse(track_by_id["A1 Audio"]["muted"])
+            self.assertFalse(track_by_id["TS1"]["muted"])
+            self.assertFalse(track_by_id["m1"]["muted"])
+
 
 if __name__ == "__main__":
     unittest.main()

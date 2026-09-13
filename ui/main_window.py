@@ -3435,6 +3435,7 @@ class VideoTranslatorGUI(QMainWindow):
 
             if getattr(self.media_player, "_native_audio_active", False) and hasattr(self.media_player, "set_audio_tracks_snapshot"):
                 tracks_snapshot = []
+                is_dubbed_mode = getattr(self, "_preview_audio_track_mode", "dubbed") != "original"
                 orig_vol = self._compute_audio_track_volume("A1 Audio", base=100.0) * (10 ** (self._get_audio_track_gain_db("A1 Audio") / 20.0))
                 orig_path = original_audio or source_video
                 if orig_path and os.path.exists(orig_path):
@@ -3456,13 +3457,15 @@ class VideoTranslatorGUI(QMainWindow):
                         "start": 0.0,
                         "end": self._audio_total_duration_ms() / 1000.0,
                         "volume": dub_vol,
-                        "muted": self._is_audio_track_muted("TS1"),
+                        "muted": self._is_audio_track_muted("TS1") or not is_dubbed_mode,
                         "is_original_video": False,
                     })
                 for m in self._music_audio_tracks():
                     m_copy = dict(m)
                     m_copy.setdefault("id", str(m.get("id") or m.get("path", "")))
                     m_copy["is_original_video"] = False
+                    if not is_dubbed_mode:
+                        m_copy["muted"] = True
                     tracks_snapshot.append(m_copy)
 
                 warps = list(getattr(self, "video_time_warps", []) or [])
@@ -8822,11 +8825,13 @@ class VideoTranslatorGUI(QMainWindow):
                 if track_name == "A1 Audio":
                     self.media_player.set_track_gain("A1 Audio", linear_gain, muted)
                 elif track_name in ("A2 Dub", "TS1"):
-                    self.media_player.set_track_gain("TS1", linear_gain, muted)
+                    is_dubbed_mode = getattr(self, "_preview_audio_track_mode", "dubbed") != "original"
+                    self.media_player.set_track_gain("TS1", linear_gain, muted or not is_dubbed_mode)
                 elif track_name == "A2 Music":
+                    is_dubbed_mode = getattr(self, "_preview_audio_track_mode", "dubbed") != "original"
                     for m_track in self._music_audio_tracks():
                         m_id = str(m_track.get("id") or m_track.get("path", "A2 Music"))
-                        self.media_player.set_track_gain(m_id, linear_gain, muted)
+                        self.media_player.set_track_gain(m_id, linear_gain, muted or not is_dubbed_mode)
                 return
             except Exception:
                 pass

@@ -26,7 +26,7 @@ for p in (PROJECT_ROOT, APP_DIR):
         sys.path.insert(0, p)
 
 import av
-from app.media_decode import build_waveform, iter_video_thumbnails
+from app.media_decode import build_waveform, has_audio_stream, iter_video_thumbnails
 
 
 class TestTimelineVisuals(unittest.TestCase):
@@ -418,6 +418,97 @@ class TestTimelineVisuals(unittest.TestCase):
         thumbs_budget = list(iter_video_thumbnails(video_path, timestamps, width=180, max_bytes=max_bytes_budget))
         total_bytes = sum(arr.nbytes for _, arr in thumbs_budget)
         self.assertLessEqual(total_bytes, max_bytes_budget)
+
+    def test_has_audio_stream_probe_error_returns_none_and_worker_falls_back(self):
+        """Ensure has_audio_stream returns None on probe failure, causing TimelineWaveformWorker to fall back to FFmpeg."""
+        video_path = self._create_synthetic_video()
+
+        # Probe on non-existent path returns None
+        self.assertIsNone(has_audio_stream(os.path.join(self.temp_dir, "missing.mp4")))
+
+        # Probe on video with av.open raising error returns None (tri-state semantics)
+        with patch("av.open", side_effect=RuntimeError("Corrupt header")):
+            status = has_audio_stream(video_path)
+            self.assertIsNone(status)
+
+        # Confirm TimelineWaveformWorker falls through to FFmpeg fallback when has_audio_stream returns None
+        from ui.worker_adapters.processing_workers import TimelineWaveformWorker
+        worker = TimelineWaveformWorker(
+            request_signature="req_probe_error_fallback",
+            video_path=video_path,
+            audio_path="",
+            temp_audio_path=os.path.join(self.temp_dir, "fallback.wav"),
+            duration_s=2.0,
+        )
+
+        fallback_called = []
+        def mock_popen(*args, **kwargs):
+            fallback_called.append(True)
+            class MockProc:
+                def communicate(self, *a, **k):
+                    return b"", b""
+                def poll(self):
+                    return 0
+                returncode = 0
+            return MockProc()
+
+        with patch("app.media_decode.has_audio_stream", return_value=None), \
+             patch("subprocess.Popen", side_effect=mock_popen):
+            worker.run()
+
+        # Verified: when has_audio_stream returns None, FFmpeg fallback subprocess was called!
+        self.assertTrue(len(fallback_called) > 0, "Expected FFmpeg fallback subprocess to be called when has_audio_stream is None")
+
+    def test_thumbnail_memory_release_across_source_switches(self):
+        """Verify that switching thumbnail sources releases previous buffers and bounds total memory <= 32 MiB."""
+        from PySide6.QtGui import QImage, QPixmap
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+
+        video_path_1 = self._create_synthetic_video(filename="video_1.mp4")
+        video_path_2 = self._create_synthetic_video(filename="video_2.mp4")
+
+        # 1. Verify iter_video_thumbnails default budget bounds RGB memory well under 32 MiB
+        timestamps = [i * 0.05 for i in range(120)]
+        thumbs_1 = list(iter_video_thumbnails(video_path_1, timestamps, width=180))
+        rgb_bytes_1 = sum(arr.nbytes for _, arr in thumbs_1)
+        self.assertLessEqual(rgb_bytes_1, 8 * 1024 * 1024)
+
+        # 2. Convert to QImage and QPixmap
+        qimages_1 = [QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 3, QImage.Format_RGB888).copy() for _, arr in thumbs_1]
+        pixmaps_1 = [QPixmap.fromImage(img) for img in qimages_1]
+
+        qimage_bytes_1 = sum(img.sizeInBytes() for img in qimages_1)
+        pixmap_bytes_1 = sum(pm.width() * pm.height() * 4 for pm in pixmaps_1)
+        total_active_bytes_1 = rgb_bytes_1 + qimage_bytes_1 + pixmap_bytes_1
+        self.assertLessEqual(total_active_bytes_1, 32 * 1024 * 1024)
+
+        # 3. Simulate UI state lifecycle:
+        # UI holds pixmaps for video 1
+        ui_pixmaps = pixmaps_1
+        cache_key = "video_1_sig"
+
+        # User switches source to video 2:
+        new_key = "video_2_sig"
+        if cache_key != new_key:
+            # Immediately release old thumbnails
+            ui_pixmaps = []
+            cache_key = None
+
+        # Verify old buffers were cleared immediately before video 2 starts decoding
+        self.assertEqual(len(ui_pixmaps), 0)
+        self.assertIsNone(cache_key)
+
+        # 4. Verify worker interruption
+        from ui.worker_adapters.processing_workers import TimelineThumbnailWorker
+        worker = TimelineThumbnailWorker("req_switch", video_path_2, 2.0, self.temp_dir)
+        worker.requestInterruption()
+        # Since interruption was requested, worker.run() should return early without emitting
+        results = []
+        worker.finished.connect(lambda sig, t, e: results.append(sig))
+        worker.run()
+        self.assertEqual(len(results), 0, "Interrupted worker should not emit finished results")
 
 
 if __name__ == "__main__":

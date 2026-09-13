@@ -3730,6 +3730,11 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
             return
 
+        # Request signature changed: immediately release old thumbnail buffers
+        self._timeline_video_thumb_cache_key = None
+        self._timeline_video_thumbnails = []
+        self.timeline.set_video_thumbnails([])
+
         duration_s = max(0.0, float(getattr(self.timeline, "duration", 0) or 0) / 1000.0)
         if duration_s <= 0.0:
             duration_s = max(0.0, float(getattr(self.timeline, "_duration", 0.0) or 0.0))
@@ -3758,7 +3763,14 @@ class VideoTranslatorGUI(QMainWindow):
                 return
         worker = self._timeline_thumbnail_worker
         if worker is not None and worker.isRunning():
-            return
+            if getattr(worker, "request_signature", None) != request_signature:
+                try:
+                    worker.requestInterruption()
+                except Exception:
+                    pass
+                self._timeline_thumbnail_worker = None
+            else:
+                return
         video_path = self._normalize_local_file_path(self.video_path_edit.text().strip())
         thumb_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_thumbnails")
         worker = TimelineThumbnailWorker(request_signature, video_path, duration_s, thumb_dir)
@@ -16189,6 +16201,8 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
         self._desired_timeline_thumbnail_request = None
+        if hasattr(self, "timeline"):
+            self.timeline.set_video_thumbnails([])
         self._allow_post_pipeline_preview_assets = False
         self._pending_timeline_waveform_refresh = False
         self._pending_timeline_thumbnail_refresh = False

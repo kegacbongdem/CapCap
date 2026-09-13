@@ -491,11 +491,17 @@ class BoundedWaveformCache:
 _WAVEFORM_CACHE = BoundedWaveformCache()
 
 
-def has_audio_stream(path: Union[str, os.PathLike]) -> bool:
-    """Check if a media file contains at least one decodable audio stream."""
+def has_audio_stream(path: Union[str, os.PathLike]) -> Optional[bool]:
+    """Check if a media file contains at least one decodable audio stream.
+
+    Returns:
+        True: Confirmed to contain >= 1 audio stream.
+        False: Successfully opened and confirmed to have 0 audio streams.
+        None: Probe failed, container unopenable, or PyAV unavailable.
+    """
     path_str = os.fspath(path)
     if not path_str or not os.path.exists(path_str):
-        return False
+        return None
     try:
         import soundfile as sf
         with sf.SoundFile(path_str) as f:
@@ -508,8 +514,8 @@ def has_audio_stream(path: Union[str, os.PathLike]) -> bool:
             with av.open(path_str) as container:
                 return len(container.streams.audio) > 0
         except Exception:
-            pass
-    return False
+            return None
+    return None
 
 
 def iter_video_thumbnails(
@@ -518,7 +524,7 @@ def iter_video_thumbnails(
     *,
     width: int = 180,
     max_thumbnails: int = 120,
-    max_bytes: int = 32 * 1024 * 1024,
+    max_bytes: int = 8 * 1024 * 1024,
 ) -> Iterator[Tuple[float, np.ndarray]]:
     """Yield (actual_pts_seconds, rgb_ndarray) for requested video timestamps.
 

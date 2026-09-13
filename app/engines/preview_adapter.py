@@ -1,4 +1,5 @@
 from preview_processor import (
+    apply_timewarp_to_video_clip,
     mux_audio_into_video_clip_for_preview,
     mux_audio_into_video_for_preview,
     render_subtitle_frame_preview,
@@ -25,6 +26,24 @@ class PreviewAdapter:
     def trim_video_clip(self, video_path: str, output_video_path: str, start_seconds: float, duration_seconds: float) -> str:
         return trim_video_clip(video_path, output_video_path, start_seconds, duration_seconds)
 
+    def apply_timewarp_to_video_clip(
+        self,
+        input_video_path: str,
+        output_video_path: str,
+        warps: list[dict],
+        media_duration: float,
+        fps: float = 30.0,
+        include_audio: bool = False,
+    ) -> str:
+        return apply_timewarp_to_video_clip(
+            input_video_path,
+            output_video_path,
+            warps,
+            media_duration,
+            fps=fps,
+            include_audio=include_audio,
+        )
+
     def mux_audio_into_clip(
         self,
         video_path: str,
@@ -39,6 +58,7 @@ class PreviewAdapter:
         focus_x=0.5,
         focus_y=0.5,
         video_filter_state=None,
+        video_is_pretrimmed: bool = False,
     ) -> str:
         return mux_audio_into_video_clip_for_preview(
             video_path,
@@ -52,6 +72,7 @@ class PreviewAdapter:
             focus_x=focus_x,
             focus_y=focus_y,
             video_filter_state=video_filter_state,
+            video_is_pretrimmed=video_is_pretrimmed,
         )
 
     def render_subtitle_frame(

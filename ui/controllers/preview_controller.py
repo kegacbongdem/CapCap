@@ -1262,7 +1262,10 @@ class PreviewController:
             )
             return
 
-        start_seconds = max(0.0, self.gui.media_player.position() / 1000.0)
+        if hasattr(self.gui, "media_player") and hasattr(self.gui.media_player, "timeline_position_ms"):
+            start_seconds = max(0.0, self.gui.media_player.timeline_position_ms() / 1000.0)
+        else:
+            start_seconds = max(0.0, self.gui.media_player.position() / 1000.0)
         duration_seconds = 5.0
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         text_canvas_width, text_canvas_height = target_width, target_height
@@ -1328,6 +1331,7 @@ class PreviewController:
             logo_layers=logo_layers,
             text_image_layers=text_image_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
+            video_time_warps=list(getattr(self.gui, "video_time_warps", []) or []),
         )
         self.gui.quick_preview_thread.finished.connect(self.gui.on_quick_preview_ready)
         self.gui.quick_preview_thread.start()
@@ -1339,10 +1343,6 @@ class PreviewController:
         if not video_path or not os.path.exists(video_path):
             if show_dialog:
                 QMessageBox.warning(self.gui, t("Error"), t("Please choose a video first."))
-            return
-
-        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
-        preview_srt_path = ""
         preview_segments = []
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_full_active_subtitle_srt()

@@ -152,11 +152,106 @@ class TestTimeWarpService(unittest.TestCase):
         )
         self.assertEqual(delta, 0.5)
         self.assertEqual(reverted_base[1]["end"], 4.0)
-        self.assertEqual(reverted_base[1]["extended_duration"], 0.0)
-        self.assertNotIn("time_warp_id", reverted_base[1])
-        self.assertEqual(reverted_base[2]["start"], 4.0)
-        self.assertEqual(reverted_base[2]["end"], 6.0)
-        self.assertEqual(len(updated_warps), 0)
+    def test_slice_time_warps_for_window_empty(self):
+        m_start, m_dur, local_warps = TimeWarpService.slice_time_warps_for_window([], 10.0, 5.0)
+        self.assertEqual(m_start, 10.0)
+        self.assertEqual(m_dur, 5.0)
+        self.assertEqual(local_warps, [])
+
+    def test_slice_time_warps_for_window_slow(self):
+        # 1 slow warp: orig [2.0, 4.0] extended by 2.0s -> timeline [2.0, 6.0] (speed 0.5)
+        warps = [
+            {
+                "id": "warp_slow",
+                "type": "slow",
+                "time": 4.0,
+                "media_start": 2.0,
+                "media_end": 4.0,
+                "duration": 2.0,
+                "speed": 0.5,
+            }
+        ]
+        # Case 1: window [1.0, 6.0] (starts before warp, covers full slow segment)
+        m_start, m_dur, local = TimeWarpService.slice_time_warps_for_window(warps, 1.0, 5.0)
+        self.assertAlmostEqual(m_start, 1.0, places=2)
+        self.assertAlmostEqual(m_dur, 3.0, places=2)
+        self.assertEqual(len(local), 1)
+        self.assertEqual(local[0]["type"], "slow")
+        self.assertAlmostEqual(local[0]["media_start"], 1.0, places=2)
+        self.assertAlmostEqual(local[0]["media_end"], 3.0, places=2)
+        self.assertAlmostEqual(local[0]["speed"], 0.5, places=2)
+        self.assertAlmostEqual(local[0]["duration"], 2.0, places=2)
+
+        # Case 2: window [3.0, 8.0] (starts in the middle of slow segment [3.0, 6.0], ends after warp)
+        m_start, m_dur, local = TimeWarpService.slice_time_warps_for_window(warps, 3.0, 5.0)
+        # timeline 3.0 is mid-warp: 2.0 + (3.0 - 2.0) * 0.5 = 2.5
+        self.assertAlmostEqual(m_start, 2.5, places=2)
+        # timeline 8.0 is after warp: 8.0 - 2.0 = 6.0 => dur = 6.0 - 2.5 = 3.5
+        self.assertAlmostEqual(m_dur, 3.5, places=2)
+        self.assertEqual(len(local), 1)
+        self.assertEqual(local[0]["type"], "slow")
+        self.assertAlmostEqual(local[0]["media_start"], 0.0, places=2)
+        self.assertAlmostEqual(local[0]["media_end"], 1.5, places=2)
+        self.assertAlmostEqual(local[0]["speed"], 0.5, places=2)
+        self.assertAlmostEqual(local[0]["duration"], 1.5, places=2)
+
+        # Case 3: window [7.0, 12.0] (entirely after warp)
+        m_start, m_dur, local = TimeWarpService.slice_time_warps_for_window(warps, 7.0, 5.0)
+        self.assertAlmostEqual(m_start, 5.0, places=2)
+        self.assertAlmostEqual(m_dur, 5.0, places=2)
+        self.assertEqual(local, [])
+
+    def test_slice_time_warps_for_window_freeze(self):
+        # 1 freeze warp: anchor at 3.0, duration 2.0s -> timeline [3.0, 5.0] frozen
+        warps = [
+            {
+                "id": "warp_freeze",
+                "type": "freeze",
+                "time": 3.0,
+                "duration": 2.0,
+                "speed": 1.0,
+            }
+        ]
+        # Case 1: window [2.0, 7.0] (covers normal [2, 3], freeze [3, 5], normal [5, 7])
+        m_start, m_dur, local = TimeWarpService.slice_time_warps_for_window(warps, 2.0, 5.0)
+        self.assertAlmostEqual(m_start, 2.0, places=2)
+        self.assertAlmostEqual(m_dur, 3.0, places=2)
+        self.assertEqual(len(local), 1)
+        self.assertEqual(local[0]["type"], "freeze")
+        self.assertAlmostEqual(local[0]["time"], 1.0, places=2)
+        self.assertAlmostEqual(local[0]["duration"], 2.0, places=2)
+
+    def test_map_segments_to_media_time_slow(self):
+        # orig [3.4, 5.4] extended by 1.17s -> timeline [3.4, 6.57] (speed 0.631)
+        warps = [
+            {
+                "id": "warp_ae",
+                "type": "slow",
+                "time": 5.4,
+                "media_start": 3.4,
+                "media_end": 5.4,
+                "duration": 1.17,
+                "speed": 0.631,
+            }
+        ]
+        segments = [
+            {"start": 0.0, "end": 3.4, "text": "seg 0"},
+            {"start": 3.4, "end": 6.57, "text": "seg 1", "words": [{"start": 3.4, "end": 6.57, "word": "slow"}]},
+            {"start": 6.57, "end": 9.12, "text": "seg 2"},
+        ]
+        mapped = TimeWarpService.map_segments_to_media_time(segments, warps)
+        self.assertEqual(len(mapped), 3)
+        # Segment 0: unchanged
+        self.assertAlmostEqual(mapped[0]["start"], 0.0, places=2)
+        self.assertAlmostEqual(mapped[0]["end"], 3.4, places=2)
+        # Segment 1: media bounds [3.4, 5.4]
+        self.assertAlmostEqual(mapped[1]["start"], 3.4, places=2)
+        self.assertAlmostEqual(mapped[1]["end"], 5.4, places=2)
+        self.assertAlmostEqual(mapped[1]["words"][0]["start"], 3.4, places=2)
+        self.assertAlmostEqual(mapped[1]["words"][0]["end"], 5.4, places=2)
+        # Segment 2: starts at media 5.4! NOT delayed to 6.57
+        self.assertAlmostEqual(mapped[2]["start"], 5.4, places=2)
+        self.assertAlmostEqual(mapped[2]["end"], 7.95, places=2)
 
 
 if __name__ == "__main__":

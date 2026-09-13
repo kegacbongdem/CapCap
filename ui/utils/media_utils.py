@@ -13,6 +13,7 @@ except ImportError:
 
 def setup_media_player(gui):
     gui.media_player = create_media_backend(gui.video_view)
+    gui.media_player.gui = gui
     if hasattr(gui, "log"):
         gui.log(f"[Preview] media backend: {gui.media_player.backend_name}")
     if getattr(gui.media_player, "backend_name", "") == "qt":

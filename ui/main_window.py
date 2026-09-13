@@ -11216,12 +11216,20 @@ class VideoTranslatorGUI(QMainWindow):
 
                     video_ext_row.addWidget(ext_label)
                     video_ext_row.addWidget(ext_spin)
-                    video_ext_row.addWidget(extend_slow_btn)
-                    video_ext_row.addWidget(extend_btn)
-                    video_ext_row.addWidget(fit_voice_btn)
                     video_ext_row.addStretch()
 
+                    video_btn_row = QHBoxLayout()
+                    video_btn_row.setContentsMargins(0, 0, 0, 0)
+                    video_btn_row.setSpacing(6)
+                    video_btn_row.addWidget(extend_slow_btn)
+                    video_btn_row.addWidget(extend_btn)
+                    video_btn_row.addWidget(fit_voice_btn)
+                    video_btn_row.addStretch()
+
                 card_layout.addLayout(video_ext_row)
+                if ext_dur <= 0.0:
+                    card_layout.addLayout(video_btn_row)
+
                 card_layout.addLayout(timing_meta_layout)
                 card_layout.addWidget(original_label)
 
@@ -13655,7 +13663,8 @@ class VideoTranslatorGUI(QMainWindow):
             self._loaded_live_ass_path = ass_path
             self._loaded_live_ass_signature = signature
             self._set_subtitle_item_text_rendering(False)
-            self.update_playback_subtitle_highlight(int(self.media_player.position() or 0))
+            pos = int(self.media_player.timeline_position_ms() if hasattr(self.media_player, "timeline_position_ms") else (self.media_player.position() or 0))
+            self.update_playback_subtitle_highlight(pos)
         except Exception as exc:
             self.runtime_log_received.emit(f"[Subtitle Background] Could not apply exact layout: {exc}")
 
@@ -13668,12 +13677,21 @@ class VideoTranslatorGUI(QMainWindow):
             self._loaded_live_ass_signature = None
             return "", ""
 
+        from ui.utils.media_utils import _is_warped_preview
+        from app.services.time_warp_service import TimeWarpService
+
+        warps = getattr(self, "video_time_warps", [])
+        if warps and not _is_warped_preview(self):
+            render_segments = TimeWarpService.map_segments_to_media_time(segments, warps)
+        else:
+            render_segments = segments
+
         # Full-block geometry is measured from libass itself.  Scheduling it
         # here keeps all callers (style controls, playback callbacks, project
         # load) non-blocking.  The previous exact track stays visible while a
         # newer style is being measured after the debounce interval.
         if self._uses_exact_full_block_subtitle_background():
-            self._schedule_deferred_subtitle_ass_build(segments)
+            self._schedule_deferred_subtitle_ass_build(render_segments)
             return self.live_preview_subtitle_path, self.live_preview_ass_path
 
         # A pending Full Block worker must never re-apply an older ASS file
@@ -13698,7 +13716,7 @@ class VideoTranslatorGUI(QMainWindow):
         source_width = max(1, int(getattr(self.video_view, "video_source_width", 0) or 1920))
         source_height = max(1, int(getattr(self.video_view, "video_source_height", 0) or 1080))
         canvas_width, canvas_height = self._subtitle_render_dimensions()
-        subtitle_style = self.get_subtitle_export_style(segments=segments)
+        subtitle_style = self.get_subtitle_export_style(segments=render_segments)
         # MPV/libass renders subtitles on the source frame before MPV applies
         # its Fit/Fill presentation transform. Convert custom canvas-relative
         # anchors back into source coordinates so the visible result follows
@@ -13722,7 +13740,7 @@ class VideoTranslatorGUI(QMainWindow):
             video_path,
             video_width,
             video_height,
-            repr(segments),
+            repr(render_segments),
             repr(subtitle_style),
         )
         if (
@@ -13739,7 +13757,7 @@ class VideoTranslatorGUI(QMainWindow):
         # background is already blank-subbed and can host our live overlay/mpv track comfortably.
         # This solves the user's complaint that 'it reverts to original'.
 
-        generate_srt(segments, preview_srt_path)
+        generate_srt(render_segments, preview_srt_path)
         self.live_preview_subtitle_path = preview_srt_path
         self.live_preview_ass_path = srt_to_ass(
             preview_srt_path,
@@ -14049,7 +14067,7 @@ class VideoTranslatorGUI(QMainWindow):
                         self._loaded_live_ass_path = ass_path
                         self._loaded_live_ass_signature = getattr(self, "_live_preview_signature", None)
                     self._set_subtitle_item_text_rendering(False)
-                    position = int(self.media_player.position() or 0)
+                    position = int(self.media_player.timeline_position_ms() if hasattr(self.media_player, "timeline_position_ms") else (self.media_player.position() or 0))
                     self.update_playback_subtitle_highlight(position)
                     return
             self.media_player.clear_subtitle()
@@ -14061,7 +14079,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._set_subtitle_item_text_rendering(True)
         position = 0
         try:
-            position = int(self.media_player.position())
+            position = int(self.media_player.timeline_position_ms() if hasattr(self.media_player, "timeline_position_ms") else (self.media_player.position() or 0))
         except Exception:
             pass
         self.update_playback_subtitle_highlight(position)

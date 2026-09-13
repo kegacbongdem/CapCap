@@ -360,7 +360,7 @@ class _PreviewAudioWorker(QObject):
     def _is_time_frozen(self, t_sec: float) -> bool:
         """Return True if timestamp t_sec falls within a freeze frame warp."""
         accum = 0.0
-        for w in sorted(self._warps, key=lambda x: float(x.get("time", 0.0))):
+        for w in sorted(self._warps, key=lambda x: float(x.get("media_start", x.get("time", 0.0)))):
             w_type = w.get("type", "freeze")
             dur = float(w.get("duration", 0.0))
             if w_type != "freeze":

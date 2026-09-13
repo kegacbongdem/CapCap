@@ -357,6 +357,24 @@ class EngineRuntime:
     def trim_video_clip(self, video_path: str, output_video_path: str, start_seconds: float, duration_seconds: float) -> str:
         return self.preview.trim_video_clip(video_path, output_video_path, start_seconds, duration_seconds)
 
+    def apply_timewarp_to_video_clip(
+        self,
+        input_video_path: str,
+        output_video_path: str,
+        warps: list[dict],
+        media_duration: float,
+        fps: float = 30.0,
+        include_audio: bool = False,
+    ) -> str:
+        return self.preview.apply_timewarp_to_video_clip(
+            input_video_path,
+            output_video_path,
+            warps,
+            media_duration,
+            fps=fps,
+            include_audio=include_audio,
+        )
+
     def mux_audio_into_clip(
         self,
         video_path: str,
@@ -364,6 +382,14 @@ class EngineRuntime:
         output_video_path: str,
         start_seconds: float,
         duration_seconds: float,
+        *,
+        target_width=None,
+        target_height=None,
+        output_scale_mode="fit",
+        focus_x=0.5,
+        focus_y=0.5,
+        video_filter_state=None,
+        video_is_pretrimmed: bool = False,
     ) -> str:
         return self.preview.mux_audio_into_clip(
             video_path,
@@ -371,6 +397,13 @@ class EngineRuntime:
             output_video_path,
             start_seconds,
             duration_seconds,
+            target_width=target_width,
+            target_height=target_height,
+            scale_mode=output_scale_mode,
+            focus_x=focus_x,
+            focus_y=focus_y,
+            video_filter_state=video_filter_state,
+            video_is_pretrimmed=video_is_pretrimmed,
         )
 
     def render_subtitle_frame(

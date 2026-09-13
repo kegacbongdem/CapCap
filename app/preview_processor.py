@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 
 from runtime_paths import bin_path, subprocess_text_kwargs
@@ -188,6 +189,71 @@ def trim_video_clip(video_path: str, output_video_path: str, start_seconds: floa
     return output_video_path
 
 
+def apply_timewarp_to_video_clip(
+    input_video_path: str,
+    output_video_path: str,
+    warps: list[dict],
+    media_duration: float,
+    fps: float = 30.0,
+    include_audio: bool = False,
+) -> str:
+    """Apply time warps (slow-motion / freeze frame) to a video clip using FFmpeg filtergraph."""
+    if not warps:
+        if input_video_path != output_video_path:
+            shutil.copyfile(input_video_path, output_video_path)
+        return output_video_path
+
+    ffmpeg = _ffmpeg_path()
+    if not os.path.exists(ffmpeg):
+        raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
+    if not os.path.exists(input_video_path):
+        raise FileNotFoundError(f"Video not found: {input_video_path}")
+
+    from app.services.time_warp_service import TimeWarpService
+    audio_arg = "0:a" if include_audio else None
+    warp_res = TimeWarpService.build_ffmpeg_freeze_filtergraph(
+        "0:v", warps, media_duration, fps=fps, audio_stream=audio_arg
+    )
+    if audio_arg:
+        filter_str, v_pad, a_pad = warp_res
+    else:
+        filter_str, v_pad = warp_res
+        a_pad = None
+
+    if not filter_str:
+        if input_video_path != output_video_path:
+            shutil.copyfile(input_video_path, output_video_path)
+        return output_video_path
+
+    os.makedirs(os.path.dirname(output_video_path) or ".", exist_ok=True)
+    base_cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        input_video_path,
+        "-filter_complex",
+        filter_str,
+        "-map",
+        f"[{v_pad.strip('[]')}]",
+    ]
+    if a_pad:
+        base_cmd += ["-map", f"[{a_pad.strip('[]')}]", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        base_cmd += ["-an"]
+
+    _run_ffmpeg_with_h264_fallback(
+        ffmpeg,
+        base_cmd,
+        output_video_path,
+        fast=True,
+        error_message="FFmpeg apply timewarp to clip failed.",
+    )
+    return output_video_path
+
+
 def mux_audio_into_video_for_preview(
     video_path: str,
     audio_path: str,
@@ -303,6 +369,7 @@ def mux_audio_into_video_clip_for_preview(
     focus_x=0.5,
     focus_y=0.5,
     video_filter_state=None,
+    video_is_pretrimmed: bool = False,
 ) -> str:
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
@@ -325,10 +392,15 @@ def mux_audio_into_video_clip_for_preview(
         "-loglevel",
         "error",
         "-y",
-        "-ss",
-        str(max(0.0, float(start_seconds))),
-        "-t",
-        str(max(0.1, float(duration_seconds))),
+    ]
+    if not video_is_pretrimmed:
+        cmd += [
+            "-ss",
+            str(max(0.0, float(start_seconds))),
+            "-t",
+            str(max(0.1, float(duration_seconds))),
+        ]
+    cmd += [
         "-i",
         video_path,
         "-ss",

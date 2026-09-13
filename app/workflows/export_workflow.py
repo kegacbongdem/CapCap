@@ -136,6 +136,11 @@ class ExportWorkflow:
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, f"final_mux_{int(time.time())}.mp4")
 
+    def _build_temp_warped_path(self, project_temp_dir: str = "") -> str:
+        tmp_dir = str(project_temp_dir or "").strip() or os.path.join(self.workspace_root, "temp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, f"final_warped_{int(time.time())}.mp4")
+
     def _export_subtitle_video(
         self,
         *,
@@ -621,7 +626,9 @@ class ExportWorkflow:
         print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
 
         tmp_mux_path = ""
+        tmp_warped_video = ""
         try:
+            warps = (subtitle_style or {}).get("video_time_warps")
             if mode == "subtitle":
                 self._emit_progress(on_progress, 15, "Burning subtitles into the video...")
                 if abs(float(original_audio_gain_db or 0.0)) > 0.001:
@@ -651,22 +658,32 @@ class ExportWorkflow:
                     on_progress=_sub_prog_s,
                 )
             elif mode == "voice":
+                video_for_mux = video_path
+                effective_style = subtitle_style
+                if warps:
+                    tmp_warped_video = self._build_temp_warped_path(project_temp_dir)
+                    self._emit_progress(on_progress, 10, "Applying video time warps...")
+                    self.engine_runtime.apply_timewarp_to_video_clip(
+                        video_path,
+                        tmp_warped_video,
+                        warps,
+                        self.engine_runtime.get_video_duration(video_path),
+                        fps=target_fps or 30.0,
+                        include_audio=False,
+                    )
+                    video_for_mux = tmp_warped_video
+                    effective_style = dict(subtitle_style or {})
+                    effective_style["video_time_warps"] = None
+
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
-                # Voice-only exports normally skip the ASS pass. Keep that
-                # fast path when there is no Text layer, but burn text after
-                # muxing when the editor contains text overlays.
                 voice_output = output_path
                 if text_image_layers:
                     tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
                     voice_output = tmp_mux_path
                 self.engine_runtime.mux_audio_for_preview(
-                    video_path,
+                    video_for_mux,
                     audio_path,
                     voice_output,
-                    # The subsequent Text/overlay pass owns scaling and the
-                    # color grade, so keep this intermediate audio mux a
-                    # stream-copy video pass.  Otherwise the filters would
-                    # be applied once here and once again below.
                     target_width=None if voice_output != output_path else target_w,
                     target_height=None if voice_output != output_path else target_h,
                     output_scale_mode=output_scale_mode,
@@ -685,7 +702,7 @@ class ExportWorkflow:
                         srt_path=srt_path,
                         ass_path=ass_path,
                         output_path=output_path,
-                        subtitle_style=subtitle_style,
+                        subtitle_style=effective_style,
                         target_width=target_w,
                         target_height=target_h,
                         output_scale_mode=output_scale_mode,
@@ -701,11 +718,28 @@ class ExportWorkflow:
                         on_progress=_sub_prog_v,
                     )
             elif mode == "both":
+                video_for_mux = video_path
+                effective_style = subtitle_style
+                if warps:
+                    tmp_warped_video = self._build_temp_warped_path(project_temp_dir)
+                    self._emit_progress(on_progress, 10, "Applying video time warps...")
+                    self.engine_runtime.apply_timewarp_to_video_clip(
+                        video_path,
+                        tmp_warped_video,
+                        warps,
+                        self.engine_runtime.get_video_duration(video_path),
+                        fps=target_fps or 30.0,
+                        include_audio=False,
+                    )
+                    video_for_mux = tmp_warped_video
+                    effective_style = dict(subtitle_style or {})
+                    effective_style["video_time_warps"] = None
+
                 tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
-                self._emit_progress(on_progress, 15, "Muxing Vietnamese audio with the source video...")
+                self._emit_progress(on_progress, 20, "Muxing Vietnamese audio with the source video...")
                 # Keep this mux fast (no scaling). Scaling happens in the subtitle-burn step.
                 self.engine_runtime.mux_audio_for_preview(
-                    video_path,
+                    video_for_mux,
                     audio_path,
                     tmp_mux_path,
                     output_scale_mode=output_scale_mode,
@@ -723,7 +757,7 @@ class ExportWorkflow:
                     srt_path=srt_path,
                     ass_path=ass_path,
                     output_path=output_path,
-                    subtitle_style=subtitle_style,
+                    subtitle_style=effective_style,
                     target_width=target_w,
                     target_height=target_h,
                     output_scale_mode=output_scale_mode,
@@ -749,6 +783,11 @@ class ExportWorkflow:
             self._mark_failed(state)
             raise
         finally:
+            if tmp_warped_video and os.path.exists(tmp_warped_video):
+                try:
+                    os.remove(tmp_warped_video)
+                except OSError:
+                    pass
             if tmp_mux_path and os.path.exists(tmp_mux_path):
                 try:
                     os.remove(tmp_mux_path)

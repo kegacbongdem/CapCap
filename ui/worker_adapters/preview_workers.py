@@ -35,26 +35,46 @@ class PreviewMuxWorker(QThread):
         self.temp_dir = temp_dir
 
     def run(self):
-        temp_mux_path = ""
+        temp_paths = []
         try:
-            from preview_processor import mux_audio_into_video_for_preview
+            from video_processor import get_video_duration
+            from preview_processor import apply_timewarp_to_video_clip, mux_audio_into_video_for_preview
 
-            current_video = self.video_path
-            # The subtitle render pass owns the final canvas and grade.  Do
-            # not apply them while muxing audio as that would re-filter the
-            # same frames in Subtitle/Both preview workflows.
             final_render_applies_filters = bool(
                 self.render_subtitles
                 and self.mode in ("subtitle", "both")
                 and self.srt_path
                 and os.path.exists(self.srt_path)
             )
-            if self.audio_path and os.path.exists(self.audio_path):
-                temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
-                os.makedirs(temp_dir, exist_ok=True)
-                temp_mux_path = os.path.normpath(os.path.join(temp_dir, f"preview_mux_{int(time.time())}.mp4"))
-                current_video = mux_audio_into_video_for_preview(
+
+            temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            warps = (self.subtitle_style or {}).get("video_time_warps")
+            has_dubbed_audio = bool(self.mode in ("voice", "both") and self.audio_path and os.path.exists(self.audio_path))
+            current_video = self.video_path
+
+            # When warps exist and we have dubbed/timeline audio (voice/both):
+            # Warp the video track FIRST (without audio) so video frames match timeline audio coordinates.
+            if warps and has_dubbed_audio:
+                temp_warped_path = os.path.normpath(os.path.join(temp_dir, f"preview_warped_{int(time.time())}.mp4"))
+                temp_paths.append(temp_warped_path)
+                apply_timewarp_to_video_clip(
                     self.video_path,
+                    temp_warped_path,
+                    warps,
+                    get_video_duration(self.video_path),
+                    include_audio=False,
+                )
+                current_video = temp_warped_path
+                effective_warps_for_subtitles = None
+            else:
+                effective_warps_for_subtitles = warps
+
+            if has_dubbed_audio:
+                temp_mux_path = os.path.normpath(os.path.join(temp_dir, f"preview_mux_{int(time.time())}.mp4"))
+                temp_paths.append(temp_mux_path)
+                current_video = mux_audio_into_video_for_preview(
+                    current_video,
                     self.audio_path,
                     temp_mux_path,
                     target_width=None if final_render_applies_filters else self.target_width,
@@ -65,7 +85,6 @@ class PreviewMuxWorker(QThread):
                     video_filter_state={} if final_render_applies_filters else self.video_filter_state,
                 )
 
-            warps = (self.subtitle_style or {}).get("video_time_warps")
             if self.render_subtitles and self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
                 engine = EngineRuntime()
                 ok = engine.embed_subtitles(
@@ -82,15 +101,13 @@ class PreviewMuxWorker(QThread):
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
                     fast=True,
-                    video_time_warps=warps,
+                    video_time_warps=effective_warps_for_subtitles,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview video.")
                 output = self.output_path
-            elif warps:
+            elif effective_warps_for_subtitles:
                 from video_processor import embed_ass_subtitles, srt_to_ass
-                temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
-                os.makedirs(temp_dir, exist_ok=True)
                 empty_srt = os.path.join(temp_dir, f"empty_preview_{int(time.time())}.srt")
                 with open(empty_srt, "w", encoding="utf-8") as f:
                     f.write("")
@@ -109,7 +126,7 @@ class PreviewMuxWorker(QThread):
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
                     fast=True,
-                    video_time_warps=warps,
+                    video_time_warps=effective_warps_for_subtitles,
                 )
                 for p in (empty_srt, empty_ass):
                     try:
@@ -129,17 +146,18 @@ class PreviewMuxWorker(QThread):
         except Exception as exc:
             self.finished.emit("", str(exc))
         finally:
-            if temp_mux_path and os.path.exists(temp_mux_path):
-                try:
-                    os.remove(temp_mux_path)
-                except OSError:
-                    pass
+            for p in temp_paths:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
 
 
 class QuickPreviewWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, mask_regions=None, blur_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
+    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, mask_regions=None, blur_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir="", video_time_warps=None):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
@@ -163,11 +181,13 @@ class QuickPreviewWorker(QThread):
         self.text_ass_path = text_ass_path
         self.text_image_layers = text_image_layers or []
         self.temp_dir = temp_dir
+        self.video_time_warps = list(video_time_warps if video_time_warps is not None else (self.subtitle_style or {}).get("video_time_warps") or [])
 
     def run(self):
         temp_paths = []
         try:
-            from preview_processor import mux_audio_into_video_clip_for_preview, trim_video_clip
+            from preview_processor import apply_timewarp_to_video_clip, mux_audio_into_video_clip_for_preview, trim_video_clip
+            from app.services.time_warp_service import TimeWarpService
 
             temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
             os.makedirs(temp_dir, exist_ok=True)
@@ -177,40 +197,62 @@ class QuickPreviewWorker(QThread):
                 temp_paths.append(self.ass_path)
             temp_paths.extend(str(item.get("path", "")) for item in self.text_image_layers if item.get("path"))
             stamp = int(time.time())
+
+            raw_warps = list(self.video_time_warps or (self.subtitle_style or {}).get("video_time_warps") or [])
+            media_start, media_dur, clip_warps = TimeWarpService.slice_time_warps_for_window(
+                raw_warps, self.start_seconds, self.duration_seconds
+            )
+
             base_clip = os.path.join(temp_dir, f"preview_base_{stamp}.mp4")
             temp_paths.append(base_clip)
-            trim_video_clip(self.video_path, base_clip, self.start_seconds, self.duration_seconds)
+            trim_video_clip(self.video_path, base_clip, media_start, media_dur)
 
-            current_video = base_clip
+            # Apply timewarps (slow-motion / freeze) to the base clip if any exist
+            if clip_warps:
+                warped_clip = os.path.join(temp_dir, f"preview_warped_{stamp}.mp4")
+                temp_paths.append(warped_clip)
+                # If subtitle-only, keep and warp original audio; if voice/both, audio comes from audio_path
+                include_audio = (self.mode == "subtitle")
+                apply_timewarp_to_video_clip(
+                    base_clip,
+                    warped_clip,
+                    clip_warps,
+                    media_dur,
+                    include_audio=include_audio,
+                )
+                current_video = warped_clip
+            else:
+                current_video = base_clip
+
+            # If voice or both mode, mux the timeline audio slice into current_video
             if self.mode in ("voice", "both") and self.audio_path and os.path.exists(self.audio_path):
                 voice_clip = os.path.join(temp_dir, f"preview_voice_{stamp}.mp4")
                 temp_paths.append(voice_clip)
                 mux_audio_into_video_clip_for_preview(
-                    self.video_path,
+                    current_video,
                     self.audio_path,
                     voice_clip,
                     self.start_seconds,
                     self.duration_seconds,
-                    target_width=self.target_width,
-                    target_height=self.target_height,
+                    target_width=self.target_width if self.mode == "voice" and not (self.mask_regions or self.blur_regions or self.logo_layers or self.text_image_layers) else None,
+                    target_height=self.target_height if self.mode == "voice" and not (self.mask_regions or self.blur_regions or self.logo_layers or self.text_image_layers) else None,
                     scale_mode=self.output_scale_mode,
                     focus_x=self.output_fill_focus_x,
                     focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state if self.mode == "voice" else {},
+                    video_is_pretrimmed=True,
                 )
                 current_video = voice_clip
 
-            raw_warps = (self.subtitle_style or {}).get("video_time_warps") or []
-            clip_warps = []
-            if raw_warps:
-                c_start = float(self.start_seconds)
-                c_end = c_start + float(self.duration_seconds)
-                for w in raw_warps:
-                    w_t = float(w.get("time", 0.0))
-                    if c_start <= w_t <= c_end:
-                        cw = dict(w)
-                        cw["time"] = max(0.0, round(w_t - c_start, 3))
-                        clip_warps.append(cw)
+            has_overlays = bool(
+                self.mask_regions
+                or self.blur_regions
+                or self.logo_layers
+                or self.text_image_layers
+                or self.text_ass_path
+                or (self.target_width and self.target_height)
+                or self.video_filter_state
+            )
 
             if self.mode in ("subtitle", "both") and self.ass_path and os.path.exists(self.ass_path):
                 engine = EngineRuntime()
@@ -229,9 +271,9 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
-                    audio_gain_db=self.original_audio_gain_db,
+                    audio_gain_db=self.original_audio_gain_db if self.mode == "subtitle" else 0.0,
                     fast=True,
-                    video_time_warps=clip_warps,
+                    video_time_warps=None,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")
@@ -254,13 +296,13 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
-                    audio_gain_db=self.original_audio_gain_db,
+                    audio_gain_db=self.original_audio_gain_db if self.mode == "subtitle" else 0.0,
                     fast=True,
-                    video_time_warps=clip_warps,
+                    video_time_warps=None,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")
-            elif clip_warps:
+            elif has_overlays:
                 from video_processor import embed_ass_subtitles, srt_to_ass
                 empty_srt = os.path.join(temp_dir, f"empty_clip_{stamp}.srt")
                 with open(empty_srt, "w", encoding="utf-8") as f:
@@ -280,9 +322,9 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
-                    audio_gain_db=self.original_audio_gain_db,
+                    audio_gain_db=self.original_audio_gain_db if self.mode == "subtitle" else 0.0,
                     fast=True,
-                    video_time_warps=clip_warps,
+                    video_time_warps=None,
                 )
                 for p in (empty_srt, empty_ass):
                     try:

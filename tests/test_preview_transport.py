@@ -941,6 +941,96 @@ class TestPreviewTransport(unittest.TestCase):
         # Block output should have 160 float32 samples with no NaNs
         self.assertFalse(np.isnan(block).any())
 
+    def test_quick_preview_worker_applies_timewarp_in_voice_mode(self):
+        """Verify QuickPreviewWorker slices warps, applies timewarp to base clip, and muxes audio."""
+        from ui.worker_adapters.preview_workers import QuickPreviewWorker
+
+        warps = [
+            {
+                "type": "slow",
+                "media_start": 2.0,
+                "media_end": 4.0,
+                "speed": 0.5,
+                "time": 2.0,
+                "duration": 4.0,
+            }
+        ]
+
+        worker = QuickPreviewWorker(
+            video_path="input_vid.mp4",
+            output_path="out_preview.mp4",
+            mode="voice",
+            start_seconds=2.0,
+            duration_seconds=5.0,
+            audio_path="timeline_audio.wav",
+            video_time_warps=warps,
+        )
+
+        with patch("preview_processor.trim_video_clip") as mock_trim, \
+             patch("preview_processor.apply_timewarp_to_video_clip") as mock_timewarp, \
+             patch("preview_processor.mux_audio_into_video_clip_for_preview") as mock_mux, \
+             patch("os.path.exists", return_value=True), \
+             patch("shutil.copyfile") as mock_copy:
+
+            worker.run()
+
+            # Window [2.0, 7.0] on timeline:
+            # Slow warp is at timeline [2.0, 8.0] at speed 0.5.
+            # 5.0s window on timeline running at 0.5x speed consumes 5.0 * 0.5 = 2.5s of media.
+            # So media_start = 2.0, media_dur = 2.5 (from 2.0 to 4.5).
+            mock_trim.assert_called_once()
+            trim_args = mock_trim.call_args[0]
+            self.assertEqual(trim_args[0], "input_vid.mp4")
+            self.assertAlmostEqual(trim_args[2], 2.0)
+            self.assertAlmostEqual(trim_args[3], 2.5)
+
+            mock_timewarp.assert_called_once()
+            tw_args = mock_timewarp.call_args[0]
+            tw_kwargs = mock_timewarp.call_args[1]
+            self.assertAlmostEqual(tw_args[3], 2.5)
+            self.assertFalse(tw_kwargs.get("include_audio"))
+            # Warp in clip coords should start at 0.0
+            clip_warps = tw_args[2]
+            self.assertEqual(len(clip_warps), 1)
+            self.assertAlmostEqual(clip_warps[0]["media_start"], 0.0)
+            self.assertAlmostEqual(clip_warps[0]["media_end"], 2.0)
+
+            # mux_audio_into_video_clip_for_preview should receive warped_clip and video_is_pretrimmed=True
+            mock_mux.assert_called_once()
+            mux_args = mock_mux.call_args[0]
+            mux_kwargs = mock_mux.call_args[1]
+            self.assertTrue(mux_kwargs.get("video_is_pretrimmed"))
+            self.assertEqual(mux_args[1], "timeline_audio.wav")
+            self.assertEqual(mux_args[3], 2.0)
+            self.assertEqual(mux_args[4], 5.0)
+
+    def test_quick_preview_worker_applies_timewarp_in_subtitle_mode(self):
+        """Verify QuickPreviewWorker warps original audio (include_audio=True) in subtitle mode."""
+        from ui.worker_adapters.preview_workers import QuickPreviewWorker
+
+        warps = [{"type": "freeze", "time": 1.0, "duration": 2.0}]
+
+        worker = QuickPreviewWorker(
+            video_path="input_vid.mp4",
+            output_path="out_preview.mp4",
+            mode="subtitle",
+            start_seconds=0.5,
+            duration_seconds=5.0,
+            video_time_warps=warps,
+        )
+
+        with patch("preview_processor.trim_video_clip") as mock_trim, \
+             patch("preview_processor.apply_timewarp_to_video_clip") as mock_timewarp, \
+             patch("os.path.exists", return_value=False), \
+             patch("shutil.copyfile") as mock_copy:
+
+            worker.run()
+
+            mock_timewarp.assert_called_once()
+            tw_kwargs = mock_timewarp.call_args[1]
+            self.assertTrue(tw_kwargs.get("include_audio"))
+            mock_copy.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

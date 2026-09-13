@@ -3111,6 +3111,11 @@ class VideoTranslatorGUI(QMainWindow):
         if self.using_existing_audio_source():
             audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
             return audio_path if audio_path and os.path.exists(audio_path) else ""
+        # In native preview mode, audio tracks are mixed in-memory live; do not generate a temporary mix WAV
+        is_native_audio = bool(getattr(getattr(self, "media_player", None), "_native_audio_active", False)) or bool(getattr(self, "_native_audio_enabled", False))
+        if is_native_audio:
+            return ""
+
         voice_only = self._resolve_preview_voice_only_audio_path()
         music_tracks = self._music_audio_tracks()
         # The dubbed sidecar may contain TTS, music, or both.  Do not require
@@ -3194,6 +3199,12 @@ class VideoTranslatorGUI(QMainWindow):
                 normalized = self._normalize_local_file_path(candidate)
                 if normalized and os.path.exists(normalized):
                     return normalized
+
+        is_native_audio = bool(getattr(getattr(self, "media_player", None), "_native_audio_active", False)) or bool(getattr(self, "_native_audio_enabled", False))
+        if is_native_audio:
+            voice_only = self._resolve_preview_voice_only_audio_path()
+            if voice_only and os.path.exists(voice_only):
+                return voice_only
 
         dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
         if dubbed_audio_kind in ("mixed", "voice") and dubbed_audio and os.path.exists(dubbed_audio):
@@ -9143,6 +9154,9 @@ class VideoTranslatorGUI(QMainWindow):
         mode = str(getattr(self, "_preview_audio_track_mode", "original") or "original").strip().lower()
         if mode != "dubbed":
             return a1_muted
+        is_native_audio = bool(getattr(getattr(self, "media_player", None), "_native_audio_active", False)) or bool(getattr(self, "_native_audio_enabled", False))
+        if is_native_audio:
+            return a2_muted
         dubbed_audio_kind, _dubbed_path = self._resolve_preview_dubbed_playback_source()
         if dubbed_audio_kind == "voice":
             return a2_muted

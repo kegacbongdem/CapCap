@@ -619,6 +619,54 @@ class TestPreviewTransport(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_resolve_preview_mixed_audio_path_bypasses_wav_when_native_active(self):
+        """Verify _resolve_preview_mixed_audio_path returns empty string and does not invoke mix_audio_tracks."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui.using_existing_audio_source.return_value = False
+        gui.media_player = MagicMock()
+        gui.media_player._native_audio_active = True
+        gui._native_audio_enabled = True
+
+        with patch("app.audio_mixer.mix_audio_tracks") as mock_mixer:
+            path = VideoTranslatorGUI._resolve_preview_mixed_audio_path(gui)
+            self.assertEqual(path, "")
+            mock_mixer.assert_not_called()
+
+    def test_resolve_timeline_audio_visualization_path_native_active(self):
+        """Verify resolve_timeline_audio_visualization_path uses voice_only directly without dubbed mix resolution."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui.using_existing_audio_source.return_value = False
+        gui.media_player = MagicMock()
+        gui.media_player._native_audio_active = True
+        gui._native_audio_enabled = True
+        gui._resolve_preview_voice_only_audio_path.return_value = "C:/fake/voice.wav"
+
+        with patch("os.path.exists", return_value=True), \
+             patch.object(VideoTranslatorGUI, "_resolve_preview_dubbed_playback_source") as mock_dubbed:
+            path = VideoTranslatorGUI.resolve_timeline_audio_visualization_path(gui)
+            self.assertEqual(path, "C:/fake/voice.wav")
+            mock_dubbed.assert_not_called()
+
+    def test_is_active_timeline_audio_track_muted_native_active(self):
+        """Verify _is_active_timeline_audio_track_muted returns a2_muted directly without invoking dubbed mix resolution."""
+        from ui.main_window import VideoTranslatorGUI
+
+        gui = MagicMock()
+        gui._preview_audio_track_mode = "dubbed"
+        gui.media_player = MagicMock()
+        gui.media_player._native_audio_active = True
+        gui._native_audio_enabled = True
+        gui._timeline_audio_track_mutes.return_value = (False, True)
+
+        with patch.object(VideoTranslatorGUI, "_resolve_preview_dubbed_playback_source") as mock_dubbed:
+            is_muted = VideoTranslatorGUI._is_active_timeline_audio_track_muted(gui)
+            self.assertTrue(is_muted)
+            mock_dubbed.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

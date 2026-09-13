@@ -57,6 +57,7 @@ datas += collect_data_files("piper")
 datas += collect_data_files("vietnormalizer")
 datas += collect_data_files("vieneu")
 datas += collect_data_files("vieneu_utils")
+datas += collect_data_files("av")
 
 # RapidOCR selects its ONNX implementation through runtime configuration.
 # Listing only ``rapidocr`` misses these dynamically imported modules in a
@@ -65,6 +66,7 @@ datas += collect_data_files("vieneu_utils")
 # Torch backend excluded by the existing package exclusions below.
 rapidocr_hiddenimports = collect_submodules("rapidocr")
 vieneu_hiddenimports = collect_submodules("vieneu") + collect_submodules("vieneu_utils")
+av_hiddenimports = collect_submodules("av")
 
 # Exclude heavy packages we don't use
 excludes = [
@@ -159,6 +161,15 @@ a = Analysis(
         "scipy",
         "librosa",
         "soundfile",
+        "av",
+        "av.filter",
+        "av.error",
+        "media_decode",
+        "app.media_decode",
+        "preview_audio",
+        "ui.utils.preview_audio",
+        "experimental_mpv_lut",
+        "app.experimental_mpv_lut",
         "onnxruntime",
         "openai",
         "audio_mixer",
@@ -198,7 +209,7 @@ a = Analysis(
         "cv2",
         "omegaconf",
         "pyclipper",
-    ] + rapidocr_hiddenimports + vieneu_hiddenimports,
+    ] + rapidocr_hiddenimports + vieneu_hiddenimports + av_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

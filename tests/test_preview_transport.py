@@ -838,6 +838,109 @@ class TestPreviewTransport(unittest.TestCase):
         VideoTranslatorGUI.on_audio_music_volume_changed(gui, 50)
         gui._schedule_preview_audio_refresh.assert_not_called()
 
+    def test_mpv_backend_slow_motion_speed_control(self):
+        """Verify MpvMediaPlayerBackend dynamically adjusts mpv speed during slow motion."""
+        from ui.utils.media_backend import MpvMediaPlayerBackend
+
+        backend = MpvMediaPlayerBackend.__new__(MpvMediaPlayerBackend)
+        backend._source_path = "mock_video.mp4"
+        backend._position_ms = 0
+        backend._video_frozen = False
+        backend._base_playback_rate = 1.0
+        backend._current_applied_speed = 1.0
+        mock_player = MagicMock()
+        backend._player = mock_player
+
+        warps = [
+            {
+                "id": "warp_slow_1",
+                "type": "slow",
+                "time": 3.0,
+                "duration": 1.0,
+                "speed": 0.8,
+                "media_start": 1.0,
+                "media_end": 3.0,
+            }
+        ]
+        backend.set_time_warps(warps)
+
+        # At media time 0.5s (before slow): speed should be 1.0
+        self.assertEqual(backend._get_warp_speed_for_media_time(0.5), 1.0)
+        backend._update_video_speed_for_time_warps(0.5)
+        self.assertEqual(backend._current_applied_speed, 1.0)
+
+        # At media time 2.0s (inside slow): speed should be 0.8
+        self.assertEqual(backend._get_warp_speed_for_media_time(2.0), 0.8)
+        backend._update_video_speed_for_time_warps(2.0)
+        self.assertEqual(backend._current_applied_speed, 0.8)
+        self.assertEqual(mock_player.speed, 0.8)
+
+        # At media time 3.5s (after slow): speed should restore to 1.0
+        self.assertEqual(backend._get_warp_speed_for_media_time(3.5), 1.0)
+        backend._update_video_speed_for_time_warps(3.5)
+        self.assertEqual(backend._current_applied_speed, 1.0)
+        self.assertEqual(mock_player.speed, 1.0)
+
+    def test_preview_audio_slow_motion_not_frozen_and_resamples(self):
+        """Verify _PreviewAudioWorker does not treat slow motion as freeze and resamples original audio."""
+        import numpy as np
+        from ui.utils.preview_audio import _PreviewAudioWorker
+
+        worker = _PreviewAudioWorker.__new__(_PreviewAudioWorker)
+        worker.internal_sr = 16000
+        worker.block_size = 160
+        worker._tracks = []
+        worker._readers = {}
+        worker._pcm_cache = MagicMock()
+        worker._pcm_cache.get.return_value = None
+        worker._generation_id = 1
+
+        warps = [
+            {
+                "id": "warp_slow_1",
+                "type": "slow",
+                "time": 3.0,
+                "duration": 1.0,
+                "speed": 0.8,
+                "media_start": 1.0,
+                "media_end": 3.0,
+            }
+        ]
+        worker._warps = warps
+
+        # Check _is_time_frozen: must be False for slow warps
+        self.assertFalse(worker._is_time_frozen(2.0))
+        self.assertFalse(worker._is_time_frozen(3.2))
+
+        # Mock reader
+        mock_reader = MagicMock()
+        # When read is called with 128 samples, return sequential ramp
+        mock_reader.read.side_effect = lambda start, count: np.linspace(0.1, 0.9, count, dtype=np.float32)
+        worker._readers["video_audio.wav"] = mock_reader
+
+        worker._tracks = [
+            {
+                "id": "orig_v1",
+                "path": "video_audio.wav",
+                "is_original_video": True,
+                "start_ms": 0,
+                "end_ms": 10000,
+                "source_start_ms": 0,
+                "current_gain": 1.0,
+                "target_gain": 1.0,
+            }
+        ]
+
+        # Read mixed block at 2.0s timeline time: (2.0 * 16000 = 32000 samples)
+        # 2.0s is inside the slow warp. TimeWarpService maps timeline to media time with speed 0.8.
+        block = worker._read_mixed_block(32000)
+        self.assertEqual(len(block), 160)
+        # Verify reader was called with count < 160 (stretched by factor 0.8 -> ~128 samples)
+        read_args = mock_reader.read.call_args[0]
+        self.assertEqual(read_args[1], 128)
+        # Block output should have 160 float32 samples with no NaNs
+        self.assertFalse(np.isnan(block).any())
+
 
 if __name__ == "__main__":
     unittest.main()

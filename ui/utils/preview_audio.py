@@ -50,16 +50,16 @@ class _LRUPcmCache:
 
     def __init__(self, max_bytes: int = 128 * 1024 * 1024):
         self.max_bytes = max_bytes
-        self._cache: OrderedDict[Tuple[str, int, int, int], np.ndarray] = OrderedDict()
+        self._cache: OrderedDict[Tuple[Any, ...], np.ndarray] = OrderedDict()
         self._current_bytes: int = 0
 
-    def get(self, key: Tuple[str, int, int, int]) -> Optional[np.ndarray]:
+    def get(self, key: Tuple[Any, ...]) -> Optional[np.ndarray]:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
         return None
 
-    def put(self, key: Tuple[str, int, int, int], block: np.ndarray) -> None:
+    def put(self, key: Tuple[Any, ...], block: np.ndarray) -> None:
         block_bytes = block.nbytes
         if block_bytes > self.max_bytes:
             return  # single block exceeds cache limit
@@ -361,8 +361,12 @@ class _PreviewAudioWorker(QObject):
         """Return True if timestamp t_sec falls within a freeze frame warp."""
         accum = 0.0
         for w in sorted(self._warps, key=lambda x: float(x.get("time", 0.0))):
-            start = float(w.get("time", 0.0)) + accum
+            w_type = w.get("type", "freeze")
             dur = float(w.get("duration", 0.0))
+            if w_type != "freeze":
+                accum += dur
+                continue
+            start = float(w.get("time", 0.0)) + accum
             if start <= t_sec < (start + dur):
                 return True
             accum += dur
@@ -397,29 +401,54 @@ class _PreviewAudioWorker(QObject):
 
             # Compute track-relative sample offset
             if track["is_original_video"]:
-                media_time_s = TimeWarpService.timeline_to_media_time(cur_t_sec, self._warps)
-                offset_ms = int(round(media_time_s * 1000.0)) + track["source_start_ms"]
+                t0_sec = cur_t_sec
+                t1_sec = cur_t_sec + float(self.block_size) / float(self.internal_sr)
+                m0_sec = TimeWarpService.timeline_to_media_time(t0_sec, self._warps)
+                m1_sec = TimeWarpService.timeline_to_media_time(t1_sec, self._warps)
+
+                src_offset_s = track["source_start_ms"] / 1000.0
+                sample_start = int(round((m0_sec + src_offset_s) * self.internal_sr))
+                sample_end = int(round((m1_sec + src_offset_s) * self.internal_sr))
+                num_src_samples = max(0, sample_end - sample_start)
+
+                cache_key = (track["path"], sample_start, num_src_samples, self.block_size, self._generation_id)
+                block = self._pcm_cache.get(cache_key)
+                if block is None:
+                    if num_src_samples == self.block_size:
+                        block = reader.read(sample_start, self.block_size)
+                    elif num_src_samples <= 0:
+                        block = np.zeros(self.block_size, dtype=np.float32)
+                    else:
+                        raw = reader.read(sample_start, num_src_samples)
+                        if len(raw) == 0:
+                            block = np.zeros(self.block_size, dtype=np.float32)
+                        elif len(raw) == 1:
+                            block = np.full(self.block_size, raw[0], dtype=np.float32)
+                        else:
+                            x_src = np.linspace(0.0, 1.0, len(raw), endpoint=True)
+                            x_dst = np.linspace(0.0, 1.0, self.block_size, endpoint=True)
+                            block = np.interp(x_dst, x_src, raw).astype(np.float32)
+                    self._pcm_cache.put(cache_key, block)
             else:
                 offset_ms = cur_timeline_pos_ms - start_ms + track["source_start_ms"]
+                track_sample = int(offset_ms * self.internal_sr / 1000.0)
 
-            track_sample = int(offset_ms * self.internal_sr / 1000.0)
-
-            # Check LRU cache
-            cache_key = (track["path"], track_sample, self.block_size, self._generation_id)
-            block = self._pcm_cache.get(cache_key)
-            if block is None:
-                if track.get("loop", False) and reader.total_samples > 0:
-                    sample_in_loop = track_sample % reader.total_samples
-                    if sample_in_loop + self.block_size > reader.total_samples:
-                        first_len = reader.total_samples - sample_in_loop
-                        p1 = reader.read(sample_in_loop, first_len)
-                        p2 = reader.read(0, self.block_size - first_len)
-                        block = np.concatenate([p1, p2])
+                # Check LRU cache
+                cache_key = (track["path"], track_sample, self.block_size, self._generation_id)
+                block = self._pcm_cache.get(cache_key)
+                if block is None:
+                    if track.get("loop", False) and reader.total_samples > 0:
+                        sample_in_loop = track_sample % reader.total_samples
+                        if sample_in_loop + self.block_size > reader.total_samples:
+                            first_len = reader.total_samples - sample_in_loop
+                            p1 = reader.read(sample_in_loop, first_len)
+                            p2 = reader.read(0, self.block_size - first_len)
+                            block = np.concatenate([p1, p2])
+                        else:
+                            block = reader.read(sample_in_loop, self.block_size)
                     else:
-                        block = reader.read(sample_in_loop, self.block_size)
-                else:
-                    block = reader.read(track_sample, self.block_size)
-                self._pcm_cache.put(cache_key, block)
+                        block = reader.read(track_sample, self.block_size)
+                    self._pcm_cache.put(cache_key, block)
 
             # Apply smooth 5ms ramp toward target gain
             ramp_len = min(max(1, int(round(self.internal_sr * 0.005))), self.block_size)

@@ -262,8 +262,12 @@ def toggle_play(gui):
                 sorted_warps = sorted(warps, key=lambda x: float(x.get("time", 0.0)))
                 accum = 0.0
                 for w in sorted_warps:
-                    anchor = float(w.get("time", 0.0))
+                    w_type = w.get("type", "freeze")
                     dur = float(w.get("duration", 0.0))
+                    if w_type != "freeze":
+                        accum += dur
+                        continue
+                    anchor = float(w.get("time", 0.0))
                     w_start = anchor + accum
                     w_end = w_start + dur
                     if w_start <= current_tl_s < w_end - 0.04:
@@ -365,10 +369,14 @@ def position_changed(gui, position):
             sorted_warps = sorted(warps, key=lambda x: float(x.get("time", 0.0)))
             accum = 0.0
             for w in sorted_warps:
+                w_type = w.get("type", "freeze")
+                dur_s = float(w.get("duration", 0.0))
+                if w_type != "freeze":
+                    accum += dur_s
+                    continue
                 w_id = str(w.get("id", ""))
                 anchor_s = float(w.get("time", 0.0))
                 anchor_ms = int(round(anchor_s * 1000))
-                dur_s = float(w.get("duration", 0.0))
                 w_tl_start = anchor_s + accum
 
                 prev_pos = getattr(gui, "_last_media_pos", position)
@@ -395,8 +403,11 @@ def position_changed(gui, position):
                 accum += dur_s
 
         gui._last_media_pos = position
-        tl_time_s = TimeWarpService.media_to_timeline_time(position / 1000.0, warps)
-        tl_position = int(round(tl_time_s * 1000))
+        if getattr(getattr(gui, "media_player", None), "_native_audio_active", False):
+            tl_position = gui.media_player.timeline_position_ms()
+        else:
+            tl_time_s = TimeWarpService.media_to_timeline_time(position / 1000.0, warps)
+            tl_position = int(round(tl_time_s * 1000))
         total_warps_dur = sum(float(w.get("duration", 0.0)) for w in warps)
         total_duration = gui.media_player.duration() + int(round(total_warps_dur * 1000))
     else:

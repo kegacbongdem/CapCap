@@ -272,6 +272,36 @@ class QtMediaPlayerBackend(QObject):
         self._mute_dubbed = False
         self._video_frozen = False
         self._video_time_warps = []
+        self._base_playback_rate = 1.0
+        self._current_applied_speed = 1.0
+
+    def _get_warp_speed_for_media_time(self, media_time_s: float) -> float:
+        warps = getattr(self, "_video_time_warps", [])
+        if not warps:
+            return 1.0
+        for w in warps:
+            if w.get("type", "freeze") == "slow":
+                m_start = float(w.get("media_start", w.get("time", 0.0)))
+                m_end = float(w.get("media_end", m_start))
+                if (m_start - 0.02) <= media_time_s <= (m_end + 0.02):
+                    speed = float(w.get("speed", 1.0))
+                    if speed > 0:
+                        return speed
+        return 1.0
+
+    def _update_video_speed_for_time_warps(self, current_time_s: float) -> None:
+        if getattr(self, "_video_frozen", False):
+            return
+        base_rate = getattr(self, "_base_playback_rate", 1.0)
+        warp_speed = self._get_warp_speed_for_media_time(current_time_s)
+        target_speed = max(0.1, min(4.0, base_rate * warp_speed))
+        current_speed = getattr(self, "_current_applied_speed", 1.0)
+        if abs(target_speed - current_speed) > 0.01:
+            self._current_applied_speed = target_speed
+            try:
+                self._player.setPlaybackRate(float(target_speed))
+            except Exception:
+                pass
 
     def _on_media_status(self, status):
         try:
@@ -286,6 +316,7 @@ class QtMediaPlayerBackend(QObject):
 
     def set_time_warps(self, warps):
         self._video_time_warps = list(warps or [])
+        self._update_video_speed_for_time_warps(self.position() / 1000.0)
 
     def freeze_video_frame(self, anchor_ms):
         self._video_frozen = True
@@ -304,6 +335,7 @@ class QtMediaPlayerBackend(QObject):
 
     def play(self):
         self._video_frozen = False
+        self._update_video_speed_for_time_warps(self.position() / 1000.0)
         self._player.play()
 
     def pause(self):
@@ -312,11 +344,24 @@ class QtMediaPlayerBackend(QObject):
 
     def stop(self):
         self._video_frozen = False
+        self._current_applied_speed = getattr(self, "_base_playback_rate", 1.0)
+        try:
+            self._player.setPlaybackRate(float(self._current_applied_speed))
+        except Exception:
+            pass
         self._player.stop()
 
     def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
         self._video_frozen = False
         self._player.setPosition(int(position))
+        self._update_video_speed_for_time_warps(int(position) / 1000.0)
+
+    def set_playback_rate(self, rate):
+        self._base_playback_rate = float(rate)
+        self._update_video_speed_for_time_warps(self.position() / 1000.0)
+
+    def playback_rate(self):
+        return getattr(self, "_base_playback_rate", 1.0)
 
     def position(self):
         return self._player.position()
@@ -469,6 +514,8 @@ class MpvMediaPlayerBackend(QObject):
         self._mute_dubbed = False
         self._video_frozen = False
         self._video_time_warps = []
+        self._base_playback_rate = 1.0
+        self._current_applied_speed = 1.0
 
         prepare_mpv_bundle()
         try:
@@ -620,7 +667,7 @@ class MpvMediaPlayerBackend(QObject):
 
         # --- Timers ---
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(200)
+        self._poll_timer.setInterval(50)
         self._poll_timer.timeout.connect(self._poll_state)
         self._poll_timer.start()
 
@@ -656,6 +703,34 @@ class MpvMediaPlayerBackend(QObject):
             return source
         return ""
 
+    def _get_warp_speed_for_media_time(self, media_time_s: float) -> float:
+        warps = getattr(self, "_video_time_warps", [])
+        if not warps:
+            return 1.0
+        for w in warps:
+            if w.get("type", "freeze") == "slow":
+                m_start = float(w.get("media_start", w.get("time", 0.0)))
+                m_end = float(w.get("media_end", m_start))
+                if (m_start - 0.02) <= media_time_s <= (m_end + 0.02):
+                    speed = float(w.get("speed", 1.0))
+                    if speed > 0:
+                        return speed
+        return 1.0
+
+    def _update_video_speed_for_time_warps(self, current_time_s: float) -> None:
+        if not getattr(self, "_source_path", None) or getattr(self, "_video_frozen", False) or not hasattr(self, "_player"):
+            return
+        base_rate = getattr(self, "_base_playback_rate", 1.0)
+        warp_speed = self._get_warp_speed_for_media_time(current_time_s)
+        target_speed = max(0.1, min(4.0, base_rate * warp_speed))
+        current_speed = getattr(self, "_current_applied_speed", 1.0)
+        if abs(target_speed - current_speed) > 0.01:
+            self._current_applied_speed = target_speed
+            try:
+                self._player.speed = float(target_speed)
+            except Exception:
+                pass
+
     def _poll_state(self):
         # The timer remains allocated for backend lifetime, but querying mpv
         # properties every 200 ms while no media is loaded is needless work.
@@ -681,6 +756,7 @@ class MpvMediaPlayerBackend(QObject):
         if not (seeking or is_seeking_grace):
             if time_pos is not None:
                 next_position = int(float(time_pos) * 1000)
+                self._update_video_speed_for_time_warps(float(time_pos))
                 if not (self._native_audio_active and self._state == QMediaPlayer.PlayingState):
                     if next_position != self._position_ms:
                         self._position_ms = next_position
@@ -781,6 +857,7 @@ class MpvMediaPlayerBackend(QObject):
         if not self._source_path:
             return
         self._video_frozen = False
+        self._update_video_speed_for_time_warps(self._position_ms / 1000.0)
         self._player.pause = False
         if self._native_audio_active and self._native_audio_engine is not None:
             self._native_audio_engine.play()
@@ -826,6 +903,11 @@ class MpvMediaPlayerBackend(QObject):
     def stop(self):
         self._video_frozen = False
         self._player.pause = True
+        self._current_applied_speed = getattr(self, "_base_playback_rate", 1.0)
+        try:
+            self._player.speed = float(self._current_applied_speed)
+        except Exception:
+            pass
         if self._native_audio_active and self._native_audio_engine is not None:
             self._native_audio_engine.stop()
         else:
@@ -855,8 +937,11 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_time_warps(self, warps):
         self._video_time_warps = list(warps or [])
-        if self._native_audio_engine is not None and hasattr(self._native_audio_engine, "set_warps"):
-            self._native_audio_engine.set_warps(self._video_time_warps)
+        native_engine = getattr(self, "_native_audio_engine", None)
+        if native_engine is not None and hasattr(native_engine, "set_warps"):
+            native_engine.set_warps(self._video_time_warps)
+        pos_ms = getattr(self, "_position_ms", 0)
+        self._update_video_speed_for_time_warps(pos_ms / 1000.0)
 
     def freeze_video_frame(self, anchor_ms):
         """Freezes the video frame at anchor_ms while keeping dubbed audio (TTS/music) playing."""
@@ -919,6 +1004,7 @@ class MpvMediaPlayerBackend(QObject):
     def setPosition(self, position, timeline_pos=None, *, exact: bool = True):
         self._video_frozen = False
         self._position_ms = int(position)
+        self._update_video_speed_for_time_warps(self._position_ms / 1000.0)
         self._last_seek_mono = time.monotonic()
         if not self._source_path:
             self.positionChanged.emit(self._position_ms)
@@ -1557,7 +1643,8 @@ class MpvMediaPlayerBackend(QObject):
             else:
                 expected_a_pos_ms = v_pos_ms
 
-            if abs(expected_a_pos_ms - a_pos) > 300:
+            threshold_ms = 600 if warps else 300
+            if abs(expected_a_pos_ms - a_pos) > threshold_ms:
                 self._native_audio_engine.seek(expected_a_pos_ms)
             return
 
@@ -1765,10 +1852,8 @@ class MpvMediaPlayerBackend(QObject):
         return self._mute_dubbed
 
     def set_playback_rate(self, rate):
-        try:
-            self._player.speed = float(rate)
-        except Exception:
-            pass
+        self._base_playback_rate = float(rate)
+        self._update_video_speed_for_time_warps(self._position_ms / 1000.0)
         if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
             try:
                 self._native_audio_engine.set_rate(float(rate))
@@ -1776,10 +1861,7 @@ class MpvMediaPlayerBackend(QObject):
                 pass
 
     def playback_rate(self):
-        try:
-            return float(self._read_property("speed", default=1.0) or 1.0)
-        except Exception:
-            return 1.0
+        return getattr(self, "_base_playback_rate", 1.0)
 
 
 def create_media_backend(video_view):

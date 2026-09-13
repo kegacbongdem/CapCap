@@ -11119,26 +11119,36 @@ class VideoTranslatorGUI(QMainWindow):
                 video_ext_row.setSpacing(6)
 
                 if ext_dur > 0.0:
-                    badge_lbl = QLabel(t("⏸ Freeze (+{duration:.1f}s)", duration=ext_dur))
-                    badge_lbl.setStyleSheet(
-                        "background: #103444; color: #5eead4; border: 1px solid #146c78; "
-                        "border-radius: 6px; padding: 3px 8px; font-weight: bold; font-size: 11px;"
-                    )
-                    badge_lbl.setToolTip(t("This segment's video is extended by +{duration:.2f}s", duration=ext_dur))
-                    revert_btn = QPushButton(t("❌ Revert freeze"))
+                    w_type = str(row.get("warp_type", "freeze") or "freeze").lower()
+                    if w_type == "slow":
+                        sp_val = float(row.get("warp_speed", 1.0) or 1.0)
+                        badge_lbl = QLabel(t("🐢 Slow {speed:.2f}x (+{duration:.1f}s)", speed=sp_val, duration=ext_dur))
+                        badge_lbl.setStyleSheet(
+                            "background: #2e1065; color: #d8b4fe; border: 1px solid #7e22ce; "
+                            "border-radius: 6px; padding: 3px 8px; font-weight: bold; font-size: 11px;"
+                        )
+                        badge_lbl.setToolTip(t("Video for this segment is slowed down to {speed:.2f}x (+{duration:.2f}s)", speed=sp_val, duration=ext_dur))
+                    else:
+                        badge_lbl = QLabel(t("⏸ Freeze (+{duration:.1f}s)", duration=ext_dur))
+                        badge_lbl.setStyleSheet(
+                            "background: #103444; color: #5eead4; border: 1px solid #146c78; "
+                            "border-radius: 6px; padding: 3px 8px; font-weight: bold; font-size: 11px;"
+                        )
+                        badge_lbl.setToolTip(t("This segment's video is extended by freeze frame (+{duration:.2f}s)", duration=ext_dur))
+                    revert_btn = QPushButton(t("❌ Revert"))
                     revert_btn.setFixedHeight(26)
                     revert_btn.setStyleSheet(
                         "QPushButton { background: #331f24; color: #fca5a5; border: 1px solid #662a34; "
                         "border-radius: 6px; padding: 2px 8px; font-size: 11px; } "
                         "QPushButton:hover { background: #4a272f; border-color: #f87171; }"
                     )
-                    revert_btn.setToolTip(t("Restore original duration for this segment and ripple shift timeline back (-Δt)"))
+                    revert_btn.setToolTip(t("Restore original 1.0x speed and duration for this segment and ripple shift timeline back (-Δt)"))
                     revert_btn.clicked.connect(lambda _=False, i=idx: self.revert_segment_video_extension(i))
                     video_ext_row.addWidget(badge_lbl)
                     video_ext_row.addWidget(revert_btn)
                     video_ext_row.addStretch()
                 else:
-                    ext_label = QLabel(t("Freeze frame:"))
+                    ext_label = QLabel(t("Adjust video:"))
                     ext_label.setObjectName("helperLabel")
                     ext_spin = ReliableDoubleSpinBox()
                     ext_spin.setRange(0.1, 30.0)
@@ -11150,6 +11160,18 @@ class VideoTranslatorGUI(QMainWindow):
                     ext_spin.setFixedHeight(26)
                     ext_spin.setStyleSheet("QDoubleSpinBox { padding: 2px 4px; border-radius: 6px; }")
 
+                    extend_slow_btn = QPushButton(t("+ Slow"))
+                    extend_slow_btn.setFixedHeight(26)
+                    extend_slow_btn.setStyleSheet(
+                        "QPushButton { background: #26174a; color: #c4b5fd; border: 1px solid #5b21b6; "
+                        "border-radius: 6px; padding: 2px 8px; font-size: 11px; } "
+                        "QPushButton:hover { background: #3b1d75; border-color: #8b5cf6; }"
+                    )
+                    extend_slow_btn.setToolTip(t("Slow down video for this segment by the selected duration (+Δt)"))
+                    extend_slow_btn.clicked.connect(
+                        lambda _=False, i=idx, sp=ext_spin: self.extend_segment_video(i, sp.value(), warp_type="slow")
+                    )
+
                     extend_btn = QPushButton(t("+ Freeze"))
                     extend_btn.setFixedHeight(26)
                     extend_btn.setStyleSheet(
@@ -11159,10 +11181,10 @@ class VideoTranslatorGUI(QMainWindow):
                     )
                     extend_btn.setToolTip(t("Extend the last frame of this segment by the selected duration and ripple shift subsequent segments (+Δt)"))
                     extend_btn.clicked.connect(
-                        lambda _=False, i=idx, sp=ext_spin: self.extend_segment_video(i, sp.value())
+                        lambda _=False, i=idx, sp=ext_spin: self.extend_segment_video(i, sp.value(), warp_type="freeze")
                     )
 
-                    # Fit Voice button (with breathing buffer +0.15s)
+                    # Fit Voice button (with breathing buffer +0.15s, default slow-motion)
                     audio_end = self._get_segment_audio_end(row, idx)
                     seg_end = float(row.get("end", 0.0) or 0.0)
                     excess = round(audio_end - seg_end, 2)
@@ -11170,18 +11192,18 @@ class VideoTranslatorGUI(QMainWindow):
                     fit_voice_btn.setFixedHeight(26)
                     if excess > 0.05:
                         dur_with_buffer = round(excess + 0.15, 2)
-                        fit_voice_btn.setText(t("⚡ Fit Voice (+{duration:.1f}s)", duration=dur_with_buffer))
+                        fit_voice_btn.setText(t("⚡ Fit Voice (Slow +{duration:.1f}s)", duration=dur_with_buffer))
                         fit_voice_btn.setStyleSheet(
                             "QPushButton { background: #262c16; color: #bef264; border: 1px solid #485c21; "
                             "border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: bold; } "
                             "QPushButton:hover { background: #353f1d; border-color: #a3e635; }"
                         )
                         fit_voice_btn.setToolTip(
-                            t("Extend video by {duration:.2f}s (+0.15s breathing buffer) to fit dubbed voiceover", duration=excess)
+                            t("Slow down video by {duration:.2f}s (+0.15s breathing buffer) to fit dubbed voiceover smoothly", duration=excess)
                         )
                         fit_voice_btn.setEnabled(True)
                         fit_voice_btn.clicked.connect(
-                            lambda _=False, i=idx, dur=dur_with_buffer: self.extend_segment_video(i, dur)
+                            lambda _=False, i=idx, dur=dur_with_buffer: self.extend_segment_video(i, dur, warp_type="slow")
                         )
                     else:
                         fit_voice_btn.setText(t("⚡ Fit Voice"))
@@ -11189,11 +11211,12 @@ class VideoTranslatorGUI(QMainWindow):
                             "QPushButton { background: #182230; color: #53657d; border: 1px solid #24354b; "
                             "border-radius: 6px; padding: 2px 8px; font-size: 11px; }"
                         )
-                        fit_voice_btn.setToolTip(t("Automatically extend video to fit voiceover (active when voiceover exceeds segment duration)"))
+                        fit_voice_btn.setToolTip(t("Automatically slow video to fit voiceover (active when voiceover exceeds segment duration)"))
                         fit_voice_btn.setEnabled(False)
 
                     video_ext_row.addWidget(ext_label)
                     video_ext_row.addWidget(ext_spin)
+                    video_ext_row.addWidget(extend_slow_btn)
                     video_ext_row.addWidget(extend_btn)
                     video_ext_row.addWidget(fit_voice_btn)
                     video_ext_row.addStretch()
@@ -11505,7 +11528,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._schedule_preview_audio_refresh(force=True)
         return voice_track
 
-    def extend_segment_video(self, segment_index: int, added_duration: float):
+    def extend_segment_video(self, segment_index: int, added_duration: float, warp_type: str = "slow"):
         from app.services.time_warp_service import TimeWarpService
         if not self.current_segments and not self.current_translated_segments:
             return
@@ -11520,7 +11543,7 @@ class VideoTranslatorGUI(QMainWindow):
             split_time = round(float(target_seg.get("end", 0.0)), 3)
 
             warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
-                self.current_segments or [], segment_index, dur, self.current_translated_segments
+                self.current_segments or [], segment_index, dur, self.current_translated_segments, warp_type=warp_type
             )
             self.current_segments = updated_base
             if updated_trans is not None:
@@ -11531,6 +11554,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_time_warps.append(warp)
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
+            if hasattr(self, "timeline") and hasattr(self.timeline, "set_video_time_warps"):
+                self.timeline.set_video_time_warps(self.video_time_warps)
 
             # Ripple shift non-subtitle timeline layers starting at or after the split point
             if hasattr(self, "timeline") and self.timeline._timeline:
@@ -11545,7 +11570,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._rebuild_voice_track_for_timeline()
             self.persist_current_timeline_project_data()
             self.sync_segment_editor_rows()
-            self.log(f"[Time Warp] Extended video for segment #{segment_index + 1} by +{dur:.2f}s (Warp ID {warp['id']})")
+            self.log(f"[Time Warp] Extended video ({warp_type}) for segment #{segment_index + 1} by +{dur:.2f}s (Warp ID {warp['id']})")
         except Exception as exc:
             self.show_error(t("Freeze Frame Error"), t("Could not extend video for segment."), str(exc))
 
@@ -11570,6 +11595,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_time_warps = updated_warps
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
+            if hasattr(self, "timeline") and hasattr(self.timeline, "set_video_time_warps"):
+                self.timeline.set_video_time_warps(self.video_time_warps)
 
             # Ripple shift back non-subtitle timeline layers
             if delta > 0 and hasattr(self, "timeline") and self.timeline._timeline:
@@ -11639,7 +11666,7 @@ class VideoTranslatorGUI(QMainWindow):
                 split_time = round(float(curr_target.get("end", 0.0)), 3)
 
                 warp, updated_base, updated_trans = TimeWarpService.apply_segment_extension(
-                    self.current_segments or [], idx, dur, self.current_translated_segments
+                    self.current_segments or [], idx, dur, self.current_translated_segments, warp_type="slow"
                 )
                 self.current_segments = updated_base
                 if updated_trans is not None:
@@ -11652,6 +11679,8 @@ class VideoTranslatorGUI(QMainWindow):
 
             if hasattr(self, "media_player") and hasattr(self.media_player, "set_time_warps"):
                 self.media_player.set_time_warps(self.video_time_warps)
+            if hasattr(self, "timeline") and hasattr(self.timeline, "set_video_time_warps"):
+                self.timeline.set_video_time_warps(self.video_time_warps)
 
             if self.current_segments and hasattr(self, "transcript_text"):
                 self.transcript_text.setText(self.format_to_srt(self.current_segments))
@@ -13425,6 +13454,8 @@ class VideoTranslatorGUI(QMainWindow):
                     normalizer_dictionary=dict(settings.get("normalizer_dictionary", {}) or {}),
                 )
         self.timeline.set_segments(segs if segs else [])
+        if hasattr(self, "video_time_warps") and hasattr(self.timeline, "set_video_time_warps"):
+            self.timeline.set_video_time_warps(self.video_time_warps)
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
         # Configure the Qt subtitle overlay before showing its drag target.
         # Otherwise it can briefly use the default size until the first drag.

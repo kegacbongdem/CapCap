@@ -39,7 +39,7 @@ class TestTimelineVisuals(unittest.TestCase):
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _create_synthetic_video(self, filename: str = "synth_test.mp4") -> str:
+    def _create_synthetic_video(self, filename: str = "synth_test.mp4", pts_offset: int = 0) -> str:
         """Create a 2-second synthetic video: first second RED, second second BLUE."""
         video_path = os.path.join(self.temp_dir, filename)
         container = av.open(video_path, mode="w", format="mp4")
@@ -56,6 +56,7 @@ class TestTimelineVisuals(unittest.TestCase):
             else:
                 frame_arr[:, :, 2] = 240  # Blue
             frame = av.VideoFrame.from_ndarray(frame_arr, format="rgb24")
+            frame.pts = pts_offset + i
             for packet in stream.encode(frame):
                 container.mux(packet)
         for packet in stream.encode(None):
@@ -337,8 +338,90 @@ class TestTimelineVisuals(unittest.TestCase):
         ]
         self.assertEqual(len(created_jpgs), 0)
 
+    def test_timeline_waveform_worker_video_without_audio_no_cli(self):
+        """Ensure TimelineWaveformWorker on video without audio emits empty waveform with 0 CLI calls."""
+        from ui.worker_adapters.processing_workers import TimelineWaveformWorker
+
+        video_no_audio = self._create_synthetic_video()
+        worker = TimelineWaveformWorker(
+            request_signature="req_no_audio_test",
+            video_path=video_no_audio,
+            audio_path="",
+            temp_audio_path=os.path.join(self.temp_dir, "should_not_exist.wav"),
+            duration_s=2.0,
+        )
+
+        results = []
+        worker.finished.connect(lambda sig, wf, dur, err: results.append((sig, wf, dur, err)))
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            worker.run()
+
+        self.assertEqual(len(results), 1)
+        sig, wf, dur, err = results[0]
+        self.assertEqual(sig, "req_no_audio_test")
+        self.assertEqual(wf, [])
+        self.assertAlmostEqual(dur, 2.0, delta=0.1)
+        self.assertEqual(err, "")
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "should_not_exist.wav")))
+
+    def test_launcher_get_video_duration_pyav_zero_cli(self):
+        """Ensure _get_video_duration in launcher retrieves duration via PyAV with 0 ffprobe calls."""
+        for p in ("ui", "app"):
+            full_p = os.path.join(PROJECT_ROOT, p)
+            if full_p not in sys.path:
+                sys.path.insert(0, full_p)
+        from views.launcher import _get_video_duration
+
+        video_path = self._create_synthetic_video()
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            dur = _get_video_duration(video_path)
+
+        self.assertAlmostEqual(dur, 2.0, delta=0.1)
+
+    def test_iter_video_thumbnails_nonzero_stream_start_time(self):
+        """Ensure iter_video_thumbnails accurately seeks and yields relative presentation times for start_time != 0."""
+        # Video with 2.0s PTS offset (start_time != 0)
+        video_path = self._create_synthetic_video(filename="offset_test.mp4", pts_offset=50)
+
+        with patch("subprocess.Popen", side_effect=AssertionError("CLI invoked")), \
+             patch("subprocess.run", side_effect=AssertionError("CLI invoked")):
+            thumbs = list(iter_video_thumbnails(video_path, [0.0, 1.2], width=180))
+
+        self.assertEqual(len(thumbs), 2)
+        pts_0, rgb_0 = thumbs[0]
+        pts_1, rgb_1 = thumbs[1]
+
+        # First frame should be near 0.0s (relative presentation start) and RED
+        self.assertAlmostEqual(pts_0, 0.0, delta=0.08)
+        self.assertGreater(rgb_0[:, :, 0].mean(), 180)
+        self.assertLess(rgb_0[:, :, 2].mean(), 60)
+
+        # Second frame should be near 1.2s and BLUE
+        self.assertAlmostEqual(pts_1, 1.2, delta=0.1)
+        self.assertGreater(rgb_1[:, :, 2].mean(), 180)
+        self.assertLess(rgb_1[:, :, 0].mean(), 60)
+
+    def test_iter_video_thumbnails_memory_and_count_budget(self):
+        """Ensure iter_video_thumbnails enforces max_thumbnails downsampling and max_bytes memory budget."""
+        video_path = self._create_synthetic_video()
+
+        # Request 100 timestamps with max_thumbnails=10
+        timestamps = [i * 0.02 for i in range(100)]
+        thumbs = list(iter_video_thumbnails(video_path, timestamps, width=180, max_thumbnails=10))
+        self.assertLessEqual(len(thumbs), 10)
+
+        # Request with small byte budget
+        max_bytes_budget = 150_000
+        thumbs_budget = list(iter_video_thumbnails(video_path, timestamps, width=180, max_bytes=max_bytes_budget))
+        total_bytes = sum(arr.nbytes for _, arr in thumbs_budget)
+        self.assertLessEqual(total_bytes, max_bytes_budget)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

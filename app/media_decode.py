@@ -491,22 +491,51 @@ class BoundedWaveformCache:
 _WAVEFORM_CACHE = BoundedWaveformCache()
 
 
+def has_audio_stream(path: Union[str, os.PathLike]) -> bool:
+    """Check if a media file contains at least one decodable audio stream."""
+    path_str = os.fspath(path)
+    if not path_str or not os.path.exists(path_str):
+        return False
+    try:
+        import soundfile as sf
+        with sf.SoundFile(path_str) as f:
+            if f.channels > 0 and len(f) >= 0:
+                return True
+    except Exception:
+        pass
+    if av is not None:
+        try:
+            with av.open(path_str) as container:
+                return len(container.streams.audio) > 0
+        except Exception:
+            pass
+    return False
+
+
 def iter_video_thumbnails(
     path: str,
     timestamps: list[float],
     *,
     width: int = 180,
+    max_thumbnails: int = 120,
+    max_bytes: int = 32 * 1024 * 1024,
 ) -> Iterator[Tuple[float, np.ndarray]]:
     """Yield (actual_pts_seconds, rgb_ndarray) for requested video timestamps.
 
     Decodes video in-process using PyAV without subprocess CLI calls.
     Output RGB array has shape (h, width, 3) and dtype uint8.
+    Compensates for non-zero stream.start_time and bounds output memory to max_bytes.
     """
     if not timestamps or not path or not os.path.exists(path):
         return
 
     if av is None:
         raise RuntimeError("PyAV is required for iter_video_thumbnails")
+
+    # Bound requested timestamp list to max_thumbnails
+    if len(timestamps) > max_thumbnails:
+        step = len(timestamps) / float(max_thumbnails)
+        timestamps = [timestamps[int(i * step)] for i in range(max_thumbnails)]
 
     container = None
     try:
@@ -517,19 +546,24 @@ def iter_video_thumbnails(
         stream.thread_type = "AUTO"
         tb = float(stream.time_base) if stream.time_base is not None else 1.0 / 1000.0
 
+        start_pts = stream.start_time if stream.start_time is not None else 0
+        if start_pts == 0 and container.start_time is not None and container.start_time > 0:
+            start_pts = int(round((container.start_time / 1_000_000.0) / tb))
+
         orig_w = stream.codec_context.width or 180
         orig_h = stream.codec_context.height or 135
         target_w = max(2, (int(width) // 2) * 2)
         target_h = max(2, (int(round(target_w * orig_h / max(1, orig_w))) // 2) * 2)
 
         current_frame = None
-        current_time = -1.0
+        current_rel_time = -1.0
         frame_iter = container.decode(stream)
+        yielded_bytes = 0
 
         for target in timestamps:
             target_s = max(0.0, float(target))
-            if current_time < 0.0 or target_s < current_time or (target_s - current_time) > 1.5:
-                seek_pts = int(round(target_s / tb))
+            if current_rel_time < 0.0 or target_s < current_rel_time or (target_s - current_rel_time) > 1.5:
+                seek_pts = start_pts + int(round(target_s / tb))
                 try:
                     container.seek(seek_pts, stream=stream, backward=True)
                     frame_iter = container.decode(stream)
@@ -538,13 +572,13 @@ def iter_video_thumbnails(
 
             target_frame = None
             for frame in frame_iter:
-                ft = (
-                    float(frame.time)
-                    if frame.time is not None
-                    else (float(frame.pts * tb) if frame.pts is not None else target_s)
+                f_pts = frame.pts if frame.pts is not None else (
+                    int(round(frame.time / tb)) if frame.time is not None else (start_pts + int(round(target_s / tb)))
                 )
+                rel_pts = f_pts - start_pts
+                ft = float(rel_pts * tb)
                 current_frame = frame
-                current_time = ft
+                current_rel_time = ft
                 if ft >= target_s - 0.04:
                     target_frame = frame
                     break
@@ -553,13 +587,17 @@ def iter_video_thumbnails(
                 target_frame = current_frame
 
             if target_frame is not None:
-                actual_pts = (
-                    float(target_frame.time)
-                    if target_frame.time is not None
-                    else (float(target_frame.pts * tb) if target_frame.pts is not None else target_s)
+                tf_pts = target_frame.pts if target_frame.pts is not None else (
+                    int(round(target_frame.time / tb)) if target_frame.time is not None else (start_pts + int(round(target_s / tb)))
                 )
+                actual_pts = max(0.0, float((tf_pts - start_pts) * tb))
                 rf = target_frame.reformat(width=target_w, height=target_h, format="rgb24")
                 arr = np.ascontiguousarray(rf.to_ndarray())
+
+                frame_bytes = int(arr.nbytes)
+                if yielded_bytes + frame_bytes > max_bytes:
+                    break
+                yielded_bytes += frame_bytes
                 yield actual_pts, arr
     finally:
         if container is not None:
@@ -599,13 +637,17 @@ def build_waveform(
                 c.close()
             except Exception:
                 pass
-        return [], duration_s
+        result = ([], duration_s)
+        _WAVEFORM_CACHE.put(cache_key, result)
+        return result
 
     with reader:
         total_samples = reader.total_samples
         duration_s = reader.duration_seconds
         if total_samples <= 0 or duration_s <= 0.0:
-            return [], duration_s
+            result = ([], duration_s)
+            _WAVEFORM_CACHE.put(cache_key, result)
+            return result
 
         actual_buckets = int(min(bucket_count, max(240, round(duration_s * 12.0))))
         chunk_size = max(256, int(np.ceil(total_samples / max(1, actual_buckets))))

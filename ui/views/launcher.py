@@ -108,6 +108,20 @@ def _ffmpeg_path():
 
 
 def _get_video_duration(video_path: str) -> float:
+    """Return video duration in seconds using PyAV metadata first (0 subprocesses)."""
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+    try:
+        import av
+        with av.open(video_path) as container:
+            if container.duration is not None and container.duration > 0:
+                return float(container.duration / 1_000_000.0)
+            for stream in container.streams:
+                if stream.duration is not None and stream.duration > 0 and stream.time_base is not None:
+                    return float(stream.duration * stream.time_base)
+    except Exception:
+        pass
+
     try:
         from app.video_processor import get_video_duration
         return float(get_video_duration(video_path) or 0.0)

@@ -498,12 +498,14 @@ class TimelineWaveformWorker(QThread):
 
             # Try native in-process streaming waveform first
             try:
-                from app.media_decode import build_waveform
-                wf, dur = build_waveform(source_media)
-                if wf is not None and len(wf) > 0:
-                    dur_s = max(dur, self.duration_s)
-                    self.finished.emit(self.request_signature, wf, dur_s, "")
+                from app.media_decode import build_waveform, has_audio_stream
+                if not has_audio_stream(source_media):
+                    self.finished.emit(self.request_signature, [], float(self.duration_s), "")
                     return
+                wf, dur = build_waveform(source_media)
+                dur_s = max(dur, self.duration_s)
+                self.finished.emit(self.request_signature, wf or [], dur_s, "")
+                return
             except Exception:
                 pass
 

@@ -108,6 +108,7 @@ class EditorTimeline(QGraphicsView):
         self._waveform_samples: list[float] = []
         self._waveform_duration_s = 0.0
         self._video_thumbnails: list[tuple[float, object]] = []
+        self._video_time_warps: list[dict] = []
         self._has_add_btn = False
         self._voice_sync_mode: str = "Smart"
         self._playhead_follow_animation = QPropertyAnimation(self.horizontalScrollBar(), b"value", self)
@@ -168,6 +169,49 @@ class EditorTimeline(QGraphicsView):
                 if track is not None and track.id == track_id:
                     self._selected_layer_id = ""
         self._redraw()
+
+    def set_video_time_warps(self, warps: list[dict]) -> None:
+        self._video_time_warps = list(warps or [])
+        self._redraw()
+
+    def get_video_time_warps(self) -> list[dict]:
+        return list(self._video_time_warps)
+
+    def compute_warp_timeline_spans(self) -> list[dict]:
+        from app.services.time_warp_service import TimeWarpService
+        warps = getattr(self, "_video_time_warps", [])
+        if not warps:
+            return []
+        sorted_warps = sorted(warps, key=lambda w: float(w.get("time", 0.0)))
+        spans = []
+        for w in sorted_warps:
+            w_type = w.get("type", "freeze")
+            dur = float(w.get("duration", 0.0))
+            if dur <= 0:
+                continue
+            speed_val = float(w.get("speed", 1.0) or 1.0)
+            if w_type == "slow":
+                m_start = float(w.get("media_start", w.get("time", 0.0)))
+                m_end = float(w.get("media_end", m_start))
+                t_start = TimeWarpService.media_to_timeline_time(m_start, warps)
+                t_end = TimeWarpService.media_to_timeline_time(m_end, warps)
+                badge_text = f"🐢 {speed_val:.2f}x (+{dur:.1f}s)"
+            else:
+                anchor = float(w.get("time", 0.0))
+                t_end = TimeWarpService.media_to_timeline_time(anchor, warps)
+                t_start = max(0.0, t_end - dur)
+                badge_text = f"⏸ +{dur:.1f}s"
+            spans.append({
+                "id": w.get("id", ""),
+                "type": w_type,
+                "t_start": round(t_start, 3),
+                "t_end": round(t_end, 3),
+                "duration": dur,
+                "speed": speed_val,
+                "badge_text": badge_text,
+                "segment_index": w.get("segment_index"),
+            })
+        return spans
 
     # ---- Legacy API (drop-in replacement for existing TimelineWidget) ----
 
@@ -1391,6 +1435,7 @@ class EditorTimeline(QGraphicsView):
             # playback never decodes video or reads audio samples.
             if track.type == LayerType.VIDEO:
                 self._draw_video_thumbnails(painter, x, bar_y, w, bar_h, view_w)
+                self._draw_video_timewarp_overlays(painter, x, bar_y, w, bar_h, view_w)
             elif track.type == LayerType.AUDIO:
                 self._draw_waveform(painter, x, bar_y, w, bar_h, view_w)
             if is_selected and track.type in (LayerType.VIDEO, LayerType.AUDIO):
@@ -1508,6 +1553,88 @@ class EditorTimeline(QGraphicsView):
                 painter.drawLine(block_right, int(y + 4), block_right, int(y + 4 + target_h))
         painter.restore()
 
+    def _draw_video_timewarp_overlays(
+        self, painter: QPainter, x: int, y: float, w: int, h: float, view_w: int
+    ) -> None:
+        spans = self.compute_warp_timeline_spans()
+        if not spans or self._duration <= 0.0 or h <= 8:
+            return
+        pps = max(0.001, self.pixels_per_second)
+        scroll_x = self.horizontalScrollBar().value() if self.horizontalScrollBar() else 0
+
+        painter.save()
+        clip_left = max(0, x)
+        clip_right = min(view_w, x + w)
+        if clip_right <= clip_left:
+            painter.restore()
+            return
+        painter.setClipRect(QRectF(clip_left, y, clip_right - clip_left, h))
+
+        for span in spans:
+            t_start = span["t_start"]
+            t_end = span["t_end"]
+            w_type = span["type"]
+            px_start = self.CONTENT_LEFT_PAD + int(round(t_start * pps)) - scroll_x
+            px_end = self.CONTENT_LEFT_PAD + int(round(t_end * pps)) - scroll_x
+            px_w = max(4, px_end - px_start)
+
+            if px_end < 0 or px_start > view_w:
+                continue
+
+            rect = QRectF(px_start, y + 2, px_w, max(4.0, h - 4))
+
+            if w_type == "slow":
+                fill_color = QColor(139, 92, 246, 65)
+                border_color = QColor(167, 139, 250, 200)
+                hatch_color = QColor(196, 181, 253, 40)
+                badge_bg = QColor(67, 24, 115, 220)
+                badge_fg = QColor("#e9d5ff")
+            else:
+                fill_color = QColor(6, 182, 212, 65)
+                border_color = QColor(45, 212, 191, 200)
+                hatch_color = QColor(110, 231, 214, 40)
+                badge_bg = QColor(14, 66, 80, 220)
+                badge_fg = QColor("#a7f3d0")
+
+            painter.fillRect(rect, fill_color)
+
+            hatch_brush = QBrush(hatch_color, Qt.BDiagPattern)
+            painter.fillRect(rect, hatch_brush)
+
+            painter.setPen(QPen(border_color, 1.5))
+            painter.drawLine(int(px_start), int(y + 2), int(px_end), int(y + 2))
+            painter.drawLine(int(px_start), int(y + h - 2), int(px_end), int(y + h - 2))
+
+            painter.setPen(QPen(QColor(255, 255, 255, 230), 2))
+            painter.drawLine(int(px_start), int(y), int(px_start), int(y + h))
+            painter.drawLine(int(px_end), int(y), int(px_end), int(y + h))
+
+            if px_w >= 26:
+                badge_text = span["badge_text"]
+                font = QFont("Segoe UI", 7, QFont.Bold)
+                painter.setFont(font)
+                text_rect = painter.fontMetrics().boundingRect(badge_text)
+                pill_w = text_rect.width() + 8
+                pill_h = 15
+                if px_w < pill_w:
+                    short_text = f"🐢 {span['speed']:.2f}x" if w_type == "slow" else f"⏸ +{span['duration']:.1f}s"
+                    text_rect = painter.fontMetrics().boundingRect(short_text)
+                    if px_w >= text_rect.width() + 6:
+                        badge_text = short_text
+                        pill_w = text_rect.width() + 6
+                    else:
+                        continue
+                pill_rect = QRectF(px_start + 3, y + 4, pill_w, pill_h)
+                pill_path = QPainterPath()
+                pill_path.addRoundedRect(pill_rect, 3, 3)
+                painter.fillPath(pill_path, badge_bg)
+                painter.setPen(QPen(border_color, 1))
+                painter.drawPath(pill_path)
+                painter.setPen(badge_fg)
+                painter.drawText(pill_rect, Qt.AlignCenter, badge_text)
+
+        painter.restore()
+
     def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False, force_subtitle_color: bool = False, force_subtitle_track: bool = False, hide_label: bool = False):
         # Every subtitle bar (DubSubtitleLayer, SubtitleLayer, or any
         # layer drawn on the TS1 track) uses the exact same fill +
@@ -1571,10 +1698,16 @@ class EditorTimeline(QGraphicsView):
 
         # Check for video time-warp / freeze frame extension
         extended_duration = 0.0
+        warp_type = "freeze"
+        warp_speed = None
         if isinstance(layer_metadata, dict):
             extended_duration = float(layer_metadata.get("extended_duration", 0.0) or 0.0)
+            warp_type = layer_metadata.get("warp_type", warp_type)
+            warp_speed = layer_metadata.get("warp_speed", warp_speed)
             if extended_duration <= 0.0:
                 extended_duration = float(segment_metadata.get("extended_duration", 0.0) or 0.0)
+                warp_type = segment_metadata.get("warp_type", warp_type)
+                warp_speed = segment_metadata.get("warp_speed", warp_speed)
         if extended_duration <= 0.0:
             extended_duration = float(getattr(layer, "extended_duration", 0.0) or 0.0)
 
@@ -1620,25 +1753,34 @@ class EditorTimeline(QGraphicsView):
             painter.setPen(QPen(border, 1))
             painter.drawPath(base_path)
 
-            # Draw extended freeze tail with distinct cyan-teal hatched pattern
+            # Draw extended tail with distinct pattern: purple for slow, cyan for freeze
             ext_path = QPainterPath()
             ext_path.addRoundedRect(ext_rect, 4, 4)
-            ext_fill = QColor(14, 66, 80)
-            ext_border = QColor(20, 115, 135)
+            if warp_type == "slow":
+                ext_fill = QColor(76, 29, 149)
+                ext_border = QColor(139, 92, 246)
+                hatch_brush = QBrush(QColor(196, 181, 253, 50), Qt.BDiagPattern)
+                fg_color = QColor("#e9d5ff")
+                sp_str = f"{float(warp_speed):.2f}x" if warp_speed else "slow"
+                badge_text = f"🐢 {sp_str}" if w_ext < 50 else f"🐢 {sp_str} (+{extended_duration:.1f}s)"
+            else:
+                ext_fill = QColor(14, 66, 80)
+                ext_border = QColor(20, 115, 135)
+                hatch_brush = QBrush(QColor(110, 231, 214, 50), Qt.BDiagPattern)
+                fg_color = QColor("#a7f3d0")
+                badge_text = f"⏸ +{extended_duration:.1f}s" if w_ext >= 50 else f"+{extended_duration:.1f}s"
+
             painter.fillPath(ext_path, ext_fill)
-            # Hatch overlay
-            hatch_brush = QBrush(QColor(110, 231, 214, 50), Qt.BDiagPattern)
             painter.fillPath(ext_path, hatch_brush)
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(ext_border, 1))
             painter.drawPath(ext_path)
 
-            # Draw freeze icon/duration on extended tail
+            # Draw icon/duration on extended tail
             if w_ext >= 24:
-                painter.setPen(QColor("#a7f3d0"))
+                painter.setPen(fg_color)
                 font_ext = QFont("Segoe UI", 7, QFont.Bold)
                 painter.setFont(font_ext)
-                badge_text = f"⏸ +{extended_duration:.1f}s" if w_ext >= 50 else f"+{extended_duration:.1f}s"
                 painter.drawText(ext_rect, Qt.AlignCenter, badge_text)
         elif excess_voice > 0.05:
             w_overflow = int(round(excess_voice * self.pixels_per_second))

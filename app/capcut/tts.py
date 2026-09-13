@@ -66,6 +66,9 @@ def list_capcut_voices() -> list[dict]:
         d_name = item.get("display_name")
         if not v_type or not d_name:
             continue
+        # Exclude Microsoft Neural voices that CapCut API no longer proxies
+        if "neural" in str(v_type).lower():
+            continue
 
         lan = str(item.get("lan", "vi")).strip().lower()
         res_id = str(item.get("resource_id", "")).strip()
@@ -255,7 +258,10 @@ class CapCutTTSClient:
                     raise RuntimeError("CapCut TTS response missing audio_subtitles")
                 return results
             if status in {"failed", "fail", "error"}:
-                raise RuntimeError(f"CapCut TTS task failed: {cur.get('status')}")
+                err_code = cur.get("err_code")
+                err_msg = cur.get("err_msg") or cur.get("detail_info") or cur.get("status")
+                detail = f"{err_msg} (code {err_code})" if err_code is not None else f"{status}"
+                raise RuntimeError(f"CapCut TTS task failed: {detail}")
             time.sleep(poll)
 
         raise TimeoutError(f"CapCut TTS task timed out after {actual_timeout:.0f} seconds")
@@ -277,6 +283,23 @@ def synthesize_capcut_tts_wav_16k_mono(
     if not clean_text:
         raise ValueError("Text to synthesize is empty.")
 
+    clean_voice = voice_id.replace("capcut:", "").strip()
+
+    # Route Microsoft Edge Neural voices to Edge TTS directly
+    if "neural" in clean_voice.lower():
+        try:
+            from app.tts_processor import edge_tts_to_wav_16k_mono
+        except ImportError:
+            from tts_processor import edge_tts_to_wav_16k_mono
+        rate_pct = f"{int(round((speed - 1.0) * 100)):+d}%"
+        return edge_tts_to_wav_16k_mono(
+            text=clean_text,
+            wav_path=wav_path,
+            voice=clean_voice,
+            rate=rate_pct,
+            tmp_dir=tmp_dir,
+        )
+
     rate_str = f"{speed:.2f}"
     if is_cancelled and is_cancelled():
         return ""
@@ -285,7 +308,23 @@ def synthesize_capcut_tts_wav_16k_mono(
 
     session = requests.Session()
     client = CapCutTTSClient(session=session)
-    results = client.synthesize([clean_text], voice=voice_id, rate=rate_str, is_cancelled=is_cancelled)
+    try:
+        results = client.synthesize([clean_text], voice=voice_id, rate=rate_str, is_cancelled=is_cancelled)
+    except RuntimeError as exc:
+        if "TTSInvalidSpeaker" in str(exc) or "40402004" in str(exc):
+            try:
+                from app.tts_processor import edge_tts_to_wav_16k_mono
+                rate_pct = f"{int(round((speed - 1.0) * 100)):+d}%"
+                return edge_tts_to_wav_16k_mono(
+                    text=clean_text,
+                    wav_path=wav_path,
+                    voice=clean_voice,
+                    rate=rate_pct,
+                    tmp_dir=tmp_dir,
+                )
+            except Exception:
+                pass
+        raise
     if is_cancelled and is_cancelled():
         session.close()
         return ""

@@ -34,22 +34,6 @@
   {
     "lan": "vi",
     "lang": "vi-VN",
-    "voice_type": "vi-VN-HoaiMyNeural",
-    "display_name": "Hoai My",
-    "resource_id": "7371666434650280464",
-    "captured_at": "2026-04-16T17:00:10.719561"
-  },
-  {
-    "lan": "vi",
-    "lang": "vi-VN",
-    "voice_type": "vi-VN-NamMinhNeural",
-    "display_name": "Nam Minh",
-    "resource_id": "7371666524727153168",
-    "captured_at": "2026-04-16T17:00:10.719561"
-  },
-  {
-    "lan": "vi",
-    "lang": "vi-VN",
     "voice_type": "BV075_streaming_vibrato_dsp",
     "display_name": "Việt Méo",
     "resource_id": "7569450639810465040",
@@ -340,14 +324,6 @@
     "lang": "th-TH",
     "voice_type": "BV421_thth_streaming_vibrato_dsp",
     "display_name": "ThaiLand 2",
-    "resource_id": "7569439521352338689",
-    "captured_at": "2026-04-16T18:05:52.828530"
-  },
-  {
-    "lan": "en",
-    "lang": "en-US",
-    "voice_type": "en-US-JennyMultilingualNeural",
-    "display_name": "Jenny",
     "resource_id": "7569439521352338689",
     "captured_at": "2026-04-16T18:05:52.828530"
   },

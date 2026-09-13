@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -151,6 +152,19 @@ class MpvGpuLutPrototype:
         self._current_lut_path: str = ""
         self._current_lut_mtime: float = -1.0
         self._shader_opts: Dict[str, str] = {}
+        self._params: Dict[str, float] = {
+            "capcap_brightness": 0.0,
+            "capcap_contrast": 1.0,
+            "capcap_saturation": 1.0,
+            "capcap_gamma": 1.0,
+            "capcap_hue": 0.0,
+            "capcap_temp": 0.0,
+            "capcap_shadow_point": 0.25,
+            "capcap_highlight_point": 0.75,
+            "capcap_lut_strength": 0.0,
+        }
+        self._shader_version: int = 0
+        self._active_shader_path: Optional[Path] = None
 
         if use_gpu_shaders is None:
             self.use_gpu_shaders = os.environ.get("CAPCAP_GPU_COLOR_SHADERS", "0") == "1"
@@ -165,22 +179,55 @@ class MpvGpuLutPrototype:
 
         self._shader_loaded = False
 
-    def ensure_shader_loaded(self) -> bool:
-        """Register preview_color.glsl with mpv if available."""
-        if self._shader_loaded or not self._shader_path or not os.path.exists(self._shader_path):
-            return self._shader_loaded
+    def _build_shader_text(self) -> str:
+        """Build GLSL shader text with active color and LUT parameters substituted as compile-time constants."""
+        if not self._shader_path or not os.path.exists(self._shader_path):
+            return ""
+        with open(self._shader_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        for param, val in self._params.items():
+            pattern = rf"float\s+{re.escape(param)}\s*=\s*[^;]+;"
+            replacement = f"float {param} = {val:.6f};"
+            text = re.sub(pattern, replacement, text)
+        return text
+
+    def _sync_gpu_shader(self) -> None:
+        """Synchronize active shader to MPV via a versioned GLSL file to bypass libplacebo caching and link parameters."""
+        if not self.use_gpu_shaders or not self._shader_path or not os.path.exists(self._shader_path):
+            return
+
+        self._shader_version += 1
+        shader_dir = self.cache.cache_dir / "shaders"
+        shader_dir.mkdir(parents=True, exist_ok=True)
+        new_file = shader_dir / f"preview_color_active_v{self._shader_version}.glsl"
+
+        content = self._build_shader_text()
+        new_file.write_text(content, encoding="utf-8")
+
+        old_file = self._active_shader_path
+        self._active_shader_path = new_file
+
         try:
-            current_shaders = list(getattr(self.player, "glsl_shaders", []) or [])
-            if self._shader_path not in current_shaders:
-                current_shaders.append(self._shader_path)
-                try:
-                    self.player.command("change-list", "glsl-shaders", "append", self._shader_path)
-                except Exception:
-                    self.player["glsl-shaders"] = current_shaders
+            self.player["glsl-shaders"] = [str(new_file)]
             self._shader_loaded = True
-            return True
         except Exception:
+            pass
+
+        # Clean up previous versioned active shader to ensure zero file bloat
+        if old_file and old_file.exists() and old_file != new_file:
+            try:
+                old_file.unlink()
+            except Exception:
+                pass
+
+    def ensure_shader_loaded(self) -> bool:
+        """Register preview_color active shader with mpv if available."""
+        if not self.use_gpu_shaders:
             return False
+        if self._active_shader_path and self._active_shader_path.exists():
+            return True
+        self._sync_gpu_shader()
+        return bool(self._active_shader_path and self._active_shader_path.exists())
 
     def set_color_state(self, state: Optional[dict]) -> None:
         """Update GPU shader parameters for color adjustments directly in-memory."""
@@ -216,6 +263,17 @@ class MpvGpuLutPrototype:
         shadow_pt = max(0.0, min(0.45, 0.25 + sh / 100.0 * 0.18))
         highlight_pt = max(0.55, min(1.0, 0.75 + hl / 100.0 * 0.18))
 
+        self._params.update({
+            "capcap_brightness": brightness_val,
+            "capcap_contrast": contrast_val,
+            "capcap_saturation": saturation_val,
+            "capcap_gamma": gamma_val,
+            "capcap_hue": hue_val,
+            "capcap_temp": temp_val,
+            "capcap_shadow_point": shadow_pt,
+            "capcap_highlight_point": highlight_pt,
+        })
+
         self._shader_opts.update({
             "capcap_brightness": f"{brightness_val:.4f}",
             "capcap_contrast": f"{contrast_val:.4f}",
@@ -227,7 +285,6 @@ class MpvGpuLutPrototype:
             "capcap_highlight_point": f"{highlight_pt:.4f}",
         })
 
-        self.ensure_shader_loaded()
         try:
             current_opts = dict(getattr(self.player, "glsl_shader_opts", {}) or {})
             current_opts.update(self._shader_opts)
@@ -235,12 +292,14 @@ class MpvGpuLutPrototype:
         except Exception:
             pass
 
+        self._sync_gpu_shader()
+
     def apply(self, lut_path: str, strength_percent: float) -> str:
         """Apply 3D LUT.
         
         If use_gpu_shaders is False (default): uses the legacy blended .cube path.
         If use_gpu_shaders is True (opt-in): uploads LUT once (reloading on mtime change)
-        and controls blend via GPU shader parameters without writing files.
+        and controls blend via GPU shader parameters without writing .cube files.
         """
         lut_path = str(lut_path or "").strip()
         try:
@@ -281,7 +340,7 @@ class MpvGpuLutPrototype:
             except Exception:
                 pass
 
-        self.ensure_shader_loaded()
+        self._params["capcap_lut_strength"] = strength
         self._shader_opts["capcap_lut_strength"] = f"{strength:.4f}"
         try:
             current_opts = dict(getattr(self.player, "glsl_shader_opts", {}) or {})
@@ -290,6 +349,7 @@ class MpvGpuLutPrototype:
         except Exception:
             pass
 
+        self._sync_gpu_shader()
         return abs_lut
 
     def clear(self) -> None:
@@ -303,6 +363,7 @@ class MpvGpuLutPrototype:
             self._current_lut_mtime = -1.0
 
         if self.use_gpu_shaders:
+            self._params["capcap_lut_strength"] = 0.0
             self._shader_opts["capcap_lut_strength"] = "0.0"
             try:
                 current_opts = dict(getattr(self.player, "glsl_shader_opts", {}) or {})
@@ -310,3 +371,14 @@ class MpvGpuLutPrototype:
                 self.player["glsl-shader-opts"] = current_opts
             except Exception:
                 pass
+            self._sync_gpu_shader()
+
+    def cleanup(self) -> None:
+        """Clean up active shader resources on player close."""
+        if self._active_shader_path and self._active_shader_path.exists():
+            try:
+                self._active_shader_path.unlink()
+            except Exception:
+                pass
+            self._active_shader_path = None
+

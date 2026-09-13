@@ -80,11 +80,15 @@ vec4 hook() {
 float capcap_lut_strength = 0.0;
 
 vec4 hook() {
+    if (capcap_lut_strength <= 0.0001) {
+        return PRE_LUT_tex(PRE_LUT_pos);
+    }
     vec4 lut_color = HOOKED_tex(HOOKED_pos);
-    if (capcap_lut_strength <= 0.001) {
+    if (capcap_lut_strength >= 0.9999) {
         return lut_color;
     }
     vec4 pre_color = PRE_LUT_tex(PRE_LUT_pos);
     float s = clamp(capcap_lut_strength, 0.0, 1.0);
     return mix(pre_color, lut_color, s);
 }
+

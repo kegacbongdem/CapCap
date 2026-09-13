@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 # Ensure project root and app are in sys.path
@@ -178,9 +179,11 @@ DOMAIN_MAX 1.0 1.0 1.0
         for tick in range(1, 101):
             prototype.apply(lut_path, float(tick))
 
-        # Verify zero intermediate .cube files generated
-        current_files = set(os.listdir(self.temp_dir))
-        self.assertEqual(len(current_files - initial_files), 0)
+        # Verify zero intermediate .cube files generated and at most 1 active GLSL file
+        cube_files = [f for f in os.listdir(self.temp_dir) if f.endswith(".cube")]
+        self.assertEqual(set(cube_files) - initial_files, set(), "Opt-in GPU shader mode must not generate intermediate .cube files")
+        glsl_files = list(Path(self.temp_dir).rglob("*.glsl"))
+        self.assertLessEqual(len(glsl_files), 1, "At most 1 active GLSL file at any time")
 
         # Verify uploaded once
         lut_set_calls = [
@@ -432,9 +435,14 @@ DOMAIN_MAX 1.0 1.0 1.0
             img_0 = np.array(Image.open(shot_0))[..., :3]
             self.assertAlmostEqual(float(np.mean(img_0[32, 32])), 100.0, delta=2.0)
 
-            # 2. 50% strength -> updates shader opts in-place
+            # 2. 50% strength -> updates shader opts and renders blended pixel (~116)
             proto.apply(lut_path, 50.0)
-            time.sleep(0.1)
+            time.sleep(0.15)
+            shot_50 = os.path.join(self.temp_dir, "shader_shot_50.png")
+            player.screenshot_to_file(shot_50)
+            img_50 = np.array(Image.open(shot_50))[..., :3]
+            mean_50 = float(np.mean(img_50[32, 32]))
+            self.assertAlmostEqual(mean_50, 116.0, delta=2.0)
             opts = dict(getattr(player, "glsl_shader_opts", {}) or {})
             self.assertEqual(opts.get("capcap_lut_strength"), "0.5000")
 
@@ -533,7 +541,12 @@ DOMAIN_MAX 1.0 1.0 1.0
         self.assertLessEqual(curves_mae, 0.005, f"Curves MAE {curves_mae:.6f} exceeded bound")
         self.assertLessEqual(curves_p99, 0.015, f"Curves p99 {curves_p99:.6f} exceeded bound")
 
-        # Test 2: Temperature & Brightness/Contrast measured bounds on multi-color gradient
+        # Test 2: Multi-color state (Color adjustments + LUT 50% blend)
+        lut_path = self._create_cube_file(
+            "LUT_3D_SIZE 2\n0.2 0.2 0.2\n1.0 0.2 0.2\n0.2 1.0 0.2\n1.0 1.0 0.2\n"
+            "0.2 0.2 1.0\n1.0 0.2 1.0\n0.2 1.0 1.0\n1.0 1.0 1.0\n",
+            "gradient_test.cube"
+        )
         full_state = {
             "brightness": 10.0,
             "contrast": 12.0,
@@ -543,6 +556,8 @@ DOMAIN_MAX 1.0 1.0 1.0
             "temperature": 10.0,
             "highlights": -10.0,
             "shadows": 10.0,
+            "lut_path": lut_path,
+            "lut_strength": 0.5,
         }
         full_chain = build_video_filter_chain(full_state)
         full_out = os.path.join(self.temp_dir, "ff_full.png")
@@ -553,6 +568,87 @@ DOMAIN_MAX 1.0 1.0 1.0
         ff_full = np.array(Image.open(full_out))[..., :3] / 255.0
         self.assertEqual(ff_full.shape, (h, w, 3))
         self.assertTrue(np.all(np.isfinite(ff_full)))
+
+        # Test 3: Real GPU MPV render vs FFmpeg reference on multi-color gradient
+        player = self._create_mpv_player()
+        try:
+            player.pause = True
+            proto = MpvGpuLutPrototype(player, self.temp_dir, use_gpu_shaders=True)
+            player.play(vpath)
+            time.sleep(0.3)
+
+            # Real GPU Curves parity vs FFmpeg curves filter
+            proto.clear()
+            proto.set_color_state(curves_state)
+            time.sleep(0.15)
+            mpv_curves_out = os.path.join(self.temp_dir, "mpv_curves_gpu.png")
+            player.screenshot_to_file(mpv_curves_out)
+            mpv_curves = np.array(Image.open(mpv_curves_out))[..., :3] / 255.0
+
+            diff_curves_gpu = np.abs(mpv_curves - ff_curves)
+            inner_curves = np.concatenate([
+                diff_curves_gpu[5:15, 10:110],
+                diff_curves_gpu[25:35, 10:110],
+                diff_curves_gpu[45:55, 10:110],
+                diff_curves_gpu[65:75, 10:110],
+            ])
+            gpu_curves_mae = float(np.mean(inner_curves))
+            gpu_curves_p99 = float(np.percentile(inner_curves, 99))
+            self.assertLessEqual(gpu_curves_mae, 0.010, f"Real GPU Curves MAE {gpu_curves_mae:.6f} exceeded bound")
+            self.assertLessEqual(gpu_curves_p99, 0.025, f"Real GPU Curves p99 {gpu_curves_p99:.6f} exceeded bound")
+
+            # Real GPU LUT 50% blend parity vs FFmpeg blend filter
+            lut_state = {"lut_path": lut_path, "lut_strength": 0.5}
+            ff_lut_chain = build_video_filter_chain(lut_state)
+            ff_lut_out = os.path.join(self.temp_dir, "ff_lut50.png")
+            subprocess.run(
+                ["ffmpeg", "-y", "-ss", "0.1", "-i", vpath, "-vf", ff_lut_chain, "-vframes", "1", ff_lut_out],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+            ff_lut = np.array(Image.open(ff_lut_out))[..., :3] / 255.0
+
+            proto.clear()
+            proto.apply(lut_path, 50.0)
+            time.sleep(0.15)
+            mpv_lut_out = os.path.join(self.temp_dir, "mpv_lut50_gpu.png")
+            player.screenshot_to_file(mpv_lut_out)
+            mpv_lut = np.array(Image.open(mpv_lut_out))[..., :3] / 255.0
+
+            diff_lut_gpu = np.abs(mpv_lut - ff_lut)
+            inner_lut = np.concatenate([
+                diff_lut_gpu[5:15, 10:110],
+                diff_lut_gpu[25:35, 10:110],
+                diff_lut_gpu[45:55, 10:110],
+                diff_lut_gpu[65:75, 10:110],
+            ])
+            gpu_lut_mae = float(np.mean(inner_lut))
+            gpu_lut_p99 = float(np.percentile(inner_lut, 99))
+            self.assertLessEqual(gpu_lut_mae, 0.012, f"Real GPU LUT 50% MAE {gpu_lut_mae:.6f} exceeded bound")
+            self.assertLessEqual(gpu_lut_p99, 0.030, f"Real GPU LUT 50% p99 {gpu_lut_p99:.6f} exceeded bound")
+
+            # Real GPU Full composite adjustment parity bounds
+            proto.set_color_state(full_state)
+            proto.apply(lut_path, 50.0)
+            time.sleep(0.15)
+            mpv_full_out = os.path.join(self.temp_dir, "mpv_full_gpu.png")
+            player.screenshot_to_file(mpv_full_out)
+            mpv_full = np.array(Image.open(mpv_full_out))[..., :3] / 255.0
+            self.assertEqual(mpv_full.shape, (h, w, 3))
+            self.assertTrue(np.all(np.isfinite(mpv_full)))
+
+            diff_full_gpu = np.abs(mpv_full - ff_full)
+            inner_full = np.concatenate([
+                diff_full_gpu[5:15, 10:110],
+                diff_full_gpu[25:35, 10:110],
+                diff_full_gpu[45:55, 10:110],
+                diff_full_gpu[65:75, 10:110],
+            ])
+            gpu_full_mae = float(np.mean(inner_full))
+            gpu_full_p99 = float(np.percentile(inner_full, 99))
+            self.assertLessEqual(gpu_full_mae, 0.060, f"Real GPU Full composite MAE {gpu_full_mae:.6f} exceeded bound")
+            self.assertLessEqual(gpu_full_p99, 0.200, f"Real GPU Full composite p99 {gpu_full_p99:.6f} exceeded bound")
+        finally:
+            player.terminate()
 
 
 if __name__ == "__main__":

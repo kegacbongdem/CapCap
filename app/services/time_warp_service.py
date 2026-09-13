@@ -5,8 +5,7 @@ from typing import Any
 
 
 class TimeWarpService:
-    """Service to manage non-destructive video time-warps (freeze frame / extension)
-
+    """Service to manage non-destructive video time-warps (freeze frame / slow motion / extension)
     and timeline ripple-shifting.
     """
 
@@ -16,14 +15,25 @@ class TimeWarpService:
         duration: float,
         warp_type: str = "freeze",
         segment_index: int | None = None,
+        speed: float = 1.0,
+        media_start: float | None = None,
+        media_end: float | None = None,
         note: str = "",
     ) -> dict[str, Any]:
+        m_start = round(float(media_start if media_start is not None else time), 3)
+        m_end = round(float(media_end if media_end is not None else time), 3)
+        speed_val = round(float(speed or 1.0), 3)
+        if warp_type == "freeze":
+            speed_val = 1.0
         return {
             "id": f"warp_{uuid.uuid4().hex[:8]}",
             "time": round(float(time), 3),
             "duration": round(float(duration), 3),
             "type": warp_type,
             "segment_index": segment_index,
+            "speed": speed_val,
+            "media_start": m_start,
+            "media_end": m_end,
             "note": note,
         }
 
@@ -33,9 +43,10 @@ class TimeWarpService:
         segment_index: int,
         added_duration: float,
         translated_segments: list[dict] | None = None,
+        warp_type: str = "freeze",
     ) -> tuple[dict, list[dict], list[dict] | None]:
         """Extend a segment by added_duration (+Δt) and ripple shift all subsequent segments by +Δt.
-
+        warp_type can be 'freeze' (hold frame at end) or 'slow' (stretch video duration smoothly).
         Returns (new_warp, updated_segments, updated_translated_segments).
         """
         if not segments and translated_segments:
@@ -46,6 +57,7 @@ class TimeWarpService:
             raise IndexError(f"Segment index {segment_index} out of range [0, {len(segments)})")
 
         target_seg = segments[segment_index]
+        orig_start = float(target_seg.get("start", 0.0))
         orig_end = float(target_seg.get("end", 0.0))
         delta = round(float(added_duration), 3)
         if delta <= 0:
@@ -57,18 +69,31 @@ class TimeWarpService:
             float(segments[i].get("extended_duration", 0.0) or 0.0)
             for i in range(segment_index)
         ) + prev_ext
+
+        # Media coordinates on original file (accounting for prior extensions)
+        media_start = round(max(0.0, orig_start - (prior_shift - prev_ext)), 3)
         warp_time = round(max(0.0, orig_end - prior_shift), 3)
+        media_end = warp_time
+
+        orig_dur = max(0.001, media_end - media_start)
+        new_dur = orig_dur + total_ext
+        speed = round(orig_dur / new_dur, 3) if warp_type == "slow" else 1.0
 
         warp = TimeWarpService.create_time_warp(
             time=warp_time,
             duration=total_ext,
-            warp_type="freeze",
+            warp_type=warp_type,
             segment_index=segment_index,
+            speed=speed,
+            media_start=media_start,
+            media_end=media_end,
         )
 
         target_seg["extended_duration"] = total_ext
         target_seg["end"] = round(float(target_seg["end"]) + delta, 3)
         target_seg["time_warp_id"] = warp["id"]
+        target_seg["warp_type"] = warp_type
+        target_seg["warp_speed"] = speed
 
         for i in range(segment_index + 1, len(segments)):
             segments[i]["start"] = round(float(segments[i]["start"]) + delta, 3)
@@ -87,6 +112,8 @@ class TimeWarpService:
             t_seg["extended_duration"] = round(t_prev_ext + delta, 3)
             t_seg["end"] = round(float(t_seg["end"]) + delta, 3)
             t_seg["time_warp_id"] = warp["id"]
+            t_seg["warp_type"] = warp_type
+            t_seg["warp_speed"] = speed
 
             for i in range(segment_index + 1, len(translated_segments)):
                 translated_segments[i]["start"] = round(float(translated_segments[i]["start"]) + delta, 3)
@@ -109,7 +136,6 @@ class TimeWarpService:
         warps: list[dict] | None = None,
     ) -> tuple[float, list[dict], list[dict] | None, list[dict]]:
         """Revert the extension on segment_index, subtracting extended_duration (-Δt)
-
         and ripple shifting all subsequent segments by -Δt.
         Returns (removed_delta, updated_segments, updated_translated_segments, updated_warps).
         """
@@ -140,6 +166,8 @@ class TimeWarpService:
             segments[segment_index]["end"] = round(float(segments[segment_index]["end"]) - delta, 3)
             segments[segment_index]["extended_duration"] = 0.0
             segments[segment_index].pop("time_warp_id", None)
+            segments[segment_index].pop("warp_type", None)
+            segments[segment_index].pop("warp_speed", None)
 
             for i in range(segment_index + 1, len(segments)):
                 segments[i]["start"] = round(max(0.0, float(segments[i]["start"]) - delta), 3)
@@ -157,6 +185,8 @@ class TimeWarpService:
             t_seg["end"] = round(float(t_seg["end"]) - delta, 3)
             t_seg["extended_duration"] = 0.0
             t_seg.pop("time_warp_id", None)
+            t_seg.pop("warp_type", None)
+            t_seg.pop("warp_speed", None)
 
             for i in range(segment_index + 1, len(translated_segments)):
                 translated_segments[i]["start"] = round(max(0.0, float(translated_segments[i]["start"]) - delta), 3)
@@ -178,22 +208,36 @@ class TimeWarpService:
 
     @staticmethod
     def timeline_to_media_time(timeline_time: float, warps: list[dict]) -> float:
-        """Map timeline coordinate (with freezes) back to original media coordinate."""
+        """Map timeline coordinate (with freezes/slow) back to original media coordinate."""
         if not warps:
             return timeline_time
         sorted_warps = sorted(warps, key=lambda w: float(w.get("time", 0.0)))
         accumulated_shift = 0.0
         t = float(timeline_time)
         for w in sorted_warps:
-            anchor = float(w.get("time", 0.0))
+            w_type = w.get("type", "freeze")
             dur = float(w.get("duration", 0.0))
-            warp_start_on_timeline = anchor + accumulated_shift
-            warp_end_on_timeline = warp_start_on_timeline + dur
-            if t < warp_start_on_timeline:
-                return max(0.0, t - accumulated_shift)
-            if warp_start_on_timeline <= t < warp_end_on_timeline:
-                return anchor
-            accumulated_shift += dur
+            if w_type == "slow":
+                m_start = float(w.get("media_start", w.get("time", 0.0)))
+                m_end = float(w.get("media_end", m_start))
+                m_dur = max(0.001, m_end - m_start)
+                warp_start_on_timeline = m_start + accumulated_shift
+                warp_end_on_timeline = warp_start_on_timeline + m_dur + dur
+                if t < warp_start_on_timeline:
+                    return max(0.0, t - accumulated_shift)
+                if warp_start_on_timeline <= t <= warp_end_on_timeline:
+                    speed = float(w.get("speed", m_dur / (m_dur + dur)))
+                    return m_start + (t - warp_start_on_timeline) * speed
+                accumulated_shift += dur
+            else:
+                anchor = float(w.get("time", 0.0))
+                warp_start_on_timeline = anchor + accumulated_shift
+                warp_end_on_timeline = warp_start_on_timeline + dur
+                if t < warp_start_on_timeline:
+                    return max(0.0, t - accumulated_shift)
+                if warp_start_on_timeline <= t < warp_end_on_timeline:
+                    return anchor
+                accumulated_shift += dur
         return max(0.0, t - accumulated_shift)
 
     @staticmethod
@@ -205,15 +249,28 @@ class TimeWarpService:
         accumulated_shift = 0.0
         m = float(media_time)
         for w in sorted_warps:
-            anchor = float(w.get("time", 0.0))
+            w_type = w.get("type", "freeze")
             dur = float(w.get("duration", 0.0))
-            if m < anchor:
-                break
-            accumulated_shift += dur
+            if w_type == "slow":
+                m_start = float(w.get("media_start", w.get("time", 0.0)))
+                m_end = float(w.get("media_end", m_start))
+                m_dur = max(0.001, m_end - m_start)
+                if m < m_start:
+                    break
+                if m_start <= m <= m_end:
+                    speed = float(w.get("speed", m_dur / (m_dur + dur)))
+                    warp_start_on_timeline = m_start + accumulated_shift
+                    return warp_start_on_timeline + (m - m_start) / speed
+                accumulated_shift += dur
+            else:
+                anchor = float(w.get("time", 0.0))
+                if m < anchor:
+                    break
+                accumulated_shift += dur
         return m + accumulated_shift
 
     @staticmethod
-    def build_ffmpeg_freeze_filtergraph(
+    def build_ffmpeg_timewarp_filtergraph(
         video_stream: str,
         warps: list[dict],
         total_media_duration: float,
@@ -221,8 +278,9 @@ class TimeWarpService:
         audio_stream: str | None = None,
     ) -> tuple[str, str] | tuple[str, str, str | None]:
         """Build an FFmpeg complex filter chain that slices the video at each warp point,
-        freezes the frame using 'loop', and concats them back together.
-        If audio_stream is provided (e.g. '0:a'), inserts matching silence pads
+        freezes the frame using 'loop' or slows it down using 'setpts'/'atempo',
+        and concats them back together.
+        If audio_stream is provided (e.g. '0:a'), inserts matching silence pads / atempo
         so audio never desyncs.
         Returns (filter_string, output_video_pad) if audio_stream is None,
         or (filter_string, output_video_pad, output_audio_pad) if audio_stream is given.
@@ -245,45 +303,88 @@ class TimeWarpService:
         clean_a_stream = audio_stream.strip("[]") if audio_stream else ""
 
         for w in valid_warps:
-            warp_time = min(float(w.get("time", 0.0)), total_media_duration)
+            w_type = w.get("type", "freeze")
             dur = float(w.get("duration", 0.0))
-            loop_frames = max(1, int(round(dur * fps)))
 
-            # Normal slice leading to freeze point
-            if warp_time > curr_time:
-                pad_name = f"v_norm_{part_idx}"
+            if w_type == "slow":
+                m_start = min(float(w.get("media_start", w.get("time", 0.0))), total_media_duration)
+                m_end = min(float(w.get("media_end", m_start)), total_media_duration)
+                speed = float(w.get("speed", 1.0))
+                if speed <= 0:
+                    speed = 1.0
+
+                # Normal slice leading to slow segment start
+                if m_start > curr_time:
+                    pad_name = f"v_norm_{part_idx}"
+                    filter_parts.append(
+                        f"[{clean_v_stream}]trim=start={curr_time:.3f}:end={m_start:.3f},setpts=PTS-STARTPTS[{pad_name}]"
+                    )
+                    concat_v_inputs.append(f"[{pad_name}]")
+                    if has_audio:
+                        a_pad_name = f"a_norm_{part_idx}"
+                        filter_parts.append(
+                            f"[{clean_a_stream}]atrim=start={curr_time:.3f}:end={m_start:.3f},asetpts=PTS-STARTPTS[{a_pad_name}]"
+                        )
+                        concat_a_inputs.append(f"[{a_pad_name}]")
+                    part_idx += 1
+
+                # Slow slice: trim [m_start, m_end], setpts=(1/speed)*(PTS-STARTPTS)
+                slow_pad = f"v_slow_{part_idx}"
+                pts_factor = round(1.0 / speed, 3)
                 filter_parts.append(
-                    f"[{clean_v_stream}]trim=start={curr_time:.3f}:end={warp_time:.3f},setpts=PTS-STARTPTS[{pad_name}]"
+                    f"[{clean_v_stream}]trim=start={m_start:.3f}:end={m_end:.3f},setpts={pts_factor:.3f}*(PTS-STARTPTS)[{slow_pad}]"
                 )
-                concat_v_inputs.append(f"[{pad_name}]")
+                concat_v_inputs.append(f"[{slow_pad}]")
 
                 if has_audio:
-                    a_pad_name = f"a_norm_{part_idx}"
+                    a_slow_pad = f"a_slow_{part_idx}"
                     filter_parts.append(
-                        f"[{clean_a_stream}]atrim=start={curr_time:.3f}:end={warp_time:.3f},asetpts=PTS-STARTPTS[{a_pad_name}]"
+                        f"[{clean_a_stream}]atrim=start={m_start:.3f}:end={m_end:.3f},asetpts=PTS-STARTPTS,atempo={speed:.3f}[{a_slow_pad}]"
                     )
-                    concat_a_inputs.append(f"[{a_pad_name}]")
+                    concat_a_inputs.append(f"[{a_slow_pad}]")
 
                 part_idx += 1
+                curr_time = m_end
 
-            # Freeze slice: hold single frame at warp_time
-            freeze_pad = f"v_freeze_{part_idx}"
-            frame_window = 1.0 / max(1.0, fps)
-            trim_end = min(total_media_duration, warp_time + frame_window)
-            filter_parts.append(
-                f"[{clean_v_stream}]trim=start={warp_time:.3f}:end={trim_end:.3f},loop=loop={loop_frames}:size=1:start=0,setpts=PTS-STARTPTS[{freeze_pad}]"
-            )
-            concat_v_inputs.append(f"[{freeze_pad}]")
+            else:  # freeze
+                warp_time = min(float(w.get("time", 0.0)), total_media_duration)
+                loop_frames = max(1, int(round(dur * fps)))
 
-            if has_audio:
-                a_pad_silence = f"a_freeze_{part_idx}"
+                # Normal slice leading to freeze point
+                if warp_time > curr_time:
+                    pad_name = f"v_norm_{part_idx}"
+                    filter_parts.append(
+                        f"[{clean_v_stream}]trim=start={curr_time:.3f}:end={warp_time:.3f},setpts=PTS-STARTPTS[{pad_name}]"
+                    )
+                    concat_v_inputs.append(f"[{pad_name}]")
+
+                    if has_audio:
+                        a_pad_name = f"a_norm_{part_idx}"
+                        filter_parts.append(
+                            f"[{clean_a_stream}]atrim=start={curr_time:.3f}:end={warp_time:.3f},asetpts=PTS-STARTPTS[{a_pad_name}]"
+                        )
+                        concat_a_inputs.append(f"[{a_pad_name}]")
+
+                    part_idx += 1
+
+                # Freeze slice: hold single frame at warp_time
+                freeze_pad = f"v_freeze_{part_idx}"
+                frame_window = 1.0 / max(1.0, fps)
+                trim_end = min(total_media_duration, warp_time + frame_window)
                 filter_parts.append(
-                    f"anullsrc=r=44100:cl=stereo,atrim=end={dur:.3f},asetpts=PTS-STARTPTS[{a_pad_silence}]"
+                    f"[{clean_v_stream}]trim=start={warp_time:.3f}:end={trim_end:.3f},loop=loop={loop_frames}:size=1:start=0,setpts=PTS-STARTPTS[{freeze_pad}]"
                 )
-                concat_a_inputs.append(f"[{a_pad_silence}]")
+                concat_v_inputs.append(f"[{freeze_pad}]")
 
-            part_idx += 1
-            curr_time = warp_time
+                if has_audio:
+                    a_pad_silence = f"a_freeze_{part_idx}"
+                    filter_parts.append(
+                        f"anullsrc=r=44100:cl=stereo,atrim=end={dur:.3f},asetpts=PTS-STARTPTS[{a_pad_silence}]"
+                    )
+                    concat_a_inputs.append(f"[{a_pad_silence}]")
+
+                part_idx += 1
+                curr_time = warp_time
 
         # Remaining tail slice
         if curr_time < total_media_duration:
@@ -314,6 +415,9 @@ class TimeWarpService:
 
         return "; ".join(filter_parts), concat_v_out
 
+    # Backward-compatible alias
+    build_ffmpeg_freeze_filtergraph = build_ffmpeg_timewarp_filtergraph
+
     @staticmethod
     def ripple_shift_timeline_layers(timeline: Any, split_time: float, delta: float) -> None:
         """Non-destructively shift all timeline layers (on visual/effect tracks like Logo, Mask, Blur, Text)
@@ -343,4 +447,4 @@ class TimeWarpService:
                     layer.start = max(0.0, round(start + shift_s, 3))
                     layer.end = max(layer.start + 0.1, round(end + shift_s, 3))
                 elif start < split_s < end:
-                    layer.end = max(start + 0.1, round(end + shift_s, 3))
+                    layer.end = max(layer.start + 0.1, round(end + shift_s, 3))

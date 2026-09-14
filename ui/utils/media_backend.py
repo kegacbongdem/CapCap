@@ -1124,7 +1124,10 @@ class MpvMediaPlayerBackend(QObject):
         self._native_audio_active = bool(ready)
         if ready:
             self.log("[Preview] Native PCM PreviewAudioEngine sink ready and active")
-            if getattr(self, "_last_tracks_snapshot", None) and self._native_audio_engine is not None:
+            gui = getattr(self, "gui", None)
+            if gui and hasattr(gui, "sync_preview_audio_track_to_output"):
+                gui.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
+            elif getattr(self, "_last_tracks_snapshot", None) and self._native_audio_engine is not None:
                 tracks, warps = self._last_tracks_snapshot
                 self._native_audio_engine.set_tracks(tracks, warps)
         else:
@@ -1857,14 +1860,18 @@ class MpvMediaPlayerBackend(QObject):
             v = max(0.0, min(200.0, float(percent))) / 100.0
             self._original_output.setVolume(v)
         except Exception:
-            pass
+            v = 1.0
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            self.set_track_gain("A1 Audio", v, bool(self._mute_original))
 
     def set_dubbed_volume(self, percent):
         try:
             v = max(0.0, min(200.0, float(percent))) / 100.0
             self._dubbed_output.setVolume(v)
         except Exception:
-            pass
+            v = 1.0
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            self.set_track_gain("TS1", v, bool(self._mute_dubbed))
 
     def original_volume(self):
         try:
@@ -1895,10 +1902,16 @@ class MpvMediaPlayerBackend(QObject):
     def set_mute_original(self, muted):
         self._mute_original = bool(muted)
         self._apply_original_mute()
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            v = self.original_volume() / 100.0
+            self.set_track_gain("A1 Audio", v, bool(muted))
 
     def set_mute_dubbed(self, muted):
         self._mute_dubbed = bool(muted)
         self._apply_dubbed_mute()
+        if getattr(self, "_native_audio_active", False) and self._native_audio_engine is not None:
+            v = self.dubbed_volume() / 100.0
+            self.set_track_gain("TS1", v, bool(muted))
 
     def is_original_muted(self):
         return self._mute_original

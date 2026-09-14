@@ -42,9 +42,13 @@ from new_highlight_selector import auto_select_matches
 from video_processor import srt_to_ass
 from audio_mixer import ffprobe_wav_duration
 from utils.display_utils import (
+    apply_application_dark_theme,
+    apply_windows_dark_title_bar as apply_windows_dark_title_bar_impl,
+    build_contrasting_window_icon,
     cleanup_temp_preview_files as cleanup_temp_preview_files_impl,
     clear_log as clear_log_impl,
     log_message as log_message_impl,
+    set_windows_normal_geometry,
     show_error as show_error_impl,
     show_frame_preview_dialog as show_frame_preview_dialog_impl,
     show_processed_files as show_processed_files_impl,
@@ -219,18 +223,16 @@ class VideoTranslatorGUI(QMainWindow):
             title += " (Remote)"
         self.setWindowTitle(title)
         self.settings = QSettings("CapCap", "VideoTranslatorGUI")
+        apply_application_dark_theme(self)
         self.setAcceptDrops(True)
         self.logo_path = asset_path("capcap.png")
         if os.path.exists(self.logo_path):
-            self.setWindowIcon(QIcon(self.logo_path))
-        self.setWindowFlag(Qt.FramelessWindowHint)
+            self.setWindowIcon(build_contrasting_window_icon(self.logo_path, is_dark_bg=True))
         
-        # Start maximized, but keep the window genuinely resizable.  Locking
-        # it to the first monitor's pixel size prevented Qt from adapting the
-        # layout when users moved between laptop/desktop displays or changed
-        # DPI scaling.
+        # Start maximized, but keep the window genuinely resizable.
         self.setWindowState(Qt.WindowMaximized)
         self.setMinimumSize(1024, 640)
+        apply_windows_dark_title_bar_impl(self)
         self._responsive_layout_pending = False
         self._responsive_layout_mode = "desktop"
         self._initial_layout_finalized = False
@@ -898,7 +900,20 @@ class VideoTranslatorGUI(QMainWindow):
         screen = self.screen() or QApplication.primaryScreen()
         geometry = screen.availableGeometry() if screen is not None else None
         if geometry is not None:
-            self.setGeometry(geometry)
+            avail_w = geometry.width()
+            avail_h = geometry.height()
+            normal_w = max(min(avail_w, 1024), min(1600, int(avail_w * 0.85)))
+            normal_h = max(min(avail_h, 640), min(960, int(avail_h * 0.85)))
+            normal_x = geometry.x() + max(0, (avail_w - normal_w) // 2)
+            normal_y = geometry.y() + max(0, (avail_h - normal_h) // 2)
+
+            # Pre-size the window client area directly to maximized bounds so the initial
+            # layout pass produces exact settled dimensions for video_view and splitter.
+            target_h = max(640, avail_h - 23)
+            self.resize(avail_w, target_h)
+            set_windows_normal_geometry(self, normal_x, normal_y, normal_w, normal_h)
+
+        self.setWindowState(Qt.WindowMaximized)
         self.ensurePolished()
         central = self.centralWidget()
         if central is not None:
@@ -916,6 +931,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        apply_windows_dark_title_bar_impl(self)
         if getattr(self, "_initial_layout_finalized", False):
             return
         # Fallback for non-launcher entry points. The normal Launcher flow
@@ -3350,7 +3366,10 @@ class VideoTranslatorGUI(QMainWindow):
         # dubbed sidecar only when the current output mode actually selects
         # it; otherwise a subtitle-only/original preview would needlessly
         # attempt a TTS+Music mix and report "No active audio tracks".
-        is_native_audio = bool(getattr(self.media_player, "_native_audio_active", False))
+        is_native_audio = bool(
+            getattr(self.media_player, "_native_audio_active", False)
+            or getattr(self.media_player, "_native_audio_engine", None) is not None
+        )
         preferred_mode = self._preferred_preview_audio_track_mode()
         selected_mode = str(getattr(self, "_preview_audio_track_mode", "") or preferred_mode).strip().lower()
         if is_native_audio:
@@ -3433,7 +3452,7 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 self.media_player.clear_audio()
 
-            if getattr(self.media_player, "_native_audio_active", False) and hasattr(self.media_player, "set_audio_tracks_snapshot"):
+            if hasattr(self.media_player, "set_audio_tracks_snapshot"):
                 tracks_snapshot = []
                 is_dubbed_mode = getattr(self, "_preview_audio_track_mode", "dubbed") != "original"
                 orig_vol = self._compute_audio_track_volume("A1 Audio", base=100.0) * (10 ** (self._get_audio_track_gain_db("A1 Audio") / 20.0))
@@ -4871,7 +4890,8 @@ class VideoTranslatorGUI(QMainWindow):
             self._enable_post_pipeline_preview_assets(refresh=True)
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
-            QApplication.processEvents()
+            if self.isVisible():
+                QApplication.processEvents()
         # Restore A2 Dub track if TTS was generated
         voice_path = context.get("artifacts", {}).get("voice_vi", "")
         if voice_path and os.path.exists(voice_path) and hasattr(self, "timeline"):
@@ -4956,7 +4976,8 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             if hasattr(self, "sync_preview_audio_track_to_output"):
                 self.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
-                QApplication.processEvents()
+                if self.isVisible():
+                    QApplication.processEvents()
         except Exception:
             pass
         # Stop any active playback so the user re-presses Play after
@@ -16779,7 +16800,7 @@ class VideoTranslatorGUI(QMainWindow):
 
 
 def _relaunch_launcher():
-    from views.launcher import show_launcher, LauncherWindow
+    from views.launcher import show_launcher, LauncherWindow, _get_video_duration
 
     video_path = show_launcher(None)
     QApplication.setQuitOnLastWindowClosed(True)
@@ -16789,34 +16810,24 @@ def _relaunch_launcher():
     LauncherWindow.add_recent(None, video_path)
 
     new_window = VideoTranslatorGUI()
-    new_window.prepare_initial_editor_layout()
     new_window._current_video_path = os.path.abspath(video_path)
-
-    # Show the complete editor UI immediately so all child widgets and borders render
-    # simultaneously as one cohesive window, preventing any detached preview popup.
-    new_window.show()
-    new_window.raise_()
-    new_window.activateWindow()
-    new_window.setFocus()
-    QApplication.processEvents()
-
-    new_window.ensure_media_backend_ready()
     new_window.video_path_edit.setText(video_path)
-    new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
-    QApplication.processEvents()
 
+    # 1. Resolve video dimensions before show so the canvas matches exact video aspect ratio
     if hasattr(new_window, "refresh_video_dimensions"):
         new_window.refresh_video_dimensions(video_path)
-    QApplication.processEvents()
 
+    # 2. Load project state and timeline metadata
     new_window.current_project_state = new_window.ensure_current_project()
     new_window.load_project_context(new_window.current_project_state)
-    QApplication.processEvents()
 
     if hasattr(new_window, "timeline") and hasattr(new_window.timeline, "set_video_source"):
+        dur = 0.0
         try:
-            dur = new_window.media_player.duration() / 1000.0
+            dur = float(_get_video_duration(new_window._current_video_path) or 0.0)
         except Exception:
+            pass
+        if dur <= 0.0:
             dur = 60.0
         new_window.timeline.set_video_source(new_window._current_video_path, dur)
         ensure_tracks = getattr(new_window.timeline, "_ensure_tracks_populated", None)
@@ -16826,10 +16837,37 @@ def _relaunch_launcher():
         if callable(redraw):
             redraw()
     new_window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
-    QApplication.processEvents()
+
+    # 3. Resolve initial layout geometry while hidden so first paint is already settled
+    new_window.prepare_initial_editor_layout()
+
+    # 4. Show the complete editor UI cohesively as one window and paint immediately
+    new_window.show()
+    new_window.raise_()
+    new_window.activateWindow()
+    new_window.setFocus()
+    try:
+        new_window.repaint()
+    except Exception:
+        pass
+
+    # 5. Defer media backend loading slightly so the entire UI paints first on screen
+    # before MPV initializes and renders into the settled video canvas
+    def _deferred_load_media():
+        new_window.ensure_media_backend_ready()
+        new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
+        if hasattr(new_window, "refresh_video_dimensions"):
+            new_window.refresh_video_dimensions(video_path)
+        if hasattr(new_window, "sync_preview_audio_track_to_output"):
+            new_window.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
+        if hasattr(new_window, "_sync_preview_framing_to_player"):
+            new_window._sync_preview_framing_to_player()
+
+    QTimer.singleShot(50, _deferred_load_media)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    apply_application_dark_theme(app)
     window = VideoTranslatorGUI()
     window.show()
     sys.exit(app.exec())

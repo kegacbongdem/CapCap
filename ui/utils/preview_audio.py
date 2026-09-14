@@ -29,6 +29,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtMultimedia import (
+    QAudio,
     QAudioFormat,
     QAudioSink,
     QMediaDevices,
@@ -142,6 +143,7 @@ class _PreviewAudioWorker(QObject):
     def _timeline_pos_ms(self, val: Any) -> None:
         self._timeline_pos_exact_ms = float(val)
 
+    @Slot()
     def init_sink(self) -> None:
         """Initialize QAudioSink with default audio output device format."""
         try:
@@ -294,7 +296,7 @@ class _PreviewAudioWorker(QObject):
         """Start audio playback."""
         if not self._is_playing:
             self._is_playing = True
-            if self._sink and self._sink.bytesFree() <= 0:
+            if self._sink and (self._sink.state() == QAudio.StoppedState or self._io_device is None or self._sink.bytesFree() <= 0):
                 self._io_device = self._sink.start()
             if self._timer and not self._timer.isActive():
                 self._timer.start()
@@ -315,6 +317,7 @@ class _PreviewAudioWorker(QObject):
             self._sink_resampler = None
             if self._sink:
                 self._sink.reset()
+            self._io_device = None
             self._timeline_pos_exact_ms = float(audible_pos)
             self._media_read_sample = int(round(audible_pos * self.internal_sr / 1000.0))
             self.positionChanged.emit(audible_pos)
@@ -336,6 +339,7 @@ class _PreviewAudioWorker(QObject):
         self._sink_resampler = None
         if self._sink:
             self._sink.reset()
+        self._io_device = None
         self.positionChanged.emit(0)
         self.stateChanged.emit(0)
 

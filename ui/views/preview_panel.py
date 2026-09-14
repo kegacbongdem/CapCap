@@ -2062,12 +2062,11 @@ def build_preview_panel(gui):
     gui.preview_timeline_splitter.addWidget(timeline_card)
     gui.preview_timeline_splitter.handle(1).setEnabled(True)
     gui.preview_timeline_splitter.handle(1).setCursor(Qt.SplitVCursor)
-    gui.preview_timeline_splitter.setStretchFactor(0, 45)
-    gui.preview_timeline_splitter.setStretchFactor(1, 55)
+    gui.preview_timeline_splitter.setStretchFactor(0, 60)
+    gui.preview_timeline_splitter.setStretchFactor(1, 40)
 
     # Do not permit an extreme Preview expansion to clip the Timeline card
-    # below a usable viewport. The normal 45/55 layout remains unchanged;
-    # this guard applies only at the lower end of the splitter range.
+    # below a usable viewport.
     gui._constraining_preview_timeline_splitter = False
 
     def _keep_timeline_accessible(_pos, _index):
@@ -2096,10 +2095,30 @@ def build_preview_panel(gui):
 
     def _set_default_preview_timeline_sizes():
         splitter = gui.preview_timeline_splitter
-        available = sum(splitter.sizes())
+        parent = splitter.parent()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().activate()
+        available = sum(splitter.sizes()) or splitter.height()
         if available > 0:
-            preview_height = int(round(available * 0.45))
-            splitter.setSizes([preview_height, max(1, available - preview_height)])
+            min_timeline = int(
+                getattr(gui, "_responsive_timeline_minimum_height", 360) or 360
+            )
+            # Give the preview generous vertical room (~58-60%) so 16:9 and 9:16
+            # videos fill the workspace comfortably, while guaranteeing the
+            # timeline remains fully accessible at or above its minimum height.
+            timeline_height = max(min_timeline, int(round(available * 0.45)))
+            preview_height = max(1, available - timeline_height)
+            splitter.setSizes([preview_height, timeline_height])
+            w0 = splitter.widget(0)
+            if w0 is not None:
+                w0.resize(splitter.width(), preview_height)
+                if w0.layout() is not None:
+                    w0.layout().activate()
+                for idx in range(w0.layout().count() if w0.layout() else 0):
+                    item = w0.layout().itemAt(idx)
+                    child_w = item.widget() if item else None
+                    if child_w and child_w.layout():
+                        child_w.layout().activate()
 
     # MainWindow calls this from its first show event, when the splitter has
     # real dimensions but before the editor's first visible paint.

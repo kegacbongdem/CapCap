@@ -2,7 +2,7 @@ import os
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from .advanced_tabs import build_advanced_group
 from .preview_panel import build_preview_panel
@@ -61,6 +61,7 @@ def build_main_window_ui(gui):
 def _build_header_bar(gui):
     header = _TitleBar()
     header.setObjectName("statusCard")
+    header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     layout = QHBoxLayout(header)
     layout.setContentsMargins(18, 14, 18, 14)
     layout.setSpacing(12)
@@ -131,21 +132,8 @@ def _build_header_bar(gui):
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
     gui.more_actions_btn.setMenu(more_menu)
     layout.addWidget(gui.more_actions_btn)
-    layout.addSpacing(12)
-
-    gui.titlebar_min_btn = QPushButton("—")
-    gui.titlebar_min_btn.setFixedSize(38, 38)
-    gui.titlebar_min_btn.setToolTip("Minimize")
-    gui.titlebar_min_btn.setStyleSheet("QPushButton { background: transparent; color: #a0b4cc; font-size: 16px; font-weight: bold; border-radius: 4px; } QPushButton:hover { background: #223248; color: #fff; }")
-    gui.titlebar_min_btn.clicked.connect(gui.showMinimized)
-    layout.addWidget(gui.titlebar_min_btn)
-
-    gui.titlebar_close_btn = QPushButton("✕")
-    gui.titlebar_close_btn.setFixedSize(38, 38)
-    gui.titlebar_close_btn.setToolTip("Close")
-    gui.titlebar_close_btn.setStyleSheet("QPushButton { background: transparent; color: #a0b4cc; font-size: 14px; font-weight: bold; border-radius: 4px; } QPushButton:hover { background: #e34f4f; color: #fff; }")
-    gui.titlebar_close_btn.clicked.connect(gui.close)
-    layout.addWidget(gui.titlebar_close_btn)
+    gui.titlebar_min_btn = None
+    gui.titlebar_close_btn = None
     return header
 
 

@@ -5,7 +5,7 @@ import re
 import math
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBitmap, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QRegion
+from PySide6.QtGui import QBitmap, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPalette, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
@@ -1431,7 +1431,11 @@ class MpvVideoView(QWidget):
         self.text_overlay = None
         self.video_surface = QWidget(self)
         self.video_surface.setAttribute(Qt.WA_NativeWindow, True)
+        self.video_surface.setAttribute(Qt.WA_NoSystemBackground, True)
         self.video_surface.setAutoFillBackground(True)
+        surface_pal = self.video_surface.palette()
+        surface_pal.setColor(QPalette.Window, QColor(0, 0, 0))
+        self.video_surface.setPalette(surface_pal)
         self.video_surface.setStyleSheet("background-color: black;")
         self.blur_overlay = _BlurRegionOverlayWindow(
             on_region_changed=self.blurRegionChanged.emit,
@@ -1461,10 +1465,9 @@ class MpvVideoView(QWidget):
             "}"
         )
         self.ratio_badge.hide()
-        # Do not call self.video_surface.show() here. It will be shown naturally in
+        # Do not call self.video_surface.show() or winId() here. It will be shown naturally in
         # showEvent() once the main window is displayed, avoiding an orphan native surface.
         self._sync_preview_stack()
-        self.video_surface.winId()
 
 
     def _sync_preview_stack(self):

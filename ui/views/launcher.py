@@ -454,10 +454,10 @@ class LauncherWindow(QDialog):
         self._thumbnail_dir = os.path.join(workspace_root(), "temp", "launcher_thumbs")
 
         from runtime_paths import asset_path
-        from PySide6.QtGui import QIcon
+        from utils.display_utils import build_contrasting_window_icon
         logo = asset_path("capcap.png")
         if os.path.exists(logo):
-            self.setWindowIcon(QIcon(logo))
+            self.setWindowIcon(build_contrasting_window_icon(logo, is_dark_bg=True))
 
         self.setWindowTitle(t("CapCap - Video Translator"))
         self.setMinimumSize(840, 540)
@@ -472,6 +472,11 @@ class LauncherWindow(QDialog):
                 border-radius: 8px;
             }
         """)
+        try:
+            from utils.display_utils import apply_windows_dark_title_bar
+            apply_windows_dark_title_bar(self)
+        except Exception:
+            pass
 
         self._build_ui()
         QTimer.singleShot(0, self._load_recent)

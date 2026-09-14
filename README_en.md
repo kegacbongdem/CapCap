@@ -12,24 +12,30 @@ It supports creating **Vietnamese and English subtitles**, translating video con
 
 ## ✨ Highlights
 
-* Guided workflow: **Prepare → Transcript → Translate → TTS → Export**
-* Speech-to-text transcription with **Faster-Whisper** or **SenseVoice**
-* Extract existing subtitles from video using **OCR**
-* Support for multiple cloud/API translation providers, with **Google Translate** as a fallback
-* Versatile Text-to-Speech engines: **Piper TTS**, **Edge TTS**, **CapCut TTS**, and **VieNeu TTS**
-* **Voice Cloning** support with a rich library of voice samples
-* Optional speaker diarization and per-speaker voice assignment
-* Direct export to **CapCut Draft** for advanced post-production editing
-* Timeline-based editor with support for:
-  * Subtitles
-  * Blur regions
-  * Logos
-  * Masks
-  * Text layers
-  * Selection ranges
-* Layer locking to prevent accidental edits
-* **Fast Preview** for quickly reviewing edits without a full export
-* **Intelligent Export Quality Profiles**: Flexible export options (**Low, Medium, High, Very High**) with automatic hardware acceleration (NVIDIA NVENC / CPU libx264) to optimize file size and render speed
+* **Guided 5-Step Pipeline:** **Prepare → Transcript → Translate → TTS → Export**
+* **Fast & Accurate Speech-to-Text (STT):** Powered by **Faster-Whisper** and **SenseVoice** with GPU (CUDA) and CPU hardware acceleration.
+* **Hardcoded Subtitle Extraction via OCR:** Extract subtitles directly from video frames using **RapidOCR**.
+* **Intelligent AI Translation & Pronoun Consistency Control:**
+  * **Auto-Detect Dialogue Context & Character Profiles:** Automatically analyzes the transcript to identify character genders, social roles, and mandatory two-way address rules (quy tắc xưng hô 2 chiều).
+  * **Interactive Character & Pronoun Review Dialog:** Allows reviewing and editing character rules before translating, or providing **natural-language feedback** (e.g. *"Swap character A and B roles"*, *"Use formal pronouns"*) for AI to re-analyze accurately.
+  * **Rolling Context Ledger:** Maintains confirmed character address rules and preceding dialogue boundary cues across sequential batches for 100% address continuity in long videos.
+  * **Genre-Specific Translation Presets:** Built-in optimized prompts for Short Dramas/Douyin, Romance, Wuxia/Xianxia, Anime/Manga, K-Drama, Vlogs/TikTok, Documentaries, etc.
+  * **Multi-Provider AI Support:** **Google AI Studio (Gemini 2.5/1.5)**, **OpenAI (GPT-4o)**, **DeepSeek**, **Ollama (local offline models)**, with **Google Translate** as a fallback.
+* **Versatile TTS & Voice Cloning:**
+  * Supports **Piper TTS** (offline), **Edge TTS**, **CapCut TTS**, and **VieNeu TTS** (voice cloning).
+  * Optional **Speaker Diarization** to detect unique speakers and assign distinct voices per character.
+* **Multi-Layer Audio Management & Vocal/BGM Separation:**
+  * Split original vocals from background music (BGM). Adjust volume, gain, speed, or mute individual audio tracks for preview without losing the music layer when applying TTS voices.
+* **Smooth Native MPV Media Preview:**
+  * High-performance video and audio playback using **libmpv**, instantly synchronized with the Timeline playhead.
+  * Includes **Fast Preview** (5-second quick sample with all layers rendered) and **Exact Frame Preview**.
+* **Multi-Track Visual Timeline Editor:**
+  * Manage multiple timed layers: Subtitles, Blur regions, Logos, Masks, Text overlays, and Selection ranges.
+  * Supports layer locking, visibility toggling, and range re-transcription (**Alt: OCR/Whisper**).
+* **Intelligent NVENC Hardware Encoding & Quality Profiles:**
+  * 4 export profiles (**Low, Medium, High, Very High**) leveraging **NVIDIA NVENC** GPU acceleration with seamless automatic fallback to CPU `libx264`.
+  * Direct export to **CapCut Draft** projects for advanced post-production.
+* **Optimized Project Loading & Visual Caching:** Asynchronous timeline waveform and thumbnail extraction with interactive loading cards, ensuring a fast and freeze-free experience.
 
 ## 🚀 Upcoming Features
 

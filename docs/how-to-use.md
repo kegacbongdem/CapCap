@@ -12,6 +12,48 @@
 6. Review subtitles, speaker assignments, style, and timed layers in the editor.
 7. Use **Fast Preview** to check a five-second rendered sample, then export.
 
+## AI Translation, Presets & Pronoun Control
+
+CapCap includes an advanced AI dialogue analysis and pronoun consistency framework:
+
+1. **Translation Settings & Presets**:
+   - In the **Translation Settings & Prompt Review** dialog, choose from built-in genre presets:
+     - *Chinese → Vietnamese*: Short Drama / Douyin / Comedy, Modern Romance / Urban, Wuxia / Xianxia / Period Drama.
+     - *Japanese → Vietnamese*: Anime / School / Slice of Life, Isekai / Fantasy / Action.
+     - *Korean → Vietnamese*: K-Drama / Modern / Romance, Hunter / Dungeon / Manhwa.
+     - *English → Vietnamese*: Vlog / Social Media / TikTok, Movies / Casual Dialogue, Documentary / Tech / Business.
+   - Choose your AI provider: **Google AI Studio (Gemini 2.5 Flash / Pro)**, **OpenAI (GPT-4o / GPT-4o-mini)**, **DeepSeek**, or local offline models via **Ollama**.
+
+2. **Auto-Detect Dialogue Context & Pronouns**:
+   - When enabled, CapCap performs an initial dialogue analysis pass over the transcript cues.
+   - It extracts character identities (standard Hán-Việt for Chinese names, Romaji/Latin for Japanese/Korean), genders, social roles (e.g. senior/junior student, boss, stalker/antagonist), and strict **Two-Way Address Rules** (quy tắc xưng hô 2 chiều: who calls who what, e.g. anh - em, mày - tao, tôi - anh).
+
+3. **Interactive Character & Pronoun Review Dialog**:
+   - When **"Review character & pronoun rules before translating"** is checked, CapCap pauses before translating and opens the review dialog.
+   - **Direct manual editing**: You can freely edit character names, gender roles, and pronoun pairs in the text box. The translation engine will strictly adhere to whatever is in this box.
+   - **Góp ý / Re-analyze with Feedback**: If the AI misidentified character roles or genders (e.g. characters are reversed), simply type your guidance into the feedback box (e.g. *"Ngược 2 nhân vật Triều Tịch và Lưu Giai Ngọc rồi, đảo lại"* or *"Triều Tịch là nữ sinh viên năm 1, kẻ bám đuôi xưng mày - tao"*) and click **🔄 Re-analyze with Feedback** (or press **Enter**). The AI will cross-reference the previous draft and regenerate a corrected profile according to your instructions.
+   - **Skip Rules**: Click to proceed with raw translation without enforcing explicit pronoun rules.
+   - **Do not show again**: Check this box to skip future confirmation popups while keeping auto-detection active in the background.
+
+4. **Rolling Context Ledger for Long Videos**:
+   - For long videos exceeding a single batch, CapCap maintains a sequential memory ledger:
+     - Confirmed pronoun rules established in earlier batches are preserved and injected into subsequent batches.
+     - Preceding boundary dialogue cues (tail of the previous batch) are included for speaker tone continuity.
+     - Prevents pronoun flipping (lật ngôi) across scene transitions.
+
+## Audio Track & Background Music (BGM) Management
+
+- **Vocal and Music Separation**: CapCap automatically separates speech (Vocals) and background music (BGM/no_vocals).
+- **Independent Audio Controls**: In the Audio Settings panel, adjust volume, gain, speed, or mute individual tracks for preview.
+- **BGM Preservation**: When generating Vietnamese TTS voice-overs, the original background music track is retained and mixed cleanly beneath the synthesized speech.
+
+## Media Preview (MPV Backend) & Frame Inspector
+
+- **Native MPV Playback**: Smooth, hardware-accelerated playback of video and audio powered by `libmpv` (with seamless Qt Multimedia fallback).
+- **Timeline Synchronization**: Dragging or scrubbing the Timeline playhead seeks the MPV player instantly.
+- **Exact Frame Preview & Large Frame Preview**: Inspect the current frame with pixel precision to review visual overlays, hardcoded subtitle positions, and blur masks.
+- **Fast Preview**: Quickly render a 5-second sample of the current timeline section to check subtitle formatting, audio mix, and visual layers before performing a full export.
+
 ## Transcript editing
 
 - Select a TS1 segment to edit its text, timing, speaker, or voice speed in the Subtitle Inspector.

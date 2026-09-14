@@ -12,24 +12,30 @@ CapCap hỗ trợ tạo **phụ đề tiếng Việt và tiếng Anh**, dịch n
 
 ## ✨ Điểm nổi bật
 
-* Quy trình xử lý trực quan theo từng bước: **Chuẩn bị → Chép lời → Dịch → TTS → Xuất video**
-* Chuyển giọng nói thành văn bản với **Faster-Whisper** hoặc **SenseVoice**
-* Trích xuất phụ đề có sẵn trong video bằng **OCR**
-* Hỗ trợ nhiều dịch vụ dịch thuật qua Cloud/API, với **Google Translate** làm phương án dự phòng
-* Hỗ trợ tạo giọng đọc đa dạng: **Piper TTS**, **Edge TTS**, **CapCut TTS** và **VieNeu TTS**
-* Tính năng **Voice Cloning** (nhân bản giọng nói) và thư viện mẫu giọng đọc phong phú
-* Tùy chọn nhận diện người nói (Speaker Diarization) và gán giọng đọc riêng cho từng người
-* Hỗ trợ xuất trực tiếp sang **CapCut Draft** để tiếp tục hậu kỳ và chỉnh sửa nâng cao
-* Timeline biên tập với nhiều loại lớp nội dung:
-  * Phụ đề
-  * Vùng làm mờ
-  * Logo
-  * Mặt nạ
-  * Văn bản
-  * Vùng chọn
-* Hỗ trợ khóa lớp để tránh chỉnh sửa ngoài ý muốn
-* **Fast Preview** giúp xem nhanh kết quả mà không cần xuất toàn bộ video
-* **Tùy chọn chất lượng xuất thông minh**: Hỗ trợ nhiều profile (**Low, Medium, High, Very High**) tự động tối ưu hóa mã hóa phần cứng (NVIDIA NVENC / CPU libx264) giúp tối ưu dung lượng và tốc độ render
+* **Quy trình xử lý trực quan 5 bước:** **Chuẩn bị → Chép lời → Dịch → TTS → Xuất video**
+* **Chuyển giọng nói thành văn bản (STT) siêu tốc & chính xác:** Hỗ trợ **Faster-Whisper** và **SenseVoice** chạy tăng tốc phần cứng GPU (CUDA) hoặc CPU.
+* **Trích xuất phụ đề video bằng OCR:** Nhận diện và bóc tách chữ phụ đề cứng có sẵn trên video bằng **RapidOCR**.
+* **Dịch thuật AI thông minh & Kiểm soát xưng hô chuẩn xác:**
+  * **Tự động nhận diện ngữ cảnh & nhân vật:** Phân tích kịch bản để nhận diện giới tính, vai trò xã hội và thiết lập quy tắc xưng hô 2 chiều bắt buộc.
+  * **Hộp thoại kiểm tra & can thiệp xưng hô:** Cho phép người dùng xem lại, sửa tay trực tiếp hoặc **nhập góp ý bằng lời** (ví dụ: *"Đảo lại vai 2 nhân vật A và B"*, *"Xưng mày - tao với kẻ xấu"*) để AI tự động phân tích lại theo chỉ dẫn.
+  * **Sổ nhớ ngữ cảnh cuộn (Rolling Context Ledger):** Lưu vết các quy tắc xưng hô đã chốt và ngữ cảnh câu thoại liền trước, đảm bảo 100% nhất quán xuyên suốt các video dài nhiều tập.
+  * **Preset dịch thuật theo thể loại:** Tích hợp sẵn prompt cho Phim ngắn/Douyin, Ngôn tình, Cổ trang/Võ hiệp/Tiên hiệp, Anime/Manga, K-Drama, Vlog/TikTok, Tài liệu...
+  * **Hỗ trợ đa dạng nhà cung cấp AI:** **Google AI Studio (Gemini 2.5/1.5)**, **OpenAI (GPT-4o)**, **DeepSeek**, **Ollama (chạy offline local)**, cùng **Google Translate** làm phương án dự phòng.
+* **Tạo giọng đọc (TTS) & Nhân bản giọng nói (Voice Cloning):**
+  * Hỗ trợ **Piper TTS** (offline), **Edge TTS**, **CapCut TTS** và **VieNeu TTS** (hỗ trợ nhân bản giọng đọc tùy chọn).
+  * Nhận diện người nói (**Speaker Diarization**) và gán giọng đọc riêng cho từng nhân vật.
+* **Quản lý âm thanh đa lớp & Tách nhạc nền (BGM / Vocals):**
+  * Tách riêng giọng gốc và nhạc nền (BGM), cho phép tinh chỉnh âm lượng, gain, tốc độ hoặc tắt tiếng từng lớp khi xem trước mà không sợ bị đè mất nhạc nền khi ghép giọng TTS tiếng Việt.
+* **Trình phát & xem trước Native MPV mượt mà:**
+  * Xem trước video và âm thanh với hiệu năng cao bằng **libmpv**, đồng bộ tức thì theo con trỏ Timeline.
+  * Tính năng **Fast Preview** kết xuất nhanh 5 giây và **Exact Frame Preview** kiểm tra khung hình chính xác.
+* **Timeline biên tập đa tầng chuyên nghiệp:**
+  * Quản lý các lớp: Phụ đề, Vùng làm mờ (Blur), Logo, Mặt nạ (Mask), Văn bản (Text), Vùng chọn (Selection Range).
+  * Hỗ trợ khóa lớp, ẩn/hiện lớp, chép lời lại vùng chọn bằng engine khác (**Alt: OCR/Whisper**).
+* **Xuất video thông minh & Tối ưu hóa GPU NVENC:**
+  * Tùy chọn 4 profile chất lượng (**Low, Medium, High, Very High**), tự động tận dụng mã hóa phần cứng **NVIDIA NVENC** và tự động fallback sang CPU `libx264` khi không có card rời.
+  * Xuất trực tiếp sang định dạng **CapCut Draft** để tiếp tục dựng phim chuyên sâu.
+* **Tối ưu hóa nạp video & quản lý bộ đệm:** Nạp cache waveform và video thumbnails ở chế độ nền mượt mà với thẻ trạng thái trực quan, không làm đơ ứng dụng.
 
 ## 🚀 Tính năng sắp tới
 

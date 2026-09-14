@@ -17,11 +17,23 @@
 
 ## Processing notes
 
-- GPU Faster-Whisper uses CUDA when available, with standard inference as the safe path and optional batched inference controls.
-- RapidOCR uses one GPU inference worker to avoid competing CUDA sessions.
-- Video export implements an intelligent two-tier encoding strategy: dynamically selecting NVIDIA NVENC (`h264_nvenc` with p2–p5 presets) when supported, and falling back automatically to CPU `libx264` (with veryfast–slow presets and matched CRF) if NVENC or CUDA drivers are unavailable.
-- Timeline waveforms and thumbnails are generated once, cached per project/video, and reused during editing.
-- Speaker diarization runs only for audio-based transcription and is optional.
+- **AI Translation & Dialogue Context Orchestration**:
+  - Employs a multi-pass pipeline: Pass 1 analyzes the dialogue cues to build a Character Profile and strict Two-Way Address Rules (`learn_dialogue_context`), supporting interactive user feedback and draft re-analysis.
+  - Automatically cleans LaTeX mathematical notation (converting `$\leftrightarrow$`, `$\rightarrow$` to Unicode arrows `↔`, `→`).
+  - Employs `RollingContextLedger` across sequential subtitle batches to ensure pronoun continuity and maintain preceding dialogue context without batch-boundary drift.
+  - Supports Google AI Studio (Gemini 2.5/1.5), OpenAI (GPT-4o), DeepSeek, Ollama (local offline models), and Google Translate fallback.
+- **Media Preview Architecture**:
+  - Primary preview engine uses `libmpv` for high-framerate, hardware-accelerated playback and frame-accurate timeline seeking.
+  - Seamless fallback to Qt Multimedia on systems lacking MPV libraries.
+  - Fast Preview generates an on-the-fly 5-second multitrack composition (video, BGM, TTS audio, subtitles, blur regions, overlays).
+- **GPU Acceleration & CPU Fallback**:
+  - GPU Faster-Whisper uses CUDA when available, with standard inference as the safe path and optional batched inference controls.
+  - RapidOCR uses one GPU inference worker to avoid competing CUDA sessions.
+  - Video export implements an intelligent two-tier encoding strategy: dynamically selecting NVIDIA NVENC (`h264_nvenc` with p2–p5 presets) when supported, and falling back automatically to CPU `libx264` (with veryfast–slow presets and matched CRF) if NVENC or CUDA drivers are unavailable.
+- **Timeline Visuals & Background Caching**:
+  - Timeline waveforms and video thumbnails are generated asynchronously in a non-blocking background thread, cached per project/video, and reused instantly upon project reload.
+- **Speaker Diarization**:
+  - Speaker diarization runs only for audio-based transcription and is optional. Automatically assigns color-coded speaker tags to subtitle segments.
 
 ## References
 

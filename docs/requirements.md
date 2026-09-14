@@ -36,10 +36,13 @@ Copy `.env_example` to `.env` only for manual setup. The active variables are:
 
 | Group | Variables |
 | --- | --- |
-| AI translation | `OPENAI_PROVIDER`, `AI_POLISHER_PROVIDER`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` |
+| AI translation providers | `OPENAI_PROVIDER` (`google_ai_studio`, `openai`, `deepseek`, `ollama`, `google`), `AI_POLISHER_PROVIDER` |
 | Google AI Studio | `GOOGLE_AI_STUDIO_API_KEY`, `GOOGLE_AI_STUDIO_MODEL`, `GOOGLE_AI_STUDIO_BASE_URL` |
+| OpenAI / DeepSeek | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` |
+| Ollama (Offline Local) | `OLLAMA_BASE_URL` (default: `http://localhost:11434/v1`), `OLLAMA_MODEL` |
+| Dialogue Context & Pronouns | `CAPCAP_AUTO_TRANSLATION_CONTEXT` (`1`/`0`), `CAPCAP_REVIEW_TRANSLATION_CONTEXT` (`1`/`0`) |
 | OCR crop | `OCR_SUBTITLE_REGION`, `OCR_SAMPLING_FPS`, optional `OCR_CROP_RATIO`, `OCR_SUBTITLE_RECT` |
 | Remote API | `CAPCAP_REMOTE_API_URL`, `CAPCAP_REMOTE_API_TOKEN`, `CAPCAP_REMOTE_API_HOST`, `CAPCAP_REMOTE_API_PORT`, `CAPCAP_REMOTE_API_TIMEOUT`, `CAPCAP_QUIET` |
 | Optional Whisper tuning | `CAPCAP_WHISPER_DEVICE`, `CAPCAP_WHISPER_GPU_BATCHED`, `CAPCAP_WHISPER_GPU_BATCH_SIZE` |
 
-Subtitle Source is project-local and intentionally is not an environment variable.
+Subtitle Source and Project Preset are project-local and intentionally not environment variables.
